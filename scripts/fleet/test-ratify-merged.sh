@@ -8,6 +8,9 @@
 # usage: sh scripts/fleet/test-ratify-merged.sh
 set -eu
 
+# The projection step below must never run against the real repo from a test.
+EDDA_PROJECTION=off; export EDDA_PROJECTION
+
 cd "$(git rev-parse --show-toplevel)"
 hook=scripts/fleet/ratify-merged.sh
 

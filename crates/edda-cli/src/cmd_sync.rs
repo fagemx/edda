@@ -110,8 +110,8 @@ pub fn execute(
 }
 
 /// `edda sync --from-mirror <dir>` — import decisions from a committed
-/// markdown mirror (GH-671), e.g. `docs/ledger` checked out from git after
-/// another machine ran `scripts/fleet/ledger-sync.sh`.
+/// markdown mirror (GH-671), e.g. `docs/decisions` checked out from git after
+/// another machine ran `scripts/fleet/ratify-merged.sh`.
 fn execute_from_mirror(repo_root: &Path, mirror: &str, dry_run: bool) -> anyhow::Result<()> {
     let mirror_dir = resolve_mirror_dir(repo_root, mirror)?;
     let ledger = edda_ledger::Ledger::open(repo_root)?;
@@ -174,7 +174,7 @@ fn execute_from_mirror(repo_root: &Path, mirror: &str, dry_run: bool) -> anyhow:
 }
 
 /// Resolve the mirror directory: absolute as-is, otherwise relative to the
-/// workspace root (the brief's repo-relative form, `docs/ledger`).
+/// workspace root (the brief's repo-relative form, `docs/decisions`).
 fn resolve_mirror_dir(repo_root: &Path, mirror: &str) -> anyhow::Result<std::path::PathBuf> {
     let candidate = std::path::Path::new(mirror);
     let resolved = if candidate.is_absolute() {
@@ -184,7 +184,7 @@ fn resolve_mirror_dir(repo_root: &Path, mirror: &str) -> anyhow::Result<std::pat
     };
     if !resolved.join("INDEX.md").is_file() {
         anyhow::bail!(
-            "no mirror INDEX.md at {} — run `edda export md --out <dir>` on the source machine first (docs/ledger is the fleet default)",
+            "no mirror INDEX.md at {} — run `edda export md --out <dir>` on the source machine first (docs/decisions is the fleet default)",
             resolved.display()
         );
     }
@@ -206,7 +206,7 @@ fn stale_warning_line(meta: &edda_ledger::sync::MirrorImportMeta) -> String {
         ),
     };
     format!(
-        "⚠ STALE MIRROR: {age} — exported {} by {}. Decisions may be out of date; re-export on the source machine (scripts/fleet/ledger-sync.sh).",
+        "⚠ STALE MIRROR: {age} — exported {} by {}. Decisions may be out of date; re-export on the source machine (scripts/fleet/ratify-merged.sh).",
         f.exported_at.as_deref().unwrap_or("?"),
         f.machine.as_deref().unwrap_or("?"),
     )

@@ -152,8 +152,8 @@ enum Command {
         #[arg(long)]
         from: Option<String>,
         /// Import from a committed markdown mirror directory (GH-671), e.g.
-        /// `edda sync --from-mirror docs/ledger` after another machine ran
-        /// scripts/fleet/ledger-sync.sh. Relative paths resolve against the
+        /// `edda sync --from-mirror docs/decisions` after another machine ran
+        /// scripts/fleet/ratify-merged.sh. Relative paths resolve against the
         /// workspace root.
         #[arg(long = "from-mirror")]
         from_mirror: Option<String>,

@@ -235,16 +235,25 @@ ruling is:
 The cross-machine projection of decisions is a **git-committed mirror**, not a
 network protocol:
 
-- **Write (source machine).** `scripts/fleet/ledger-sync.sh` runs
-  `edda export md --out docs/ledger` and commits only that directory
-  (path-limited commit — unrelated WIP is never swept). Trigger choice:
-  `fleet.ledger-sync-trigger=scheduled-on-4090` — Windows Task Scheduler runs
-  the script periodically on the 4090; it is behavior-tested with a stubbed
-  `edda` against throwaway repos (`scripts/fleet/test-ledger-sync.sh`), never
-  against the production ledger, and the script itself never registers a
-  production Scheduled Task.
+- **Write (source machine).** The ruling fixes the path, the cadence and the
+  commit subject; they are quoted here, not restated. It binds "(1) the export
+  is committed as a generated MIRROR under `docs/decisions/`, every file marked
+  generated-do-not-edit and carrying its source event id" and "(3) regeneration
+  happens at wave close, not per decision ... always in its own commit
+  `chore(ledger): export decision projection @ <ts>`". The trigger that carries
+  it is
+  `fleet.ledger-sync-trigger=import-on-sessionstart-export-at-wave-close-post-merge`:
+  the export runs from the post-merge step `scripts/fleet/ratify-merged.sh`,
+  because decisions become binding at merge (`decision.auto-ratify`), which is
+  the wave-close moment clause (3) asks for. Two constraints that decision
+  measured shape the step: `main` is protected (PR required, `CI Gate` +
+  `Independent Review` required, zero bypass actors), so the projection commit
+  reaches `main` through a PR rather than a direct push; and INDEX.md's
+  `- **Exported at**:` stamp is rewritten on every export, so the tree is
+  always dirty afterwards and the no-op test compares decision *content* with
+  that stamp excluded.
 - **Read (target machine).** After pulling, `edda sync --from-mirror
-  docs/ledger` imports the mirror into the local ledger. Same rule as sqlite
+  docs/decisions` imports the mirror into the local ledger. Same rule as sqlite
   sync (#394): same key with a different value imports **inactive** — merge,
   never overwrite. A decision whose original event already exists locally is
   skipped, so a machine importing its own mirror is a no-op. Ratified
@@ -279,13 +288,13 @@ by **citing the decision key and the machine**:
 1. Name the exact key (e.g. `fleet.merge-authority`) and the machine whose
    ledger is claimed to hold it (e.g. `4090`).
 2. Check the committed mirror of that machine: look up the key under
-   `docs/ledger/decisions/<domain>.md` in a checkout that carries machine's
+   `docs/decisions/decisions/<domain>.md` in a checkout that carries machine's
    mirror push, or run `edda ask <key>` on the machine itself. The INDEX
    stamp tells you how fresh the evidence is (see the 24h threshold above).
 3. **not-found is ledger locality, not an absent ruling.** If the key is not
    in *your* ledger or mirror, that means the ruling lives on another
    machine's ledger, or your mirror checkout is stale — re-export or
-   `edda sync --from-mirror docs/ledger` before concluding anything. It does
+   `edda sync --from-mirror docs/decisions` before concluding anything. It does
    **not** mean the decision was never made. Only after the machine named in
    the claim provably lacks the key (fresh mirror, key absent) is the claim
    refuted.
@@ -312,6 +321,6 @@ Each agent will:
 - **Same machine only** — peer discovery uses local filesystem
 - **Bash bypass** — scope claims apply to Edit/Write tools; `sed` and `mv` in Bash are not checked
 - **Stale heartbeats** — heartbeats older than 120 seconds are considered inactive
-- **Decision mirrors** — the committed mirror under `docs/ledger/` is generated
+- **Decision mirrors** — the committed mirror under `docs/decisions/` is generated
   by `edda export md` (see the section above); hand-edits to it are lost on the
   next export, and the SQLite ledger stays the single source of truth
