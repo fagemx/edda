@@ -6,6 +6,12 @@
 //! bridge while another keeps a copy is the drift this fixture exists to end,
 //! so the test drives each bridge's real `SessionStart` entrypoint against the
 //! same pack input and asserts the protocol comes out byte-identical.
+//!
+//! It lives in the `edda` package rather than beside `render::writeback()`
+//! because the four sibling bridges depend on `edda-bridge-claude`: naming
+//! them there, even as dev-dependencies, is a cycle that `cargo publish
+//! --dry-run --workspace` cannot verify. `edda` already depends on all five,
+//! so the same five entrypoints are reachable with no new manifest edge.
 
 use std::path::Path;
 
