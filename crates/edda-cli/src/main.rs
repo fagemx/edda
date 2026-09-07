@@ -19,6 +19,7 @@ mod cmd_dispatch_acp;
 mod cmd_draft;
 mod cmd_export;
 mod cmd_fleet;
+mod cmd_fleet_order;
 mod cmd_gc;
 mod cmd_group;
 mod cmd_init;
@@ -514,7 +515,7 @@ enum Command {
         #[command(subcommand)]
         cmd: Option<cmd_phase::PhaseCmd>,
     },
-    /// Fleet health and ordering (GH-1014)
+    /// Fleet health and ordering (GH-1014, GH-1015)
     Fleet {
         #[command(subcommand)]
         cmd: cmd_fleet::FleetCmd,
