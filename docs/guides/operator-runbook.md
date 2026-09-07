@@ -133,26 +133,31 @@
     Rust lane 設 `CARGO_TARGET_DIR` 為
     `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2|verifier|verifier-2`。
    lane 的**啟動方式**用 `scripts/fleet/lane-launch.ps1`（見 START HERE；Task Scheduler，不是 nohup，規則見 §六）。
-4. **審查：強引擎直審是預設，watcher lane 是 flash 檔與獨立性來源**
-   （`review.default-path=direct-review-default-shell-reserved-for-flash`，
-   `review.merge-gate=ci-gate-only-independent-review-status-removed`，兩者皆 2026-09-07）。
+4. **審查：強引擎直審是預設；沒有輪詢器**
+   （`review.default-path=direct-review-default-shell-reserved-for-flash`、
+   `review.merge-gate=ci-gate-only-independent-review-status-removed`、
+   `review.watcher=polling-stopped-independent-rounds-dispatched-on-demand`，皆 2026-09-07）。
 
    預設路徑：任一在線的強引擎 session 直接讀 diff、照 `REVIEW.md` 從頭跑到尾、把 §7 判決貼上
    PR，LGTM 且 CI 綠即可合。**不起 lane、不建 review worktree、不做全檔快照。**
-   這條路今天實測每張 PR 約 5–20 分鐘；同一批 PR 的 watcher lane 在 40 分鐘後仍卡在快照階段。
+   這條路今天實測每張 PR 約 5–20 分鐘；同一批 PR 的審查 lane 在 40 分鐘後仍卡在快照階段。
    審查內容一點都沒放寬——`REVIEW.md` 全規則照跑、判決釘 full SHA、每次 push 使前一輪失效、
    合前做窗檢查——省掉的只有排隊。
 
-   `Independent Review` 必要 status 已於同日從 ruleset 移除，合併閘只剩 `CI Gate`；
-   watcher 照跑但**判決降為 advisory**，它死了不再擋任何事。回復路徑是把 context 加回 ruleset。
+   `Independent Review` 必要 status 已於同日從 ruleset 移除，合併閘只剩 `CI Gate`。
+   **watcher 的輪詢已停用**（排程任務 `edda-pr-review-watcher` 設為 Disabled）：它對每一張
+   open PR 無差別自動派 lane，連只改一個 markdown 檔的 docs PR 也照收全額快照稅，
+   這正是樸實流程要拿掉的東西。回復路徑：`Enable-ScheduledTask -TaskName edda-pr-review-watcher`。
 
-   仍然走下面 watcher lane 的兩種情況：(a) flash 引擎執行的單——brief 渲染、`brief-validate`、
-   oracle bundle、資格表、SHADOW 校準整套是它安全上工的前提；(b) 需要一個不是實作者、
-   也不是控制者的獨立判決時（例如控制者自己派的 lane 寫的 PR）。殼的成本只該由需要殼的引擎付。
+   要一份**獨立**判決時（實作者與控制者以外的第三方），用第 5 步的 lane 機制**按需刻意派一條**，
+   不靠輪詢器。值得付這筆錢的兩種情況：(a) flash 引擎執行的單——brief 渲染、`brief-validate`、
+   oracle bundle、資格表、SHADOW 校準整套是它安全上工的前提；(b) 實作者就是控制者的 PR。
+   殼的成本只該由需要殼的引擎付，而且只在真的需要那一次付。
 
-5. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
-   `scripts/pr-review-launch.ps1` 註冊成隱藏排程任務 `edda-pr-review-watcher`）每 60 秒掃 open PR：
-   非 draft、head 沒審過的 PR 在 **3 分鐘內**自動起唯讀審查者（Claude Opus `claude-opus-5`，經
+5. **審查 lane 的機制**（`scripts/pr-review-watch.sh`，由 `scripts/pr-review-launch.ps1` 註冊成隱藏排程
+   任務 `edda-pr-review-watcher`）。**輪詢已停用**——以下是它啟用時的行為，也是按需派一條 lane 時
+   仍然成立的行為：每 60 秒掃 open PR，
+   非 draft、head 沒審過的 PR 在 **3 分鐘內**起唯讀審查者（Claude Opus `claude-opus-5`，經
    `edda dispatch --agent claude` 訂閱運輸——pi/openrouter 到不了 Anthropic；Task Scheduler 隱藏視窗，
    worktree 在 `$EDDA_FLEET_SCRATCH/wt-review-prN`；brief 超過 Windows 32767 字元 spawn 上限時，
    lane 的 fallback 以唯讀工具集 `--allowedTools "Read,Glob,Grep,Bash"` 經 `claude -p` stdin 跑同一份 brief，
