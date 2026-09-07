@@ -504,7 +504,13 @@ enum Command {
     },
     /// Independent SHA-pinned review. Exit: 0 qualified LGTM, 1 changes,
     /// 2 unable to review, 3 unqualified LGTM. JSON is unstable.
+    ///
+    /// With no subcommand this launches a review, exactly as before; the
+    /// subcommands are read-only verbs over reviews already recorded.
+    #[command(args_conflicts_with_subcommands = true)]
     Review {
+        #[command(subcommand)]
+        cmd: Option<cmd_review::ReviewCmd>,
         #[command(flatten)]
         args: cmd_review::ReviewArgs,
     },
@@ -1333,7 +1339,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Plan { cmd } => cmd_plan::run(cmd, &repo_root),
         Command::Conduct { cmd } => cmd_conduct::run_cmd(cmd, &repo_root),
         Command::Dispatch { args } => cmd_dispatch::run(args),
-        Command::Review { args } => cmd_review::run(args, &cwd),
+        Command::Review { cmd, args } => match cmd {
+            Some(cmd) => cmd_review::run_cmd(cmd, &cwd),
+            None => cmd_review::run(args, &cwd),
+        },
         Command::Intake { cmd } => match cmd {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
         },

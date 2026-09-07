@@ -12,7 +12,7 @@
 #        pr-review-watch.sh decide                 (offline helper; TSV on stdin)
 #        pr-review-watch.sh label-verdict <reviewed-sha> <current-head>
 #        pr-review-watch.sh ack-try <pr> <sha> <attempts>
-#        pr-review-watch.sh gate-state                  (offline helper; verdict TSV on stdin)
+#        pr-review-watch.sh gate-state <sha>            (offline helper; verdict TSV on stdin)
 #        pr-review-watch.sh collect-verdicts <pr> <sha> (offline helper; PR comments via gh)
 #
 # Environment:
@@ -67,18 +67,19 @@
 # After the verdict comment, the watcher also posts the "Independent Review"
 # commit status on the REVIEWED sha (never the current head). Its state is the
 # union rule over every §7 verdict comment on that sha plus this round's
-# verdict (see gate_state), so a later LGTM cannot override an earlier
-# Changes Requested on the same sha. Posting reuses the comment's bounded
-# retry path (postfails, POSTFAIL_CAP, review:post-failed) — never best-effort.
+# verdict (`edda review gate`, GH-769; gate_state pipes the comments to it),
+# so a later LGTM cannot override an earlier Changes Requested on the same
+# sha. Posting reuses the comment's bounded retry path (postfails,
+# POSTFAIL_CAP, review:post-failed) — never best-effort.
 #
 # A product round (TRANSPORT=edda-review) carries its verdict in `edda
 # review`'s exit: 1 is Changes Requested and 3 an unqualified LGTM, which the
 # adapter publishes under a `Provisional — …` Verdict line (REVIEW.md §6.4).
 # Both are settled reviews: the comment is posted, the status goes through the
-# union rule (gate_state: a Provisional round is never success on its own — at
-# P0=P1=0 it is pending, with any P0/P1 it stands like any non-qualifying
-# verdict), and a Provisional round gets no review:* label. Neither is a dead
-# verdict for the overload rule (#998).
+# union rule (`edda review gate`: a Provisional round is never success on its
+# own — at P0=P1=0 it is pending, with any P0/P1 it stands like any
+# non-qualifying verdict), and a Provisional round gets no review:* label.
+# Neither is a dead verdict for the overload rule (#998).
 #
 # The watcher NEVER merges. Merge stays behind operator authorization
 # (pr.merge-policy).
@@ -175,34 +176,28 @@ is_full_sha() {
 #   error   — no verdict lines at all.
 # A later LGTM never overrides an earlier Changes Requested on the same sha:
 # while any non-qualifying verdict stands, the answer is failure.
-gate_state() {
-# D8-debt(#769)
-# The whole union rule lives in this one block so it can be lifted in one
-# piece and replaced by `edda review gate <sha>` (exit 0/1/2 mapped to
-# success/failure/error). No other code decides what a verdict means.
-  awk -F'\t' '
-    { sub(/\r$/, "") }
-    /^[[:space:]]*$/ { next }
-    {
-      n++
-      zero = ($2 ~ /^[0-9]+$/ && $2 + 0 == 0 && $3 ~ /^[0-9]+$/ && $3 + 0 == 0)
-      if ($1 == "LGTM" && zero) { ok = 1; next }
-      # An unqualified LGTM (Provisional, REVIEW.md §6.4) at P0=P1=0 is pending:
-      # never success on its own, and once the escalation is adjudicated it
-      # does not hold a later qualified LGTM on the same sha at failure. With
-      # any P0/P1 it is a standing non-qualifying verdict like any other
-      # (§8, GH-742; #1023 round 1).
-      if ($1 == "Provisional" && zero) next
-      bad = 1
-    }
-    END {
-      if (n == 0)   print "error"
-      else if (bad) print "failure"
-      else if (ok)  print "success"
-      else          print "failure"
-    }
-  '
-# /D8-debt
+gate_state() { # $1=reviewed sha; stdin: verdict<TAB>p0<TAB>p1 records
+  # The union rule now lives in the product: `edda review gate` (GH-769).
+  # This function is only the adapter from its exit code to the commit-status
+  # word, so nothing here decides what a verdict means.
+  #
+  # The verdict *source* is a separate debt: the marked block below (GH-671)
+  # still reads verdicts out of the PR's section 7 comments because the ledger
+  # does not yet carry them across machines -- `review_verdict` is not among
+  # the event types the committed mirror imports -- so the facts are piped in
+  # with `--verdicts -`. Once #671 is paid this call drops the flag and the
+  # same verb answers from the ledger.
+  "${EDDA_BIN:-edda}" review gate "$1" --verdicts - >/dev/null 2>&1
+  gate_code=$?
+  # The receipt the operator reads back against the GitHub status: which sha
+  # was judged, and what the gate answered. `log` writes only to $WATCHLOG,
+  # so it cannot contaminate the status word on stdout.
+  log "gate $1 exit $gate_code"
+  case $gate_code in
+    0) echo success ;;
+    1) echo failure ;;
+    *) echo error ;;
+  esac
 }
 
 # D8-debt(#671)
@@ -366,7 +361,7 @@ ack_try() { # $1=pr $2=sha $3=attempts — one attempt.
 case "${1:-}" in
   decide) decide; exit 0 ;;
   label-verdict) label_verdict "${2:-}" "${3:-}"; exit 0 ;;
-  gate-state) gate_state; exit 0 ;;
+  gate-state) gate_state "${2:-}"; exit 0 ;;
   collect-verdicts)
     if [ $# -lt 3 ]; then echo "usage: pr-review-watch.sh collect-verdicts <pr> <reviewed-sha>" >&2; exit 1; fi
     if ! is_full_sha "$3"; then
@@ -596,10 +591,11 @@ mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
 }
 
 # The "Independent Review" commit status for the reviewed sha. The state is
-# the union rule (gate_state) over every §7 verdict comment on that sha plus
-# this round's verdict file (the comment carrying it was posted just before;
-# the union rule makes the duplicate harmless). The description names this
-# round's verdict; unreadable counts render as "?" — never a made-up number.
+# the union rule (`edda review gate`) over every §7 verdict comment on that
+# sha plus this round's verdict file (the comment carrying it was posted
+# just before; the union rule makes the duplicate harmless). The description
+# names this round's verdict; unreadable counts render as "?" — never a
+# made-up number.
 # Returns non-zero WITHOUT posting anything when the sha is not a validated
 # 40-hex value or the comment list is unreadable: a withheld status is
 # retried on the same bounded path as a failed post, never replaced by a
@@ -648,7 +644,7 @@ post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
     return 3
   fi
   prior=$(printf '%s\n' "$comments" | awk -F'\t' '$1 == "LGTM" || $1 == "Changes Requested" || $1 == "Provisional"')
-  state=$(printf '%s\n%s\n' "$prior" "$(verdict_body_lines "$2" < "$3")" | gate_state)
+  state=$(printf '%s\n%s\n' "$prior" "$(verdict_body_lines "$2" < "$3")" | gate_state "$2")
   gh api "repos/$REPO/statuses/$2" \
     -f state="$state" -f context="Independent Review" \
     -f description="$v P0=$p0 P1=$p1" >/dev/null

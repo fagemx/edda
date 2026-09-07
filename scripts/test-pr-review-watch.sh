@@ -167,6 +167,13 @@ cat >"$STUBBIN/edda" <<'EOF'
 echo "edda $*" >>"$EDDA_STUB_LOG"
 case "$*" in
   'dispatch --help') echo '--tools <TOOLS> --exclude-tools <EXCLUDE_TOOLS> --permission-mode <MODE>'; exit 0 ;;
+  'review gate'*)
+    # GH-769: the union rule is the product's now, not this suite's. What the
+    # daemon still owns is exit code -> status state, so the stub answers with
+    # the code the case sets and records what it was handed.
+    cat >>"${EDDA_GATE_STDIN:-/dev/null}"
+    exit "${EDDA_GATE_EXIT:-0}"
+    ;;
   *--agent*claude*)
     [ -n "${DISPATCH_FAIL_PROBE:-}" ] && exit 1
     exit 0
@@ -199,7 +206,8 @@ reset_stubs() {
     unset GH_FAIL_COMMENT_FIRST GH_FAIL_COMMENT_ALWAYS GH_FAIL_EDIT GH_FAIL_HEAD \
           GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE \
           GH_COMMENTS_FILE GH_FAIL_STATUS GH_FAIL_COMMENTS \
-          GH_FILES_FILE GH_FAIL_FILES 2>/dev/null || true
+          GH_FILES_FILE GH_FAIL_FILES \
+          EDDA_GATE_EXIT EDDA_GATE_STDIN 2>/dev/null || true
     rm -f "$EDDA_FLEET_SCRATCH"/review-* 2>/dev/null || true
     : >"$EDDA_FLEET_SCRATCH/review-state.tsv"
     : >"$EDDA_FLEET_SCRATCH/review-acks.tsv"
@@ -412,59 +420,73 @@ expect_label_verdict \
     'aaa111' \
     ''
 
-# --- gate-state: union rule for the Independent Review commit status ----------
-# Input: one verdict per line, `verdict<TAB>p0<TAB>p1` (blank lines ignored).
-# Output, exactly one word: success only when at least one verdict is
-# LGTM P0=0 P1=0 and no other verdict on the input is anything else; failure
-# when any verdict is present and does not qualify (missing or non-numeric
-# counts count as non-zero); error when there are no verdict lines at all.
+# --- gate-state: the adapter from `edda review gate` to the status word ------
+# The union rule itself moved into the product (GH-769) and is tested there
+# (`cmd_review::gate::tests` — the same matrix this file used to carry, case
+# for case). What is left here is the only thing the shell still owns: the
+# mapping from the verb's exit code to the commit-status word. A stub stands
+# in for the verb so this test pins the mapping and nothing else; a stub that
+# re-implemented the union rule would be a third copy of it.
+
+stub_gate() { # $1=exit code the fake verb returns; echoes the stub's directory
+    dir=$(mktemp -d)
+    printf '#!/bin/sh
+exit %s
+' "$1" > "$dir/edda"
+    chmod +x "$dir/edda"
+    printf '%s' "$dir"
+}
 
 expect_gate_state() {
     name=$1
-    expected=$2
-    input=$3
+    code=$2
+    expected=$3
     case_number=$((case_number + 1))
-    if ! actual=$(printf '%b' "$input" | \
-        timeout 60 sh "$root/scripts/pr-review-watch.sh" gate-state); then
-        printf '%s: gate-state exited non-zero\n' "$name" >&2
+    dir=$(stub_gate "$code")
+    actual=$(printf 'LGTM	0	0
+' |         EDDA_BIN="$dir/edda" timeout 60 sh "$root/scripts/pr-review-watch.sh"         gate-state 0000000000000000000000000000000000000000)
+    rc=$?
+    rm -rf "$dir"
+    if [ "$rc" -ne 0 ]; then
+        printf '%s: gate-state exited non-zero
+' "$name" >&2
         return 1
     fi
     if [ "$actual" != "$expected" ]; then
-        printf '%s: expected %s, got %s\n' "$name" "$expected" "$actual" >&2
+        printf '%s: expected %s, got %s
+' "$name" "$expected" "$actual" >&2
         return 1
     fi
 }
 
-expect_gate_state 'no verdict lines at all' 'error' ''
-expect_gate_state 'blank lines only are still no verdicts' 'error' '\n\n'
-expect_gate_state 'one LGTM 0 0' 'success' 'LGTM\t0\t0\n'
-expect_gate_state 'one Changes Requested' 'failure' 'Changes Requested\t0\t3\n'
-expect_gate_state 'a later LGTM does not override an earlier Changes Requested (union rule)' \
-    'failure' \
-    'Changes Requested\t0\t3\nLGTM\t0\t0\n'
-expect_gate_state 'an earlier LGTM does not pre-clear a later Changes Requested' \
-    'failure' \
-    'LGTM\t0\t0\nChanges Requested\t0\t3\n'
-expect_gate_state 'LGTM with P0=1 does not qualify' 'failure' 'LGTM\t1\t0\n'
-expect_gate_state 'LGTM with P1=1 does not qualify' 'failure' 'LGTM\t0\t1\n'
-expect_gate_state 'blank lines mixed in are ignored' 'success' '\nLGTM\t0\t0\n\n\n'
-expect_gate_state 'two qualifying LGTMs are success' 'success' 'LGTM\t0\t0\nLGTM\t0\t0\n'
-expect_gate_state 'a missing count is non-zero, never success' 'failure' 'LGTM\t0\n'
-expect_gate_state 'a non-numeric count is non-zero, never success' 'failure' 'LGTM\tx\ty\n'
-expect_gate_state 'an unknown verdict word is failure' 'failure' 'Needs Discussion\t0\t0\n'
-# REVIEW.md §6.4/§8: an unqualified LGTM (edda review exit 3) is provisional —
-# it never satisfies the gate, even at P0=0 P1=0 (#998).
-expect_gate_state 'a provisional verdict never qualifies' 'failure' 'Provisional\t0\t0\n'
-# A Provisional round stands in the union by its counts (#1023 round 1):
-# at P0=P1=0 it is pending — never success on its own, cleared by a later
-# qualified LGTM on the same sha once the escalation is adjudicated (REVIEW.md
-# §6.4); with any P0/P1 it stands like any other non-qualifying verdict (§8,
-# GH-742), so a later LGTM on that sha cannot turn the gate green.
-expect_gate_state 'a provisional 0/0 is cleared by a later qualified LGTM on the same sha' \
-    'success' 'Provisional\t0\t0\nLGTM\t0\t0\n'
-expect_gate_state 'a provisional round with findings holds a later LGTM at failure' \
-    'failure' 'Provisional\t0\t2\nLGTM\t0\t0\n'
-expect_gate_state 'a provisional round with findings alone is failure' 'failure' 'Provisional\t0\t2\n'
+# The receipt the issue's verify step reads: one line per judgement naming the
+# sha and the gate's exit code, matching the status the daemon then posts.
+expect_gate_receipt() {
+    name=$1
+    code=$2
+    rsha=222233334444555566667777888899990000bbbb
+    dir=$(stub_gate "$code")
+    receipts="$tmp/gate-receipts.log"
+    : >"$receipts"
+    printf 'LGTM\t0\t0\n' | PR_REVIEW_WATCH_LOG="$receipts" EDDA_BIN="$dir/edda" \
+        timeout 60 sh "$root/scripts/pr-review-watch.sh" gate-state "$rsha" >/dev/null
+    rm -rf "$dir"
+    if ! grep -qF "gate $rsha exit $code" "$receipts"; then
+        printf '%s: expected a `gate <sha> exit %s` receipt, got:\n%s\n' \
+            "$name" "$code" "$(cat "$receipts")" >&2
+        return 1
+    fi
+}
+
+expect_gate_state 'exit 0 is the success status' 0 'success'
+expect_gate_state 'exit 1 is the failure status' 1 'failure'
+expect_gate_state 'exit 2 is the error status' 2 'error'
+# Any other exit is an inability to judge, never a pass: a verb that crashed
+# or was not installed must not read as a clean gate.
+expect_gate_state 'an unexpected exit is error, never success' 127 'error'
+expect_gate_receipt 'a passing gate leaves a receipt' 0 || exit 1
+expect_gate_receipt 'a failing gate leaves a receipt' 1 || exit 1
+
 
 # --- collect-verdicts: read the §7 verdict comments pinned to one SHA ---------
 # The fixture holds the OUTPUT of the gh --jq pipeline (sentinel + raw
@@ -580,20 +602,25 @@ expect_collect_badsha 'a 39-hex value is not a sha' '111122223333444455556666777
 expect_collect_badsha 'an uppercase 40-hex value is not a sha' '111122223333444455556666777788889999AAAA'
 expect_collect_badsha 'an alternation is not a sha' "${csha2}\$|${csha1}"
 
-# --- the two debt blocks are exactly their four marker lines (GH-742) ---------
-# The union rule block and the comment-reading block must each be liftable in
-# one piece: two opening markers and two closing markers, nothing else.
+# --- one debt block is left, exactly its two marker lines (GH-742, GH-769) ---
+# The union rule is no longer shell debt -- `edda review gate` owns it -- so its
+# marker must never reappear here. What remains is the comment-reading block,
+# still liftable in one piece: one opening marker, one closing marker, nothing
+# else.
 
 wscript="$root/scripts/pr-review-watch.sh"
-if [ "$(grep -c 'D8-debt' "$wscript")" != "4" ]; then
-    printf 'D8 markers: expected exactly 4 lines (2 open + 2 close), got %s\n' \
+if [ "$(grep -c 'D8-debt(#769)' "$wscript")" != "0" ]; then
+    printf 'D8 markers: the union rule belongs to `edda review gate`, not here\n' >&2
+    exit 1
+fi
+if [ "$(grep -c 'D8-debt' "$wscript")" != "2" ]; then
+    printf 'D8 markers: expected exactly 2 lines (1 open + 1 close), got %s\n' \
         "$(grep -c 'D8-debt' "$wscript")" >&2
     exit 1
 fi
-if [ "$(grep -c '^# D8-debt(#769)' "$wscript")" != "1" ] || \
-   [ "$(grep -c '^# D8-debt(#671)' "$wscript")" != "1" ] || \
-   [ "$(grep -c '^# /D8-debt' "$wscript")" != "2" ]; then
-    printf 'D8 markers: expected one #769 opener, one #671 opener, two closers\n' >&2
+if [ "$(grep -c '^# D8-debt(#671)' "$wscript")" != "1" ] || \
+   [ "$(grep -c '^# /D8-debt' "$wscript")" != "1" ]; then
+    printf 'D8 markers: expected one #671 opener and one closer\n' >&2
     exit 1
 fi
 
@@ -1008,6 +1035,7 @@ fi
 # an earlier Changes Requested on the same sha keeps the union at failure even
 # though this round's verdict is LGTM — the case the whole issue exists for
 reset_stubs
+export EDDA_GATE_EXIT=1   # the gate fails this sha (rule: cmd_review::gate)
 pending_set 42 1 "$sha" 0 0
 printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
@@ -1067,6 +1095,7 @@ fi
 # never computed from this round's verdict file alone — and the failure lands
 # on the same bounded retry path as any other status post failure.
 reset_stubs
+export EDDA_GATE_EXIT=1   # the gate fails this sha (rule: cmd_review::gate)
 pending_set 42 1 "$sha" 0 0
 printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
@@ -1139,6 +1168,7 @@ product_log_fixture() { # $1=Verdict line $2=prose after it (default none) — t
 }
 
 reset_stubs
+export EDDA_GATE_EXIT=1   # the gate fails this sha (rule: cmd_review::gate)
 pending_set 42 1 "$sha" 0 0
 product_done_fixture 3 false escalation-pending
 product_log_fixture 'Provisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=1 — not a merge-gate verdict'
@@ -1194,6 +1224,7 @@ unset GH_HEAD
 # line it does not recognise and would answer review:lgtm here; the watcher
 # still applies no label to a Provisional round.
 reset_stubs
+export EDDA_GATE_EXIT=1   # the gate fails this sha (rule: cmd_review::gate)
 pending_set 42 1 "$sha" 0 0
 product_done_fixture 3 false escalation-pending
 product_log_fixture 'Provisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=1 — not a merge-gate verdict' \
@@ -1215,6 +1246,7 @@ unset GH_HEAD
 # A Changes Requested product round exits 1 — the verdict, not a failure — and
 # is published the same way, with its label.
 reset_stubs
+export EDDA_GATE_EXIT=1   # the gate fails this sha (rule: cmd_review::gate)
 pending_set 42 1 "$sha" 0 0
 product_done_fixture 1 true ''
 product_log_fixture 'Changes Requested, P0=0, P1=1'
@@ -1258,6 +1290,7 @@ unset GH_HEAD GH_COMMENTS_FILE
 # its counts stay in the union, so a later qualified LGTM on the same sha does
 # not turn the gate green (REVIEW.md §8, GH-742; #1023 round 1).
 reset_stubs
+export EDDA_GATE_EXIT=1   # the gate fails this sha (rule: cmd_review::gate)
 pending_set 42 1 "$sha" 0 0
 printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture

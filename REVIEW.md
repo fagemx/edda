@@ -842,6 +842,16 @@ no verdict on that SHA is anything else; any standing non-qualifying verdict
 is `failure`; no verdict at all is `error`. A later LGTM therefore does not
 override an earlier Changes Requested on the same SHA (GH-742).
 
+**That rule is executable: `edda review gate <sha>` decides it** (GH-769), and
+it is the only implementation — the watcher calls it and maps `0`/`1`/`2` to
+`success`/`failure`/`error`. `--base <ref>` adds the window check: if the base
+has advanced over any file the subject changed, the reviewed tree is no longer
+the tree that would merge, and the gate fails with reason `window`. The verb
+reads the ledger's `review_verdict` events by default and accepts the caller's
+verdict facts with `--verdicts`; it writes nothing, launches nothing, and
+never touches GitHub. Anything that needs to know whether a SHA passed asks
+it rather than re-deriving the rule.
+
 ## 9. Provenance of the check commands
 
 `RAN` means the command was executed on the authoring workstation
