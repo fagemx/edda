@@ -980,7 +980,9 @@ documented surface cannot silently drift from the binary;
 
 ### edda fleet
 
-Fleet health — measure the path-classified mix of recent work. `edda fleet
+#### edda fleet health
+
+Measure the path-classified mix of recent work. `edda fleet
 health` reads the merged PRs and opened issues of the last `--window` days
 through `gh` (server-side date filters `merged:>=` / `created:>=`), and
 classifies each by changed paths (merged PRs) or by the backticked paths of
@@ -1026,6 +1028,96 @@ Exit codes:
 | 3 | YELLOW |
 | 4 | RED |
 | 1 | error (a `gh` failure or a failed stdout write) |
+| 2 | usage |
+
+#### edda fleet order
+
+Deterministic, health-gated ready queue with lane routing. `edda fleet order`
+ranks the open issues so ordering is a re-runnable computation instead of a
+hand-written plan: the same input yields the same output byte-for-byte, and
+every row carries the score components that produced its rank, so the
+operator's remaining move is a veto at the queue head.
+
+```bash
+edda fleet order                                   # text report
+edda fleet order --markdown                        # board-comment table
+edda fleet order --issues queue.json --json        # offline, from a fixture
+```
+
+Flags:
+
+- `--issues <PATH>` — read open issues from a JSON fixture with the shape of
+  `gh issue list --json number,title,body,labels` instead of querying `gh`.
+- `--health-status <GREEN|YELLOW|RED>` — use this status instead of computing
+  it; any casing is accepted, anything else is a usage error (exit 2).
+- `--window <N>` — rolling window in days for the health computation;
+  default 7, must be at least 1.
+- `--json` — emit the queue as JSON.
+- `--markdown` — emit the board-comment table.
+- `--limit <N>` — keep only the top N rows; ranks are assigned before
+  truncation.
+- `--json` and `--markdown` are mutually exclusive (usage error, exit 2).
+
+Score components, which sum to the row's total:
+
+| Component | Value |
+|-----------|-------|
+| `class` | product +40, other +10, mechanism +0, from the `## Predicted surface` paths |
+| `readiness` | `fleet:ready` +25 |
+| `priority` | P0 +30, P1 +15, P2 +5 |
+| `blocker` | +50 — the RED-freeze exception, below |
+| `collision` | −10 per peer issue declaring a shared surface path |
+| `freshness` | −100 when the freshness re-check FAILed |
+| `frozen` | the negation of everything above, when the row is frozen |
+
+Rows sort by total descending, then by issue number ascending, so equal scores
+always fall back to the older issue.
+
+Health coupling: when the status is RED, `mechanism_dispatch` is `freeze` and
+every mechanism-class row is zeroed (`status: frozen`). The one exception is a
+row whose body cites a red run or gate link — a URL containing `/actions/runs/`
+or `/checks` — which instead earns the `blocker` bonus. Without a link the
+issue is not a pipeline blocker.
+
+Collision: computed from the pairwise intersection of `## Predicted surface`
+paths, never from labels (#1005 — #671 and #685 shared
+`crates/edda-cli/src/main.rs` and no label at all). Every colliding peer costs
+a penalty, and walking the ranked queue puts the head on `ready` and the rest
+on `hold` naming the owner and the shared path.
+
+Freshness (#970) is re-derived here rather than trusted from a label. It
+resolves paths against the pinned tree (`git ls-tree -r HEAD`) and commands
+against this binary's own verb table — not against the `edda` on `PATH`, which
+may predate the tree and produced the false `FAIL edda fleet --help exited
+nonzero` on #1015 itself. Findings are WARN or FAIL only; a reference that
+resolves is silent. A path or command declared by a section that describes what
+the issue will build (`doneWhen`, any `… surface` heading, `改哪裡`) WARNs, as
+does an evidence-cited command; a reference in an observation section to a path
+or verb that does not exist FAILs and marks the row `stale`. `doneWhen`
+headings match case-insensitively. Cited line ranges (`lib.rs:288-296`) resolve
+to their file, and crate- or module-relative references resolve as a suffix of
+the tracked paths.
+
+Lane routing, in evaluation order: a `governance` or `fleet:goal` label or a
+`[判斷]` marker in the body routes to `controller`; an empty surface, a surface
+wider than the flash cap, or any `scripts/` path routes to `strong`; everything
+else routes to `flash`. The cap is the ledger key
+`fleet.order.flash-max-surface-files` (default 3), and `flash_cap_source`
+records whether it resolved. The two flash criteria that need a subprocess —
+the brief render and the #945 dry-run validator — are reported on the row as
+`pending_checks` for the dispatcher to run, never shelled out mid-computation.
+
+Statuses: `ready`, `hold` (behind a higher-ranked row on a shared path),
+`frozen` (mechanism under a RED freeze), `stale` (freshness FAILed), `claimed`
+(`fleet:claimed`). Only `ready` rows claim paths, so an in-flight or frozen row
+never blocks anything behind it.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | queue rendered |
+| 1 | error (a `gh` or `git` failure, an unreadable fixture, a failed stdout write) |
 | 2 | usage |
 
 ### edda review

@@ -36,6 +36,13 @@ pub enum FleetCmd {
         #[arg(long)]
         line: bool,
     },
+    /// Fleet order: deterministic health-gated queue with lane routing (GH-1015)
+    ///
+    /// Exit: 0 ok; 1 error, 2 usage.
+    Order {
+        #[command(flatten)]
+        args: crate::cmd_fleet_order::OrderArgs,
+    },
 }
 
 /// Path class assigned by `classify_path` / `classify_paths`.
@@ -332,7 +339,7 @@ fn read_thresholds(repo_root: &Path) -> Thresholds {
     }
 }
 
-fn gh_output(repo_root: &Path, args: &[&str]) -> Vec<u8> {
+pub(crate) fn gh_output(repo_root: &Path, args: &[&str]) -> Vec<u8> {
     let output = match std::process::Command::new("gh")
         .args(args)
         .current_dir(repo_root)
@@ -552,10 +559,37 @@ pub fn render_line(h: &Health) -> String {
     line
 }
 
-/// CLI entry point. Prints, then exits with the status code:
-/// 0 GREEN, 3 YELLOW, 4 RED; 1 error, 2 usage.
+/// The live health status, for the ordering layer (GH-1015). Reusing this
+/// seam keeps one definition of "mechanism" and one definition of RED.
+pub(crate) fn live_health_status(repo_root: &Path, window: u32) -> String {
+    let now = Utc::now();
+    let window_start = now - Duration::days(i64::from(window));
+    let (merged, fetched_prs) = collect_merged(repo_root, window_start, now);
+    let (issues, fetched_issues) = collect_issues(repo_root, window_start, now);
+    let thresholds = read_thresholds(repo_root);
+    compute(
+        &merged,
+        &issues,
+        now,
+        window,
+        thresholds,
+        fetched_prs,
+        fetched_issues,
+    )
+    .status
+}
+
+/// CLI entry point.
 pub fn run(cmd: FleetCmd, repo_root: &Path) -> anyhow::Result<()> {
-    let FleetCmd::Health { window, json, line } = cmd;
+    match cmd {
+        FleetCmd::Health { window, json, line } => run_health(window, json, line, repo_root),
+        FleetCmd::Order { args } => crate::cmd_fleet_order::run(args, repo_root),
+    }
+}
+
+/// Prints, then exits with the status code: 0 GREEN, 3 YELLOW, 4 RED;
+/// 1 error, 2 usage.
+fn run_health(window: u32, json: bool, line: bool, repo_root: &Path) -> anyhow::Result<()> {
     if json && line {
         eprintln!("Error: --json and --line are mutually exclusive");
         std::process::exit(2);
