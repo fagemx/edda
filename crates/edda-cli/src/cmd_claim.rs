@@ -271,7 +271,7 @@ fn exit_code_for(report: &CheckReport) -> i32 {
 /// for it, so heartbeat age carries no liveness information (GH-705). The
 /// same shape is already classified in `cmd_bridge` when it names the
 /// actor of a `cli-*` session.
-fn is_bare_cli_session(session_id: &str) -> bool {
+pub(crate) fn is_bare_cli_session(session_id: &str) -> bool {
     session_id.starts_with("cli-")
 }
 

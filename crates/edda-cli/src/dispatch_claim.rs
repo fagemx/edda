@@ -10,6 +10,32 @@ pub struct Claim {
     released: bool,
 }
 
+/// Does this board claim still stand against a new writer?
+///
+/// A session that heartbeats is judged by the one shared session criterion,
+/// exactly as before.
+///
+/// A bare-CLI claim (`cli-*`) never heartbeats — its claimant is a one-shot
+/// process — so that criterion can only ever call it dead. GH-705 answered
+/// that by treating every such claim as live, fail-closed, so a one-shot
+/// writer could not be stomped on mid-write. Unconditionally, though,
+/// "fail-closed" reads as "never expires": GH-1018 found 100 claims left from
+/// July and August still refusing September lanes, with no `unclaim` able to
+/// clear them, which made the guard something lanes had to route around
+/// rather than obey.
+///
+/// The claim's own timestamp is judgeable even when its session's heartbeat
+/// is not, and `edda peers --json` already publishes exactly that verdict
+/// (GH-569). Sharing that one rule bounds the bare-CLI case in time without
+/// weakening it: a claim written moments ago still refuses a second writer.
+fn claim_still_stands(project: &str, claim: &peers::ClaimEntry, now_epoch: u64) -> bool {
+    if peers::liveness::classify_session_liveness(project, &claim.session_id).is_live() {
+        return true;
+    }
+    crate::cmd_claim::is_bare_cli_session(&claim.session_id)
+        && !peers::liveness::claim_is_stale_at(&claim.ts, now_epoch)
+}
+
 pub fn acquire(cwd: &Path, session: &str, paths: &[String]) -> Result<Option<Claim>> {
     if paths.is_empty() {
         return Ok(None);
@@ -24,13 +50,10 @@ pub fn acquire(cwd: &Path, session: &str, paths: &[String]) -> Result<Option<Cla
         .open(edda_store::project_dir(&project).join("dispatch-admission.lock"))?;
     lock.lock().context("lock dispatch admission")?;
     let claims = crate::cmd_claim::read_active_claims(&project)?;
+    let now_epoch = peers::liveness::now_epoch();
     let live: Vec<_> = claims
         .into_iter()
-        .filter(|c| {
-            // Same-session concurrent dispatch is a second writer too; do not ignore it.
-            c.session_id.starts_with("cli-")
-                || peers::liveness::classify_session_liveness(&project, &c.session_id).is_live()
-        })
+        .filter(|c| claim_still_stands(&project, c, now_epoch))
         .collect();
     if live.iter().any(|claim| claim.session_id == session) {
         bail!("session {session} already owns a live dispatch claim");
@@ -174,6 +197,45 @@ mod tests {
             .expect("second claim")
             .release()
             .expect("release second claim");
+    }
+
+    #[test]
+    fn a_stale_bare_cli_claim_no_longer_refuses_a_new_writer() {
+        let _store = crate::test_support::isolated_store();
+        let cwd = tempfile::tempdir().expect("dispatch claim cwd");
+        let project = edda_store::project_id(cwd.path());
+        let paths = vec!["docs/reference/cli.md".to_owned()];
+        // The shape GH-1018 found on a long-lived board: a bare-CLI claim
+        // from three weeks ago, no heartbeat ever written for it, nothing
+        // that expires it.
+        crate::test_support::write_aged_claim(
+            &project,
+            "cli-gh466-round1-fixes",
+            60 * 60 * 24 * 22,
+            &paths,
+        );
+
+        let claim = acquire(cwd.path(), "lane-gh1018", &paths)
+            .expect("a three-week-old claim must not refuse a new writer")
+            .expect("writer claim");
+        claim.release().expect("release the admitted claim");
+    }
+
+    #[test]
+    fn a_fresh_bare_cli_claim_still_refuses_a_new_writer() {
+        let _store = crate::test_support::isolated_store();
+        let cwd = tempfile::tempdir().expect("dispatch claim cwd");
+        let project = edda_store::project_id(cwd.path());
+        let paths = vec!["docs/reference/cli.md".to_owned()];
+        // GH-705's case, unweakened: a one-shot CLI writer that claimed
+        // seconds ago has no heartbeat either, and must still be honoured.
+        crate::test_support::write_aged_claim(&project, "cli-just-now", 5, &paths);
+
+        let error = match acquire(cwd.path(), "lane-gh1018", &paths) {
+            Ok(_) => panic!("a fresh bare-CLI claim must still refuse a second writer"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cli-just-now"), "{error:#}");
     }
 
     #[test]
