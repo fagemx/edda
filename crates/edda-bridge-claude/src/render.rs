@@ -194,8 +194,17 @@ pub fn writeback() -> String {
      Do NOT record: formatting changes, test fixes, minor refactors, dependency bumps.\n\
      \n\
      Decisions you record are agent-authored and land in the *unratified* tier — \
-     recorded, not binding. Only the operator confers binding authority (via `edda ratify`); \
-     do not ratify your own decisions.\n\
+     recorded and readable, not yet binding; ratification is the route out, not a verdict \
+     against them.\n  \
+     Two paths confer binding authority. The operator ratifies a key directly: \
+     `edda ratify \"<key>\"`.\n  \
+     Or the cited-authority rule sweep does — `edda ratify --by-rule cited-authority` ratifies \
+     every unratified, unsuperseded decision that carries a citation, so record yours as you \
+     decide: `edda decide \"k=v\" --reason \"why\" --cite operator:<when>` \
+     (also `issue:#<n>`, `decision:<key>`).\n  \
+     Uncited decisions, and `product.` / `commercial.` / `spend.` keys, wait for the operator.\n  \
+     Do not ratify your own decisions — the session that records and the session that \
+     ratifies are different (`governance.scribe-pass`).\n\
      \n\
      Before ending a session, summarize open context:\n  \
      `edda note \"completed X; decided Y; next: Z\" --tag session`\n\

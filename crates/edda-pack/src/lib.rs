@@ -619,9 +619,9 @@ pub struct DecisionSummary {
     pub authority: String,
     pub reversibility: String,
     pub affected_paths: Vec<String>,
-    /// Operator-ratified (GH-401). Derived from `decision_ratify` events at
-    /// build time — `From<&DecisionView>` alone cannot know it, so callers
-    /// that have ratified-state must set it explicitly.
+    /// Ratified by the operator or the cited-authority sweep (GH-401, GH-1063).
+    /// Derived from `decision_ratify` events at build time — `From<&DecisionView>`
+    /// alone cannot know it, so callers with ratified-state must set it explicitly.
     pub ratified: bool,
 }
 
