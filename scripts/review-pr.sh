@@ -775,8 +775,15 @@ BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
     for i in $ISSUES; do
       echo
       echo "### Issue #$i doneWhen (the acceptance ceiling, REVIEW.md §1)"
+      # The heading is matched case- and space-insensitively: issues are
+      # written by hand and spell it `## doneWhen`, `## Done when`, `## Done
+      # When`. A case-sensitive match silently yields an EMPTY ceiling rather
+      # than an error, so the brief tells the reviewer to judge against a
+      # doneWhen it was never given (GH-953; #902 is the issue that found it,
+      # and #953 itself is written `## Done when`).
       gh issue view "$i" --repo "$REPO" --json body --jq .body 2>/dev/null \
-        | awk '/^## doneWhen/{f=1;next} /^## /{f=0} f' || echo "(issue #$i could not be read)"
+        | awk 'tolower($0) ~ /^##[[:space:]]+done[[:space:]]*when([[:space:]]|$)/ {f=1;next} /^## /{f=0} f' \
+        || echo "(issue #$i could not be read)"
     done
   fi
   echo
