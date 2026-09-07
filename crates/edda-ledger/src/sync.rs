@@ -3,14 +3,24 @@
 //! Pull-based: the target project pulls shared decisions from source projects'
 //! ledgers and creates `decision_import` events with provenance links.
 //!
+//! Two carrier kinds:
+//!
+//! - SQLite ledgers of registered group members ([`sync_from_sources`]).
+//! - Committed markdown mirrors (GH-671): a git-tracked `docs/decisions/`
+//!   directory produced by `edda export md --out` on another machine
+//!   ([`sync_from_mirror`]). Same #394 rule as the sqlite path: same key with
+//!   a different value imports **inactive** — merge, never overwrite.
+//!
 //! This module only accepts pre-resolved data — callers (L4: cli, serve)
 //! are responsible for resolving project IDs and source paths via `edda-store`.
 
-use crate::sqlite_store::ImportParams;
+use crate::sqlite_store::{DecisionRow, ImportParams};
 use crate::Ledger;
+use anyhow::Context;
 use edda_core::decision::extract_domain;
 use edda_core::event::finalize_event;
 use edda_core::types::{Event, Provenance, Refs, SCHEMA_VERSION};
+use std::path::{Path, PathBuf};
 
 /// A source project to sync from.
 pub struct SyncSource {
@@ -51,6 +61,8 @@ pub struct SyncResult {
     pub skipped: usize,
     pub conflicts: Vec<ConflictInfo>,
     pub errors: Vec<SourceError>,
+    /// Set only by [`sync_from_mirror`] (GH-671).
+    pub mirror: Option<MirrorImportMeta>,
 }
 
 /// Sync shared decisions from source projects into the target ledger.
@@ -142,48 +154,627 @@ pub fn sync_from_sources(
                 continue;
             }
 
-            // Create the import event
-            let parent_hash = target.last_event_hash()?;
-            let import_active = !is_conflict;
-
-            let mut event = make_import_event(
+            let imported = import_decision(
+                target,
                 &branch,
-                parent_hash.as_deref(),
-                decision,
                 &source.project_id,
                 &source.project_name,
+                decision,
+                !is_conflict,
+                // A sqlite source carries neither citations (they live in the
+                // peer's event payload, which this path never opens) nor a
+                // mirror stamp. Only the committed mirror does.
+                ImportExtras::default(),
             )?;
-            finalize_event(&mut event)?;
-
-            let domain = extract_domain(&decision.key);
-            target.insert_imported_decision(ImportParams {
-                event: &event,
-                key: &decision.key,
-                value: &decision.value,
-                reason: &decision.reason,
-                domain: &domain,
-                scope: &decision.scope,
-                source_project_id: &source.project_id,
-                source_event_id: &decision.event_id,
-                is_active: import_active,
-                authority: &decision.authority,
-                affected_paths: &decision.affected_paths,
-                tags: &decision.tags,
-                review_after: decision.review_after.as_deref(),
-                reversibility: &decision.reversibility,
-                village_id: decision.village_id.as_deref(),
-            })?;
-
-            result.imported.push(ImportedDecision {
-                key: decision.key.clone(),
-                value: decision.value.clone(),
-                source_project: source.project_name.clone(),
-                source_event_id: decision.event_id.clone(),
-            });
+            result.imported.push(imported);
         }
     }
 
     Ok(result)
+}
+
+/// Shared import tail for every carrier (sqlite source or committed mirror):
+/// create the `decision_import` event, insert the row (#394: inactive when
+/// `import_active` is false), and return the result entry.
+fn import_decision(
+    target: &Ledger,
+    branch: &str,
+    source_project_id: &str,
+    source_project_name: &str,
+    decision: &DecisionRow,
+    import_active: bool,
+    extras: ImportExtras<'_>,
+) -> anyhow::Result<ImportedDecision> {
+    let parent_hash = target.last_event_hash()?;
+
+    let mut event = make_import_event(
+        branch,
+        parent_hash.as_deref(),
+        decision,
+        source_project_id,
+        source_project_name,
+        extras,
+    )?;
+    finalize_event(&mut event)?;
+
+    let domain = extract_domain(&decision.key);
+    target.insert_imported_decision(ImportParams {
+        event: &event,
+        key: &decision.key,
+        value: &decision.value,
+        reason: &decision.reason,
+        domain: &domain,
+        scope: &decision.scope,
+        source_project_id,
+        source_event_id: &decision.event_id,
+        is_active: import_active,
+        authority: &decision.authority,
+        affected_paths: &decision.affected_paths,
+        tags: &decision.tags,
+        review_after: decision.review_after.as_deref(),
+        reversibility: &decision.reversibility,
+        village_id: decision.village_id.as_deref(),
+    })?;
+
+    Ok(ImportedDecision {
+        key: decision.key.clone(),
+        value: decision.value.clone(),
+        source_project: source_project_name.to_string(),
+        source_event_id: decision.event_id.clone(),
+    })
+}
+
+// ── Committed markdown mirror (GH-671) ────────────────────────────────
+
+/// Default staleness threshold, in hours, for a committed mirror's INDEX
+/// stamp. Documented in `docs/guides/multi-agent.md` — change the doc when
+/// this changes.
+pub const DEFAULT_MIRROR_STALE_HOURS: i64 = 24;
+
+/// A committed markdown mirror source: a git-tracked directory produced by
+/// `edda export md --out <dir>` on another machine (GH-671).
+///
+/// The mirror is read as markdown — never as a second sqlite file.
+pub struct MirrorSource {
+    /// Directory containing `INDEX.md` and `decisions/`.
+    pub mirror_dir: PathBuf,
+}
+
+/// Freshness of a mirror, derived from its `INDEX.md` stamp.
+#[derive(Debug, Clone)]
+pub struct MirrorFreshness {
+    /// The `- **Exported at**:` value, if present.
+    pub exported_at: Option<String>,
+    /// The `- **Exporting machine**:` value, if present.
+    pub machine: Option<String>,
+    /// Age of the stamp in hours (negative on clock skew); `None` when the
+    /// stamp is missing or unparseable.
+    pub age_hours: Option<f64>,
+    pub threshold_hours: i64,
+}
+
+impl MirrorFreshness {
+    /// Stale = stamp older than the threshold, **or unreadable**. Unknown
+    /// freshness must be visible (death visibility), never silently fresh.
+    pub fn is_stale(&self) -> bool {
+        match self.age_hours {
+            Some(h) => h >= self.threshold_hours as f64,
+            None => true,
+        }
+    }
+}
+
+/// Provenance of a mirror import, carried on [`SyncResult::mirror`].
+#[derive(Debug, Clone)]
+pub struct MirrorImportMeta {
+    /// Stable dedup identity for imports from this mirror.
+    pub source_id: String,
+    /// Display name — the exporting machine from INDEX.md when present.
+    pub source_name: String,
+    pub freshness: MirrorFreshness,
+}
+
+/// Mirror index metadata — only what freshness needs.
+struct MirrorIndexMeta {
+    exported_at: Option<String>,
+    machine: Option<String>,
+}
+
+/// A decision parsed out of a mirror file: the storage row it would import
+/// as, plus the ratification fact the markdown carries.
+struct MirrorDecision {
+    row: DecisionRow,
+    ratified_by: Option<String>,
+    ratified_at: Option<String>,
+    /// The citation chain (GH-761). Not a `DecisionRow` field: `cites` lives
+    /// in the decision event payload, never in the projected row
+    /// (`decision.cites=event-payload-not-sqlite-column`), so it rides the
+    /// mirror separately and is written back into the import event.
+    cites: Vec<String>,
+}
+
+/// Provenance an import carries beyond the projected row.
+///
+/// A sqlite-source import has neither; a mirror import has both, and both go
+/// into the `decision_import` event payload rather than a new column — the
+/// ledger is append-only and old ledgers stay readable.
+#[derive(Default, Clone, Copy)]
+struct ImportExtras<'a> {
+    /// GH-761 citations, read back by `edda ratify --by-rule`.
+    cites: &'a [String],
+    /// GH-671 mirror stamp, read back by `edda ask` as the staleness signal.
+    mirror: Option<&'a MirrorImportMeta>,
+}
+
+/// Import decisions from a committed markdown mirror (GH-671).
+///
+/// Machine B with an empty or different ledger checks out the repo, points
+/// [`MirrorSource`] at `docs/decisions/`, and every active decision of the
+/// source machine becomes visible locally:
+///
+/// - values, reasons, authority (original actor), scope, paths, tags and
+///   governance metadata are carried **verbatim** — the carrier is
+///   `ledger.cross-machine-projection=committed-mirror-stamped-at-wave-close-
+///   quote-never-paraphrase`;
+/// - same key with a different value imports **inactive** (#394) — merge,
+///   never overwrite;
+/// - a mirror decision whose original event already exists locally is
+///   skipped (a machine importing its own mirror is a no-op);
+/// - ratified decisions get the mirror's ratification replayed as an
+///   append-only `decision_ratify` event so standard derivation sees it.
+pub fn sync_from_mirror(
+    target: &Ledger,
+    source: &MirrorSource,
+    dry_run: bool,
+) -> anyhow::Result<SyncResult> {
+    let mut result = SyncResult::default();
+
+    // Freshness first: the stale signal must surface even if parsing later
+    // fails, so read INDEX.md before anything else can bail.
+    let index = read_mirror_index(&source.mirror_dir)?;
+    let freshness = mirror_freshness(&index, DEFAULT_MIRROR_STALE_HOURS);
+    let dir_name = source
+        .mirror_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("mirror")
+        .to_string();
+    let source_name = index.machine.clone().unwrap_or(dir_name);
+    let source_id = format!("mirror:{source_name}");
+    result.mirror = Some(MirrorImportMeta {
+        source_id: source_id.clone(),
+        source_name: source_name.clone(),
+        freshness,
+    });
+
+    let decisions = parse_mirror(&source.mirror_dir)?;
+    let branch = target.head_branch()?;
+
+    for md in &decisions {
+        // Locality / self-import guard: the original event already lives in
+        // this ledger, so the row is either local or already mirrored 1:1.
+        if target.get_event(&md.row.event_id)?.is_some() {
+            result.skipped += 1;
+            continue;
+        }
+        if target.is_already_imported(&source_id, &md.row.event_id)? {
+            result.skipped += 1;
+            continue;
+        }
+
+        // #394, same rule as sqlite sources: any differing active value is a
+        // conflict and imports inactive — merge, never overwrite.
+        let current = target.sqlite.find_active_decision(&branch, &md.row.key)?;
+        let is_conflict = current
+            .as_ref()
+            .map(|active| active.value != md.row.value)
+            .unwrap_or(false);
+
+        if is_conflict {
+            result.conflicts.push(ConflictInfo {
+                key: md.row.key.clone(),
+                local_value: current
+                    .as_ref()
+                    .map(|active| active.value.clone())
+                    .unwrap_or_default(),
+                remote_value: md.row.value.clone(),
+                source_project: source_name.clone(),
+            });
+        }
+
+        // Same ruling, already ratified here by someone other than a mirror:
+        // there is nothing to learn from a peer's copy. Importing it would
+        // supersede the row the operator ratified, and ratification binds to a
+        // decision event, so the key would come out **unratified** — or, if the
+        // mirror's own ratification were replayed over it, restated as
+        // `mirror:<machine>`, silently losing whose act it was. Both are worse
+        // than doing nothing. Asked before the insert, because afterwards the
+        // active row is the one just written and the answer is always "no".
+        if !is_conflict && ratified_locally(target, &branch, &md.row.key)? {
+            result.skipped += 1;
+            continue;
+        }
+
+        if dry_run {
+            result.imported.push(ImportedDecision {
+                key: md.row.key.clone(),
+                value: md.row.value.clone(),
+                source_project: source_name.clone(),
+                source_event_id: md.row.event_id.clone(),
+            });
+            continue;
+        }
+
+        let imported = import_decision(
+            target,
+            &branch,
+            &source_id,
+            &source_name,
+            &md.row,
+            !is_conflict,
+            ImportExtras {
+                cites: &md.cites,
+                mirror: result.mirror.as_ref(),
+            },
+        )?;
+
+        // Preserve ratified/unratified: replay the mirror's ratification as
+        // an append-only fact on this ledger. It binds the just-imported row
+        // (the latest decision for the key), so `edda ask` and exports show
+        // it ratified without any view-layer special case. Conflicts import
+        // inactive and never carry ratification.
+        //
+        // Never over an operator's own ratification, though: derivation takes
+        // the LATEST ratify per (branch, key), so replaying here would silently
+        // restate a local operator act as `mirror:<machine>`. The direction is
+        // conservative — it can only weaken attribution, never mint authority —
+        // but a machine that has already ruled on a key locally does not need a
+        // peer's copy of that fact, and must not lose whose ruling it was.
+        if !is_conflict {
+            if let Some(by) = &md.ratified_by {
+                append_mirror_ratification(target, &branch, &md.row.key, by, &source_name)?;
+            }
+        }
+
+        result.imported.push(imported);
+    }
+
+    Ok(result)
+}
+
+/// Whether this key already carries a ratification that did **not** come from
+/// a mirror — i.e. one an operator issued on this machine.
+fn ratified_locally(target: &Ledger, branch: &str, key: &str) -> anyhow::Result<bool> {
+    let active = target.sqlite.find_active_decision(branch, key)?;
+    let Some(row) = active else {
+        return Ok(false);
+    };
+    Ok(target
+        .ratified_decisions_map()?
+        .get(&row.event_id)
+        .is_some_and(|info| !info.ratified_by.starts_with("mirror:")))
+}
+
+/// Replay a mirror ratification as an append-only fact, attributed to the
+/// **mirror** rather than to the name the markdown claimed.
+///
+/// The line this comes from is `- **Governance**: ratified by <who> at <ts>`
+/// in a text file. Nothing about it is authenticated: no hash chain, no source
+/// event hash, no operator present. Passing `<who>` through would mint a local
+/// `decision_ratify` indistinguishable from one an operator actually issued
+/// here — and `edda_core::event::new_decision_ratify_event` exists precisely
+/// so that "operator authority is conferred by an event and can never be
+/// self-declared on write". A file declaring itself ratified is a self-declared
+/// write. It matters more since GH-671's SessionStart trigger: the import runs
+/// unattended on every session, so the forged name would spread with nobody
+/// looking.
+///
+/// So the ratification is preserved — doneWhen requires the ratified *state*
+/// to survive the round trip — but recorded under the typed prefix
+/// `mirror:<machine>` per `ratify.authority=typed-prefix`. A reader and
+/// `edda ratify --by-rule` can both tell a replayed ratification from a local
+/// operator act, which a free-text name can never be told apart from.
+fn append_mirror_ratification(
+    target: &Ledger,
+    branch: &str,
+    key: &str,
+    ratified_by: &str,
+    source_name: &str,
+) -> anyhow::Result<()> {
+    let parent_hash = target.last_event_hash()?;
+    let note = format!("ratified by {ratified_by} on {source_name}; replayed from its committed mirror, not an operator act on this machine");
+    let event = edda_core::event::new_decision_ratify_event(
+        branch,
+        parent_hash.as_deref(),
+        key,
+        &format!("mirror:{source_name}"),
+        Some(&note),
+    )?;
+    target.append_event(&event)?;
+    Ok(())
+}
+
+fn read_mirror_index(mirror_dir: &Path) -> anyhow::Result<MirrorIndexMeta> {
+    let path = mirror_dir.join("INDEX.md");
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "read mirror index {} (run `edda export md --out <dir>` on the source machine)",
+            path.display()
+        )
+    })?;
+    Ok(parse_index_meta(&text))
+}
+
+/// Parse INDEX.md for freshness fields. Unknown lines (including hand-added
+/// gloss lines) are ignored — a value is never minted from the index.
+fn parse_index_meta(text: &str) -> MirrorIndexMeta {
+    let mut meta = MirrorIndexMeta {
+        exported_at: None,
+        machine: None,
+    };
+    // Prefixes carry no trailing space, and every value is trimmed: the
+    // SessionStart trigger reads the same stamp line to decide whether the
+    // mirror moved (`edda_bridge_claude::mirror_import::read_stamp`). If one
+    // reader demanded the space and the other did not, a hand-touched INDEX
+    // would give the trigger a stamp while freshness read "unknown" — and
+    // unknown freshness is treated as stale, so the mirror would import and
+    // then warn about itself.
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("- **Exported at**:") {
+            meta.exported_at = Some(v.trim().to_string()).filter(|v| !v.is_empty());
+        } else if let Some(v) = line.strip_prefix("- **Exporting machine**:") {
+            meta.machine = Some(v.trim().to_string()).filter(|v| !v.is_empty());
+        }
+    }
+    meta
+}
+
+fn mirror_freshness(meta: &MirrorIndexMeta, threshold_hours: i64) -> MirrorFreshness {
+    let age_hours = meta.exported_at.as_deref().and_then(|ts| {
+        let then =
+            time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).ok()?;
+        let secs = (time::OffsetDateTime::now_utc() - then).whole_seconds();
+        Some(secs as f64 / 3600.0)
+    });
+    MirrorFreshness {
+        exported_at: meta.exported_at.clone(),
+        machine: meta.machine.clone(),
+        age_hours,
+        threshold_hours,
+    }
+}
+
+/// Parse every `decisions/*.md` file of a mirror into importable rows.
+fn parse_mirror(mirror_dir: &Path) -> anyhow::Result<Vec<MirrorDecision>> {
+    let decisions_dir = mirror_dir.join("decisions");
+    if !decisions_dir.is_dir() {
+        anyhow::bail!(
+            "not a committed mirror (no decisions/ directory): {} — run `edda export md --out <dir>` on the source machine",
+            decisions_dir.display()
+        );
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&decisions_dir)
+        .with_context(|| format!("read {}", decisions_dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+    files.sort();
+
+    let mut out = Vec::new();
+    for f in files {
+        let stem = f
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let text = std::fs::read_to_string(&f)
+            .with_context(|| format!("read mirror file {}", f.display()))?;
+        out.extend(parse_domain_markdown(&stem, &text)?);
+    }
+    Ok(out)
+}
+
+/// Parse one domain file of the mirror format (the exact shape
+/// `edda export md` renders) into decisions. Missing optional lines fall
+/// back to conservative defaults so pre-GH-671 mirrors still import.
+fn parse_domain_markdown(file_domain: &str, text: &str) -> anyhow::Result<Vec<MirrorDecision>> {
+    let mut out: Vec<MirrorDecision> = Vec::new();
+    let mut header_domain: Option<String> = None;
+    let mut current: Option<MirrorDecision> = None;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# Domain: `") {
+            header_domain = rest.strip_suffix('`').map(unescape_field);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("## `") {
+            if let Some(done) = current.take() {
+                finish_mirror_decision(done, &mut out)?;
+            }
+            // Trim before unescaping, never after: unescaping first can
+            // produce a trailing newline that `trim` would then eat, silently
+            // shortening the very key this escape exists to carry whole.
+            let key = unescape_field(rest.strip_suffix('`').unwrap_or(rest).trim());
+            if key.is_empty() {
+                continue;
+            }
+            let domain = header_domain
+                .clone()
+                .unwrap_or_else(|| file_domain.to_string());
+            current = Some(MirrorDecision {
+                row: DecisionRow {
+                    event_id: String::new(),
+                    key,
+                    value: String::new(),
+                    reason: String::new(),
+                    domain,
+                    branch: "main".to_string(),
+                    supersedes_id: None,
+                    is_active: true,
+                    ts: None,
+                    scope: "local".to_string(),
+                    source_project_id: None,
+                    source_event_id: None,
+                    status: "active".to_string(),
+                    authority: String::new(),
+                    affected_paths: "[]".to_string(),
+                    tags: "[]".to_string(),
+                    review_after: None,
+                    reversibility: "medium".to_string(),
+                    village_id: None,
+                },
+                ratified_by: None,
+                ratified_at: None,
+                cites: Vec::new(),
+            });
+            continue;
+        }
+        let Some(decision) = current.as_mut() else {
+            continue;
+        };
+        parse_mirror_field_line(line, decision);
+    }
+    if let Some(done) = current.take() {
+        finish_mirror_decision(done, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Validate and collect a fully-parsed mirror decision.
+fn finish_mirror_decision(
+    mut decision: MirrorDecision,
+    out: &mut Vec<MirrorDecision>,
+) -> anyhow::Result<()> {
+    if decision.row.authority.is_empty() {
+        // No Authority line (pre-GH-671 mirror) and no unratified(...) gloss:
+        // default to agent rather than over-claiming operator authorship.
+        decision.row.authority = "agent".to_string();
+    }
+    if decision.row.event_id.is_empty() {
+        anyhow::bail!(
+            "mirror decision `{}` has no event_id line",
+            decision.row.key
+        );
+    }
+    if decision.row.value.is_empty() {
+        anyhow::bail!(
+            "mirror decision `{}` ({}) has no value",
+            decision.row.key,
+            decision.row.event_id
+        );
+    }
+    out.push(decision);
+    Ok(())
+}
+
+/// Match one `- **Field**: value` line inside a decision section.
+/// Unrecognized lines (headers, prose, gloss) are ignored.
+///
+/// Every caller-supplied field is unescaped here, because `cmd_export` escapes
+/// every caller-supplied field on write — the two halves are one encoding and
+/// only work as a pair. Branch and ts are the exception on both sides: a
+/// branch name is restricted to `[A-Za-z0-9._/-]` by
+/// [`crate::validate_branch_name`] and a ts is a machine RFC3339 stamp, so
+/// neither can carry an escape to undo.
+fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
+    let row = &mut decision.row;
+    if let Some(v) = line.strip_prefix("- **Value**: `") {
+        let v = v.strip_suffix('`').unwrap_or(v);
+        row.value = unescape_field(v);
+    } else if let Some(v) = line.strip_prefix("- **Reason**: ") {
+        row.reason = unescape_field(v.trim_end());
+    } else if let Some(v) = line.strip_prefix("- **Branch/ts**: `") {
+        if let Some((branch, ts)) = v.split_once("` · ") {
+            row.branch = branch.trim().to_string();
+            row.ts = Some(ts.trim().to_string());
+        }
+    } else if let Some(v) = line.strip_prefix("- **Governance**: ") {
+        if let Some(rest) = v.strip_prefix("ratified by ") {
+            if let Some((who, ts)) = rest.rsplit_once(" at ") {
+                // The name is unauthenticated either way — `append_mirror_
+                // ratification` records the mirror, not this string — but it
+                // is quoted into that event's note, so it is carried exactly
+                // rather than half-decoded.
+                decision.ratified_by = Some(unescape_field(who.trim()));
+                decision.ratified_at = Some(ts.trim().to_string());
+            }
+        } else if let Some(rest) = v.strip_prefix("unratified (") {
+            let auth = rest.strip_suffix(')').unwrap_or(rest).trim();
+            if !auth.is_empty() {
+                row.authority = unescape_field(auth);
+            }
+        }
+    } else if let Some(v) = line.strip_prefix("- **Scope**: ") {
+        row.scope = unescape_field(v.trim());
+    } else if let Some(v) = line.strip_prefix("- **Authority**: ") {
+        row.authority = unescape_field(v.trim());
+    } else if let Some(v) = line.strip_prefix("- **Affected paths**: ") {
+        row.affected_paths = backtick_list_to_json(v);
+    } else if let Some(v) = line.strip_prefix("- **Tags**: ") {
+        row.tags = backtick_list_to_json(v);
+    } else if let Some(v) = line.strip_prefix("- **Review after**: ") {
+        row.review_after = Some(unescape_field(v.trim()));
+    } else if let Some(v) = line.strip_prefix("- **Reversibility**: ") {
+        row.reversibility = unescape_field(v.trim());
+    } else if let Some(v) = line.strip_prefix("- **Village**: ") {
+        row.village_id = Some(unescape_field(v.trim()));
+    } else if let Some(v) = line.strip_prefix("- **Cites**: ") {
+        // GH-761 citations ride the mirror as a backtick list, same encoding
+        // as Tags and Affected paths. Dropping them would make the mirror lie
+        // by omission about what authority a decision rests on.
+        decision.cites = backtick_list(v);
+    } else if let Some(v) = line.strip_prefix("- **event_id**: `") {
+        let v = v.strip_suffix('`').unwrap_or(v);
+        row.event_id = unescape_field(v.trim());
+    }
+}
+
+/// `` `a`, `b` `` → `["a","b"]` as a JSON array string.
+fn backtick_list_to_json(s: &str) -> String {
+    serde_json::to_string(&backtick_list(s)).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// `` `a`, `b` `` → `vec!["a", "b"]`, each item unescaped.
+///
+/// The export escapes every item (`cmd_export::escape_field`), so a tag or a
+/// citation containing a backslash or a newline survives the single-line
+/// encoding instead of splitting the list or truncating the value.
+fn backtick_list(s: &str) -> Vec<String> {
+    s.split("`, `")
+        .map(|p| unescape_field(p.trim_matches('`').trim()))
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Inverse of `edda-cli::cmd_export::escape_field` — a left-to-right scan so
+/// `\\n` (escaped backslash followed by `n`) never collapses into a newline.
+///
+/// Older mirrors wrote some fields raw. An *unknown* escape is passed through
+/// unchanged (`\p` stays `\p`), so most raw text survives — but this is not
+/// lossless in general: a raw `C:\notes` decodes to `C:` + newline + `otes`,
+/// and a raw `\\` halves. Reachability is narrow (the fields that carried
+/// backslashes in practice — `affected_paths`, tags — were already unescaped
+/// before the encoding was made total), which is why the round trip is
+/// preferred over a version-tagged mirror format.
+fn unescape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn make_import_event(
@@ -192,10 +783,11 @@ fn make_import_event(
     decision: &crate::sqlite_store::DecisionRow,
     source_project_id: &str,
     source_project_name: &str,
+    extras: ImportExtras<'_>,
 ) -> anyhow::Result<Event> {
     let affected_paths: serde_json::Value = serde_json::from_str(&decision.affected_paths)?;
     let decision_tags: serde_json::Value = serde_json::from_str(&decision.tags)?;
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "role": "system",
         "text": format!(
             "[sync] imported {key}={value} from {source}",
@@ -220,6 +812,24 @@ fn make_import_event(
         "source_project_name": source_project_name,
         "source_event_id": decision.event_id,
     });
+
+    // GH-761: `cites` is read back from `payload["decision"]["cites"]` by the
+    // ratify sweep (`edda ratify --by-rule`), keyed on this event's id — which
+    // is also the imported row's `event_id`. Emitted only when non-empty, so
+    // an import that carries no citations is byte-identical to before.
+    if !extras.cites.is_empty() {
+        payload["decision"]["cites"] = serde_json::json!(extras.cites);
+    }
+
+    // GH-671: the mirror stamp the row arrived under. `edda ask` reads it back
+    // as the staleness signal, so a decision imported from a dead mirror is
+    // marked at the read end and not only at import time.
+    if let Some(meta) = extras.mirror {
+        payload["mirror"] = serde_json::json!({
+            "machine": meta.source_name,
+            "exported_at": meta.freshness.exported_at,
+        });
+    }
 
     let provenance = vec![Provenance {
         target: decision.event_id.clone(),
@@ -254,337 +864,5 @@ fn time_now_rfc3339() -> String {
     now.format(&time::format_description::well_known::Rfc3339)
         .expect("RFC3339 formatting should not fail")
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ledger::{init_branches_json, init_head, init_workspace};
-    use crate::EddaPaths;
-    use edda_core::types::DecisionScope;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn setup_workspace() -> (std::path::PathBuf, Ledger) {
-        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir().join(format!("edda_sync_test_{}_{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        let paths = EddaPaths::discover(&tmp);
-        init_workspace(&paths).unwrap();
-        init_head(&paths, "main").unwrap();
-        init_branches_json(&paths, "main").unwrap();
-        let ledger = Ledger::open(&tmp).unwrap();
-        (tmp, ledger)
-    }
-
-    fn write_shared_decision(ledger: &Ledger, key: &str, value: &str, reason: &str) {
-        let dp = edda_core::types::DecisionPayload {
-            key: key.to_string(),
-            value: value.to_string(),
-            reason: Some(reason.to_string()),
-            scope: Some(DecisionScope::Shared),
-            authority: None,
-            affected_paths: None,
-            tags: None,
-            review_after: None,
-            reversibility: None,
-            village_id: None,
-            cites: None,
-        };
-        let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
-        ledger.append_event(&event).unwrap();
-    }
-
-    fn write_local_decision(ledger: &Ledger, key: &str, value: &str) {
-        let dp = edda_core::types::DecisionPayload {
-            key: key.to_string(),
-            value: value.to_string(),
-            reason: None,
-            scope: None,
-            authority: None,
-            affected_paths: None,
-            tags: None,
-            review_after: None,
-            reversibility: None,
-            village_id: None,
-            cites: None,
-        };
-        let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
-        ledger.append_event(&event).unwrap();
-    }
-
-    #[test]
-    fn sync_empty_sources() {
-        let (tmp, ledger) = setup_workspace();
-        let result = sync_from_sources(&ledger, &[], "target_proj", false).unwrap();
-        assert!(result.imported.is_empty());
-        assert_eq!(result.skipped, 0);
-        assert!(result.conflicts.is_empty());
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn sync_imports_shared_decision() {
-        let (tmp_src, src_ledger) = setup_workspace();
-        let (tmp_tgt, tgt_ledger) = setup_workspace();
-
-        write_shared_decision(&src_ledger, "api.version", "v3", "breaking change");
-
-        let sources = vec![SyncSource {
-            project_id: "source_proj".to_string(),
-            project_name: "source".to_string(),
-            ledger_path: tmp_src.clone(),
-        }];
-
-        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
-        assert_eq!(result.imported.len(), 1);
-        assert_eq!(result.imported[0].key, "api.version");
-        assert_eq!(result.imported[0].value, "v3");
-
-        // Verify it was written to the ledger (use raw rows to check source_project_id)
-        let decisions = tgt_ledger
-            .sqlite
-            .active_decisions(None, None, None, None, None)
-            .unwrap();
-        assert!(decisions.iter().any(|d| d.key == "api.version"
-            && d.value == "v3"
-            && d.source_project_id.as_deref() == Some("source_proj")));
-
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-
-    #[test]
-    fn sync_skips_already_imported() {
-        let (tmp_src, src_ledger) = setup_workspace();
-        let (tmp_tgt, tgt_ledger) = setup_workspace();
-
-        write_shared_decision(&src_ledger, "db.engine", "pg", "fast");
-
-        let sources = vec![SyncSource {
-            project_id: "src2".to_string(),
-            project_name: "source2".to_string(),
-            ledger_path: tmp_src.clone(),
-        }];
-
-        // First sync
-        let r1 = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
-        assert_eq!(r1.imported.len(), 1);
-
-        // Second sync should skip
-        let r2 = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
-        assert_eq!(r2.imported.len(), 0);
-        assert_eq!(r2.skipped, 1);
-
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-
-    #[test]
-    fn sync_detects_conflict() {
-        let (tmp_src, src_ledger) = setup_workspace();
-        let (tmp_tgt, tgt_ledger) = setup_workspace();
-
-        // Local decision
-        write_local_decision(&tgt_ledger, "api.version", "v2");
-
-        // Remote shared decision with different value
-        write_shared_decision(&src_ledger, "api.version", "v3", "breaking");
-
-        let sources = vec![SyncSource {
-            project_id: "src3".to_string(),
-            project_name: "source3".to_string(),
-            ledger_path: tmp_src.clone(),
-        }];
-
-        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
-        assert_eq!(result.conflicts.len(), 1);
-        assert_eq!(result.conflicts[0].local_value, "v2");
-        assert_eq!(result.conflicts[0].remote_value, "v3");
-        // Imported but as inactive (conflict)
-        assert_eq!(result.imported.len(), 1);
-
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-
-    #[test]
-    fn sync_preserves_governance_metadata() {
-        let (tmp_src, source) = setup_workspace();
-        let (tmp_tgt, target) = setup_workspace();
-        let payload = edda_core::types::DecisionPayload {
-            key: "security.auth".to_string(),
-            value: "passkey".to_string(),
-            reason: Some("phishing resistance".to_string()),
-            scope: Some(DecisionScope::Shared),
-            authority: Some("human".to_string()),
-            affected_paths: Some(vec!["crates/auth/**".to_string()]),
-            tags: Some(vec!["security".to_string(), "identity".to_string()]),
-            review_after: Some("2027-01-01".to_string()),
-            reversibility: Some("hard".to_string()),
-            village_id: Some("village-alpha".to_string()),
-            cites: None,
-        };
-        let event = edda_core::event::new_decision_event("main", None, "system", &payload).unwrap();
-        source.append_event(&event).unwrap();
-        let sources = vec![SyncSource {
-            project_id: "source_meta".to_string(),
-            project_name: "source-meta".to_string(),
-            ledger_path: tmp_src.clone(),
-        }];
-
-        sync_from_sources(&target, &sources, "target", false).unwrap();
-        let imported = target
-            .sqlite
-            .find_active_decision("main", "security.auth")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(imported.authority, "human");
-        assert_eq!(imported.affected_paths, r#"["crates/auth/**"]"#);
-        assert_eq!(imported.tags, r#"["security","identity"]"#);
-        assert_eq!(imported.review_after.as_deref(), Some("2027-01-01"));
-        assert_eq!(imported.reversibility, "hard");
-        assert_eq!(imported.village_id.as_deref(), Some("village-alpha"));
-        assert_eq!(imported.scope, "shared");
-        assert_eq!(imported.source_project_id.as_deref(), Some("source_meta"));
-        assert_eq!(
-            imported.source_event_id.as_deref(),
-            Some(event.event_id.as_str())
-        );
-
-        let governed = target
-            .query_by_paths(&["crates/auth/src/lib.rs"], Some("main"), None)
-            .unwrap();
-        assert_eq!(governed.len(), 1);
-        assert_eq!(governed[0].key, "security.auth");
-
-        let import_event = target.get_event(&imported.event_id).unwrap().unwrap();
-        assert_eq!(import_event.refs.events, vec![event.event_id.clone()]);
-        assert_eq!(import_event.refs.provenance.len(), 1);
-        assert_eq!(
-            import_event.refs.provenance[0].rel,
-            edda_core::types::rel::IMPORTED_FROM
-        );
-        assert_eq!(import_event.refs.provenance[0].target, event.event_id);
-
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-
-    #[test]
-    fn sync_keeps_one_active_decision_across_remote_sources() {
-        let (tmp_a, ledger_a) = setup_workspace();
-        let (tmp_b, ledger_b) = setup_workspace();
-        let (tmp_tgt, target) = setup_workspace();
-        write_shared_decision(&ledger_a, "api.version", "v3", "source a");
-        write_shared_decision(&ledger_b, "api.version", "v4", "source b");
-
-        let sources = vec![
-            SyncSource {
-                project_id: "source_a".to_string(),
-                project_name: "source-a".to_string(),
-                ledger_path: tmp_a.clone(),
-            },
-            SyncSource {
-                project_id: "source_b".to_string(),
-                project_name: "source-b".to_string(),
-                ledger_path: tmp_b.clone(),
-            },
-        ];
-
-        let result = sync_from_sources(&target, &sources, "target", false).unwrap();
-        let active = target
-            .sqlite
-            .active_decisions(None, Some("api.version"), None, None, None)
-            .unwrap();
-
-        assert_eq!(result.conflicts.len(), 1);
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].value, "v3");
-
-        let _ = std::fs::remove_dir_all(&tmp_a);
-        let _ = std::fs::remove_dir_all(&tmp_b);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-
-    #[test]
-    fn sync_replaces_same_value_import_without_duplicate_active_rows() {
-        let (tmp_a, ledger_a) = setup_workspace();
-        let (tmp_b, ledger_b) = setup_workspace();
-        let (tmp_tgt, target) = setup_workspace();
-        write_shared_decision(&ledger_a, "api.version", "v3", "source a");
-        write_shared_decision(&ledger_b, "api.version", "v3", "source b");
-        let sources = vec![
-            SyncSource {
-                project_id: "source_a".to_string(),
-                project_name: "source-a".to_string(),
-                ledger_path: tmp_a.clone(),
-            },
-            SyncSource {
-                project_id: "source_b".to_string(),
-                project_name: "source-b".to_string(),
-                ledger_path: tmp_b.clone(),
-            },
-        ];
-
-        let result = sync_from_sources(&target, &sources, "target", false).unwrap();
-        let active = target
-            .sqlite
-            .active_decisions(None, Some("api.version"), None, None, None)
-            .unwrap();
-
-        assert!(result.conflicts.is_empty());
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].source_project_id.as_deref(), Some("source_b"));
-
-        let _ = std::fs::remove_dir_all(&tmp_a);
-        let _ = std::fs::remove_dir_all(&tmp_b);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-
-    #[test]
-    fn sync_dry_run_does_not_write() {
-        let (tmp_src, src_ledger) = setup_workspace();
-        let (tmp_tgt, tgt_ledger) = setup_workspace();
-
-        write_shared_decision(&src_ledger, "auth.method", "JWT", "stateless");
-
-        let sources = vec![SyncSource {
-            project_id: "src4".to_string(),
-            project_name: "source4".to_string(),
-            ledger_path: tmp_src.clone(),
-        }];
-
-        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", true).unwrap();
-        assert_eq!(result.imported.len(), 1);
-
-        // Should not have written anything
-        let decisions = tgt_ledger.active_decisions(None, None, None, None).unwrap();
-        assert!(decisions.is_empty());
-
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-
-    #[test]
-    fn sync_ignores_local_scope_decisions() {
-        let (tmp_src, src_ledger) = setup_workspace();
-        let (tmp_tgt, tgt_ledger) = setup_workspace();
-
-        // Write a local-scope decision to source
-        write_local_decision(&src_ledger, "internal.key", "val");
-
-        let sources = vec![SyncSource {
-            project_id: "src5".to_string(),
-            project_name: "source5".to_string(),
-            ledger_path: tmp_src.clone(),
-        }];
-
-        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
-        assert!(result.imported.is_empty());
-
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_tgt);
-    }
-}
+mod tests;

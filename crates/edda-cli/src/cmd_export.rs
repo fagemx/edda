@@ -10,6 +10,19 @@
 //! - Freshness metadata: `INDEX.md` intentionally carries the run-time export
 //!   timestamp (`- **Exported at**: ...`) and exporting machine identity
 //!   (GH-806) for cross-machine provenance, and is updated on each export run.
+//! - Round trip (GH-671): each decision additionally carries Scope, Authority,
+//!   Reversibility and — when set — Review after, Village and Cites, because
+//!   the committed-mirror import in `edda-ledger::sync` needs those fields to
+//!   restore the row faithfully (original actor included). Every
+//!   caller-supplied component of that encoding — the `## `key`` header and
+//!   the `- **Field**: value` lines alike — is escaped (`\` and newline) by
+//!   [`escape_field`], so a multi-line reason or a newline in any other field
+//!   survives the single-line markdown encoding losslessly instead of emitting
+//!   a line the importer would read as another field. Only the branch name and
+//!   the timestamp ride raw; both are machine-constrained, and the reason is
+//!   recorded at the `- **Branch/ts**:` line itself. Cites (GH-761) is read
+//!   from the decision event payload, not the projected row — see
+//!   [`collect_cites`].
 //! - Layout:
 //!   <out>/INDEX.md             — table of contents with freshness metadata
 //!   <out>/decisions/<domain>.md — one file per domain (active decisions)
@@ -36,13 +49,14 @@ pub fn execute(
     fs::create_dir_all(&decisions_dir).with_context(|| format!("create {decisions_dir:?}"))?;
 
     let active = ledger.active_decisions(None, None, None, None)?;
+    let cites = collect_cites(&ledger, &active)?;
     let by_domain = group_by_domain(active);
 
     let mut domain_stats: Vec<(String, usize, PathBuf)> = Vec::with_capacity(by_domain.len());
     for (domain, mut rows) in by_domain {
         rows.sort_by(|a, b| a.key.cmp(&b.key));
         let path = decisions_dir.join(format!("{domain}.md"));
-        let body = render_domain(&domain, &rows, &ratifications);
+        let body = render_domain(&domain, &rows, &ratifications, &cites);
         write_if_changed(&path, &body)?;
         domain_stats.push((domain, rows.len(), path));
     }
@@ -84,6 +98,46 @@ pub fn execute(
     Ok(())
 }
 
+/// Citations (GH-761) for the rows about to be exported, keyed by event id.
+///
+/// `cites` lives in the decision event payload, never in the projected row
+/// (`decision.cites=event-payload-not-sqlite-column`), so the export reads it
+/// the same way the ratify sweep does. Without this the committed mirror
+/// drops the authority chain of every decision it carries — a mirror that
+/// lies by omission, against `ledger.cross-machine-projection` clause (5)
+/// `quote-never-paraphrase`.
+fn collect_cites(
+    ledger: &Ledger,
+    rows: &[edda_ledger::DecisionView],
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let wanted: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.event_id.as_str()).collect();
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Both event types that can back an active decision row. A locally
+    // recorded decision is a `note`; one that arrived over a mirror is a
+    // `decision_import` carrying the same `payload["decision"]["cites"]`.
+    // Scanning only `note` would drop the citation chain the first time a
+    // machine re-exports something it imported — the lie by omission this
+    // whole field exists to prevent, moved one hop away instead of fixed.
+    for kind in ["note", "decision_import"] {
+        for e in ledger.iter_events_by_type(kind)? {
+            if !wanted.contains(e.event_id.as_str()) {
+                continue;
+            }
+            if let Some(list) = e.payload["decision"]["cites"].as_array() {
+                let cites: Vec<String> = list
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+                if !cites.is_empty() {
+                    out.insert(e.event_id.clone(), cites);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn group_by_domain(
     rows: Vec<edda_ledger::DecisionView>,
 ) -> BTreeMap<String, Vec<edda_ledger::DecisionView>> {
@@ -106,11 +160,12 @@ fn render_domain(
     domain: &str,
     rows: &[edda_ledger::DecisionView],
     ratifications: &std::collections::BTreeMap<String, edda_ledger::RatificationInfo>,
+    cites: &BTreeMap<String, Vec<String>>,
 ) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(HEADER);
     out.push('\n');
-    out.push_str(&format!("# Domain: `{}`\n\n", domain));
+    out.push_str(&format!("# Domain: `{}`\n\n", escape_field(domain)));
     out.push_str(&format!(
         "{} active decision(s), sorted by key.\n\n",
         rows.len()
@@ -122,14 +177,22 @@ fn render_domain(
         let (safe_reason, _) = redact(&row.reason);
         let (safe_value, _) = redact(&row.value);
         let ts = row.ts.as_deref().unwrap_or("?");
-        out.push_str(&format!("## `{}`\n\n", row.key));
-        out.push_str(&format!("- **Value**: `{}`\n", safe_value));
-        out.push_str(&format!("- **Reason**: {}\n", safe_reason));
+        out.push_str(&format!("## `{}`\n\n", escape_field(&row.key)));
+        out.push_str(&format!("- **Value**: `{}`\n", escape_field(&safe_value)));
+        out.push_str(&format!("- **Reason**: {}\n", escape_field(&safe_reason)));
+        // Branch and ts are the only two machine-generated components of this
+        // encoding, so they are the only two written raw. `validate_branch_name`
+        // restricts a branch to [A-Za-z0-9._/-] (edda-ledger `paths`), and `ts`
+        // is the decision event's own RFC3339 stamp — the mirror's parsed `ts`
+        // is never persisted, since `ImportParams` carries no ts column.
+        // Neither can hold a newline, a backslash, or the "` · " separator, so
+        // escaping them would only claim a hazard that does not exist.
         out.push_str(&format!("- **Branch/ts**: `{}` · {}\n", row.branch, ts));
         if let Some(info) = ratifications.get(&row.event_id) {
             out.push_str(&format!(
                 "- **Governance**: ratified by {} at {}\n",
-                info.ratified_by, info.ts
+                escape_field(&info.ratified_by),
+                info.ts
             ));
         } else {
             let auth = if row.authority.is_empty() {
@@ -139,7 +202,47 @@ fn render_domain(
             };
             out.push_str(&format!(
                 "- **Governance**: unratified ({})\n",
-                auth.to_lowercase()
+                escape_field(&auth.to_lowercase())
+            ));
+        }
+        // GH-671 round-trip fields: the mirror import restores these 1:1.
+        //
+        // Escaped, like Value and Reason, because they are caller-supplied all
+        // the way down: `edda decide` trims the key and stores the rest
+        // verbatim, `edda ratify --by` takes free text, and authority /
+        // reversibility / review_after / village_id are unvalidated
+        // `Option<String>` on the decision payload. Scope is enum-typed on the
+        // decide path only — the mirror import writes that column straight
+        // from parsed markdown, so one hop launders an arbitrary string into
+        // it. Unescaped, a newline in any of them emits a line the importer
+        // reads as another field: `authority` forges the `- **Scope**:` above
+        // it and a local decision lands globally propagating, unnoticed,
+        // because this import runs unattended at SessionStart.
+        out.push_str(&format!(
+            "- **Scope**: {}\n",
+            escape_field(&row.propagation)
+        ));
+        out.push_str(&format!(
+            "- **Authority**: {}\n",
+            escape_field(&row.authority)
+        ));
+        out.push_str(&format!(
+            "- **Reversibility**: {}\n",
+            escape_field(&row.reversibility)
+        ));
+        if let Some(review) = &row.review_after {
+            out.push_str(&format!("- **Review after**: {}\n", escape_field(review)));
+        }
+        if let Some(village) = &row.village_id {
+            out.push_str(&format!("- **Village**: {}\n", escape_field(village)));
+        }
+        if let Some(list) = cites.get(&row.event_id) {
+            out.push_str(&format!(
+                "- **Cites**: {}\n",
+                list.iter()
+                    .map(|c| format!("`{}`", escape_field(c)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if !row.affected_paths.is_empty() {
@@ -147,7 +250,7 @@ fn render_domain(
                 "- **Affected paths**: {}\n",
                 row.affected_paths
                     .iter()
-                    .map(|p| format!("`{}`", p))
+                    .map(|p| format!("`{}`", escape_field(p)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -157,12 +260,27 @@ fn render_domain(
                 "- **Tags**: {}\n",
                 row.tags
                     .iter()
-                    .map(|t| format!("`{}`", t))
+                    .map(|t| format!("`{}`", escape_field(t)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
         }
-        out.push_str(&format!("- **event_id**: `{}`\n\n", row.event_id));
+        // The ORIGIN id, not this machine's row id (GH-671). An imported row's
+        // local `event_id` is the `decision_import` event that carried it
+        // here, so exporting that would hand every hop a fresh identity: A
+        // decides, B imports (new id), B exports (B's id), A imports its own
+        // ruling back as if it were B's — forever, one round per wave. The
+        // origin id is what the importer's self-import guard tests, so
+        // exporting it is what makes a mesh of machines converge.
+        //
+        // Escaped for the same reason as the fields above: a local `event_id`
+        // is machine-generated, but `source_event_id` is written from parsed
+        // markdown by the mirror import, so a hand-written mirror can put any
+        // string in the column this line re-exports.
+        out.push_str(&format!(
+            "- **event_id**: `{}`\n\n",
+            escape_field(row.source_event_id.as_deref().unwrap_or(&row.event_id))
+        ));
     }
     out
 }
@@ -234,6 +352,17 @@ fn render_index(
     out
 }
 
+/// Escape a field for single-line markdown (GH-671 round trip): backslash
+/// first, then newline. Inverse lives in `edda-ledger::sync::unescape_field`.
+///
+/// Applied to every caller-supplied component of the encoding. The pair is
+/// only sound when both halves are total — escaping a field on write without
+/// unescaping it on read hands the importer a literal `\n`, which is a quieter
+/// corruption than the injected line it replaced, not a fix.
+fn escape_field(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
 fn resolve_machine(explicit: Option<&str>) -> String {
     if let Some(m) = explicit {
         let trimmed = m.trim();
@@ -302,6 +431,7 @@ mod tests {
             supersedes_id: None,
             review_after: None,
             village_id: None,
+            source_event_id: None,
         }
     }
 
@@ -321,7 +451,12 @@ mod tests {
     #[test]
     fn render_domain_names_all_columns_including_affected_paths() {
         let rows = vec![dec("db.engine", "sqlite", "db", vec!["src/db.rs"])];
-        let md = render_domain("db", &rows, &std::collections::BTreeMap::new());
+        let md = render_domain(
+            "db",
+            &rows,
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         assert!(md.contains("GENERATED FILE"));
         assert!(md.contains("# Domain: `db`"));
         assert!(md.contains("`db.engine`"));
@@ -331,11 +466,70 @@ mod tests {
         assert!(md.contains("- **Governance**: unratified (human)"));
     }
 
+    /// GH-671: the mirror import restores Scope/Authority/Reversibility (and
+    /// Review after / Village when set) — so export must emit them.
+    #[test]
+    fn render_domain_emits_round_trip_fields_for_mirror_import() {
+        let mut row = dec(
+            "fleet.lane-profile",
+            "agent-actor-is-the-profile",
+            "fleet",
+            vec![],
+        );
+        row.propagation = "local".into();
+        row.authority = "agent".into();
+        row.reversibility = "hard".into();
+        row.review_after = Some("2027-01-01".into());
+        row.village_id = Some("village-alpha".into());
+        let md = render_domain(
+            "fleet",
+            &[row],
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert!(md.contains("- **Scope**: local"), "{md}");
+        assert!(md.contains("- **Authority**: agent"), "{md}");
+        assert!(md.contains("- **Reversibility**: hard"), "{md}");
+        assert!(md.contains("- **Review after**: 2027-01-01"), "{md}");
+        assert!(md.contains("- **Village**: village-alpha"), "{md}");
+    }
+
+    /// Multi-line reasons and backslashes must survive the single-line
+    /// markdown encoding losslessly (quote-never-paraphrase).
+    #[test]
+    fn render_domain_escapes_newlines_and_backslashes_in_value_and_reason() {
+        let mut row = dec("esc.k", "a\\b\nc", "esc", vec![]);
+        row.reason = "r1\nr2 \\ path".into();
+        let md = render_domain(
+            "esc",
+            &[row],
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert!(
+            md.contains("- **Value**: `a\\\\b\\nc`"),
+            "escaped value: {md}"
+        );
+        assert!(
+            md.contains("- **Reason**: r1\\nr2 \\\\ path"),
+            "escaped reason: {md}"
+        );
+        assert!(
+            !md.contains("a\nb"),
+            "raw newline must not leak into the file"
+        );
+    }
+
     #[test]
     fn render_domain_scrubs_secrets_in_reason() {
         let mut row = dec("test.key", "val", "test", vec![]);
         row.reason = "temp token sk-abcdefghijklmnopqrstuvwxyz012345".into();
-        let md = render_domain("test", &[row], &std::collections::BTreeMap::new());
+        let md = render_domain(
+            "test",
+            &[row],
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         assert!(
             md.contains("[REDACTED:openai_api_key]"),
             "export must not leak old secrets: {md}"
@@ -428,8 +622,18 @@ mod tests {
         let mut b = rows;
         b.sort_by(|x, y| x.key.cmp(&y.key));
         assert_eq!(
-            render_domain("mix", &a, &std::collections::BTreeMap::new()),
-            render_domain("mix", &b, &std::collections::BTreeMap::new())
+            render_domain(
+                "mix",
+                &a,
+                &std::collections::BTreeMap::new(),
+                &BTreeMap::new()
+            ),
+            render_domain(
+                "mix",
+                &b,
+                &std::collections::BTreeMap::new(),
+                &BTreeMap::new()
+            )
         );
     }
 
@@ -562,6 +766,101 @@ mod tests {
         // INDEX.md retains structure and machine provenance
         assert!(index_second.contains("- **Exporting machine**: host-alpha"));
         assert!(index_second.contains("- **Total decisions**: 1"));
+    }
+
+    /// GH-671 R5: the mirror's single-line `- **Field**: value` encoding must
+    /// be **total**, not total for two of its fields.
+    ///
+    /// Value and Reason were escaped; key, Scope, Authority, Reversibility,
+    /// Review after and Village rode raw into the same encoding and were not
+    /// unescaped on import. A newline in any of them emits an extra line that
+    /// the importer reads as a *field*, so the imported row differs from the
+    /// source row — silently, because this import runs unattended at
+    /// SessionStart. Two of the injections below are load-bearing rather than
+    /// decorative: `authority` forges the `- **Scope**:` line that precedes it
+    /// (a local decision arrives globally propagating) and `village_id` forges
+    /// `- **Reversibility**:`, and in both cases the forged line lands *after*
+    /// the real one and therefore wins.
+    ///
+    /// Round trip, not render inspection: A decides, A exports, B imports, and
+    /// B's row must equal A's field for field.
+    #[test]
+    fn export_import_round_trip_is_total_for_newlines_and_backslashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+
+        // Every field here is caller-supplied: `edda decide` trims the key and
+        // secret-guards value/reason, and stores the rest verbatim — no
+        // validation rejects a newline in any of them (see the decision-row
+        // derivation in edda-ledger `sqlite_store::events`).
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        let dp = edda_core::types::DecisionPayload {
+            key: "esc.multi\nline \\ key".to_string(),
+            value: "v1\nv2 \\ back".to_string(),
+            reason: Some("r1\nr2 \\ back".to_string()),
+            scope: None,
+            authority: Some("agent\n- **Scope**: global".to_string()),
+            affected_paths: Some(vec!["crates/a\\b/**".to_string()]),
+            tags: Some(vec!["t1\nt2 \\ x".to_string()]),
+            review_after: Some("2027-01-01\ntrailing".to_string()),
+            reversibility: Some("hard\\ish".to_string()),
+            village_id: Some("village-a\\one\n- **Reversibility**: forged".to_string()),
+            cites: None,
+        };
+        let ev = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        a.append_event(&ev).unwrap();
+        let source = a.active_decisions(None, None, None, None).unwrap();
+        assert_eq!(source.len(), 1, "one decision on machine A");
+        drop(a);
+
+        let mirror = a_root.join("docs").join("decisions");
+        execute(&a_root, &mirror, false, Some("host-a")).unwrap();
+
+        let b = Ledger::open_or_init(&b_root).unwrap();
+        let imported = edda_ledger::sync::sync_from_mirror(
+            &b,
+            &edda_ledger::sync::MirrorSource {
+                mirror_dir: mirror.clone(),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            imported.imported.len(),
+            1,
+            "exactly one decision crosses the mirror"
+        );
+
+        let landed = b.active_decisions(None, None, None, None).unwrap();
+        assert_eq!(landed.len(), 1, "one decision on machine B: {landed:#?}");
+        let (before, after) = (&source[0], &landed[0]);
+
+        // The escalation first: a forged line changes what the row *means*.
+        assert_eq!(
+            after.propagation, before.propagation,
+            "a newline in authority must not forge a Scope line"
+        );
+        assert_eq!(
+            after.reversibility, before.reversibility,
+            "a newline in village_id must not forge a Reversibility line"
+        );
+        assert_eq!(after.key, before.key, "key rides the `## `key`` header");
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.reason, before.reason);
+        assert_eq!(after.authority, before.authority);
+        assert_eq!(after.review_after, before.review_after);
+        assert_eq!(after.village_id, before.village_id);
+        assert_eq!(after.tags, before.tags);
+        assert_eq!(after.affected_paths, before.affected_paths);
+        // The origin identity is what makes the mesh converge, so it has to
+        // survive the same encoding the fields do.
+        assert_eq!(
+            after.source_event_id.as_deref(),
+            Some(before.event_id.as_str())
+        );
     }
 
     #[test]

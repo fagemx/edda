@@ -18,6 +18,7 @@ fn dv(key: &str, value: &str, authority: &str, ts: &str) -> edda_ledger::view::D
         supersedes_id: None,
         review_after: None,
         village_id: None,
+        source_event_id: None,
     }
 }
 

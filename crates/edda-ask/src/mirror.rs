@@ -1,0 +1,498 @@
+//! Cross-machine mirror provenance at the **read** end (GH-671).
+//!
+//! `edda sync --from-mirror` warns about a dead mirror at import time. That
+//! signal dies with the command: once the rows are in the ledger, `edda ask`
+//! on machine B renders a decision that arrived over a three-week-old mirror
+//! exactly like one decided here this morning. The doneWhen clause this module
+//! answers is "讀端過期時 `edda ask` 輸出有標示" — the marking belongs at the
+//! read end, not only at the write end.
+//!
+//! Mechanism: the mirror import stamps `payload["mirror"]` on its
+//! `decision_import` event (`edda_ledger::sync::make_import_event`), and the
+//! imported row's `event_id` **is** that event's id, so a hit resolves its own
+//! provenance with one `get_event`. Nothing is written at query time — the
+//! same query-time-derivation contract [`crate::staleness`] follows.
+//!
+//! Staleness matches [`edda_ledger::sync::MirrorFreshness::is_stale`]: older
+//! than the threshold, **or unreadable**. Unknown freshness must be visible,
+//! never silently fresh.
+//!
+//! **Provenance is frozen; freshness is live.** Which machine a decision came
+//! over is a fact about the past and is read from the import event. How stale
+//! that is cannot be, because an already-imported decision is *skipped* on
+//! every later import (`sync_from_mirror`'s self-import guard), so the stamp on
+//! its import event is never rewritten. Ageing that frozen stamp meant every
+//! mirrored decision on a perfectly current machine read stale 24 hours after
+//! it first arrived, forever, and the hint's own remedy — re-export and pull —
+//! could not clear it. So freshness is taken from the mirror **in this
+//! checkout at query time**, which is what "讀端過期" names and what pulling a
+//! fresh mirror actually changes — but only when that mirror is the *same
+//! machine's*. A checkout's `docs/decisions/` is rewritten by whichever machine
+//! last ran the wave-close export, routinely this one, and that says nothing
+//! about how current a peer's rulings are. So the frozen stamp is not a rare
+//! fallback: it stands for every decision whose origin machine is not the one
+//! the local mirror belongs to, which in a fleet is most of them.
+
+use crate::DecisionHit;
+use edda_ledger::sync::DEFAULT_MIRROR_STALE_HOURS;
+use edda_ledger::Ledger;
+use serde::Serialize;
+use std::path::Path;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+
+/// Repo-relative mirror directory, fixed by `ledger.cross-machine-projection`
+/// clause (1). Kept in step with `edda_bridge_claude::mirror_import`.
+const MIRROR_INDEX: &str = "docs/decisions/INDEX.md";
+
+/// The only event type that can carry `payload["mirror"]`.
+///
+/// `edda_ledger::sync::make_import_event` is the sole writer of that stamp and
+/// always writes it onto a `decision_import` event, which is what makes "this
+/// ledger has no `decision_import` events" a sound proxy for "no hit here can
+/// have mirror provenance". A future writer that stamps some other event type
+/// has to be taught to this constant too.
+const MIRROR_STAMP_EVENT_TYPE: &str = "decision_import";
+
+/// The mirror a decision arrived over, and how dead it was.
+#[derive(Debug, Clone, Serialize)]
+pub struct MirrorOrigin {
+    /// Exporting machine from the mirror's `INDEX.md`, or the directory name
+    /// when the stamp named none.
+    pub machine: String,
+    /// The `- **Exported at**:` stamp freshness was judged against: the mirror
+    /// in this checkout **when that mirror is [`Self::machine`]'s own**,
+    /// otherwise the stamp this row was imported under. Another machine's
+    /// mirror — including this box's own re-export — never speaks for a peer's
+    /// rulings. Absent when neither could be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exported_at: Option<String>,
+    /// Age of that stamp in hours at query time; `None` when unparseable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_hours: Option<f64>,
+    pub is_stale: bool,
+    pub threshold_hours: i64,
+}
+
+/// Resolve each hit's mirror provenance. Non-mirror decisions map to `None`,
+/// which is every decision in a single-machine project.
+///
+/// Best-effort by construction: a hit whose event cannot be read maps to
+/// `None` rather than failing the query — an unreadable event is not evidence
+/// that a decision came from a mirror.
+pub fn origins_for_hits(
+    ledger: &Ledger,
+    hits: &[DecisionHit],
+    repo_root: Option<&Path>,
+) -> Vec<Option<MirrorOrigin>> {
+    // `edda ask` runs this twice per query (decisions + timeline) and once more
+    // per project under `--fleet`, so the per-hit `get_event` below is paid ~2N
+    // times — for a field that is `None` on every row of a single-machine
+    // project, because such a project has no `decision_import` events for a
+    // lookup to find. One index-backed probe (`idx_events_type`) answers that
+    // for the whole list, so N primary-key lookups collapse into one seek that
+    // reads no rows at all. A ledger that does have imports takes exactly the
+    // per-hit path it took before.
+    if hits.is_empty() || !may_hold_mirror_origins(ledger) {
+        return vec![None; hits.len()];
+    }
+    let now = OffsetDateTime::now_utc();
+    // Read once for the whole list: it is the same mirror for every hit.
+    let live = repo_root.and_then(live_mirror);
+    hits.iter()
+        .map(|h| {
+            ledger.get_event(&h.event_id).ok().flatten().and_then(|e| {
+                origin_from_payload(
+                    &e.payload,
+                    now,
+                    live.as_ref().map(|(s, m)| (s.as_str(), m.as_str())),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The committed mirror in this checkout: its stamp **and whose it is**.
+///
+/// Both halves matter. A checkout's `docs/decisions/` is rewritten by this
+/// machine's own wave-close export (`scripts/fleet/ratify-merged.sh`), so its
+/// stamp routinely belongs to a *different* machine than the one a given
+/// decision arrived from. Ageing a decision from `4090` against this box's own
+/// fresh export would clear the marker for a mirror nobody re-pulled, and print
+/// `from 4090 — exported <this box's timestamp>`, which is simply false.
+///
+/// Prefixes and trimming match `edda_ledger::sync::parse_index_meta` and
+/// `edda_bridge_claude::mirror_import::read_stamp` — three readers of one file,
+/// which only stay in agreement if they all strip it the same way.
+fn live_mirror(repo_root: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(repo_root.join(MIRROR_INDEX)).ok()?;
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    Some((
+        field("- **Exported at**:")?,
+        field("- **Exporting machine**:")?,
+    ))
+}
+
+/// Whether a per-hit lookup could find any provenance at all.
+///
+/// Same best-effort rule as the lookups it guards: a probe that could not be
+/// read answers `true`, because failing to read the ledger is not evidence that
+/// nothing arrived over a mirror. The cost of being wrong that way is the
+/// per-hit path that ran before this short-circuit existed.
+fn may_hold_mirror_origins(ledger: &Ledger) -> bool {
+    match ledger.iter_events_by_type(MIRROR_STAMP_EVENT_TYPE) {
+        Ok(imports) => !imports.is_empty(),
+        Err(_) => true,
+    }
+}
+
+/// Annotate an in-memory hit list with the origins from [`origins_for_hits`].
+pub fn annotate_hits(hits: &mut [DecisionHit], origins: &[Option<MirrorOrigin>]) {
+    for (hit, origin) in hits.iter_mut().zip(origins.iter()) {
+        hit.mirror = origin.clone();
+    }
+}
+
+/// The pure half: read `payload["mirror"]` for provenance, and age the mirror
+/// this checkout actually holds — falling back to the frozen import stamp only
+/// when there is no live mirror to read.
+fn origin_from_payload(
+    payload: &serde_json::Value,
+    now: OffsetDateTime,
+    live: Option<(&str, &str)>,
+) -> Option<MirrorOrigin> {
+    let mirror = payload.get("mirror")?.as_object()?;
+    let machine = mirror
+        .get("machine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let frozen = mirror
+        .get("exported_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    // The live stamp only speaks for this decision if the mirror in the
+    // checkout is the same machine's. Anyone else's — including this box's own
+    // re-export — says nothing about how current `machine`'s rulings are.
+    let exported_at = live
+        .filter(|(_, live_machine)| *live_machine == machine)
+        .map(|(stamp, _)| stamp.to_string())
+        .or(frozen);
+    let age_hours = exported_at.as_deref().and_then(|ts| {
+        OffsetDateTime::parse(ts, &Rfc3339)
+            .ok()
+            .map(|t| (now - t).as_seconds_f64() / 3600.0)
+    });
+    Some(MirrorOrigin {
+        machine,
+        exported_at,
+        // Same rule as the import-time warning: unknown age is stale.
+        is_stale: match age_hours {
+            Some(h) => h >= DEFAULT_MIRROR_STALE_HOURS as f64,
+            None => true,
+        },
+        age_hours,
+        threshold_hours: DEFAULT_MIRROR_STALE_HOURS,
+    })
+}
+
+/// The human line `edda ask` prints under a decision that rode a dead mirror.
+pub fn stale_hint(origin: &MirrorOrigin) -> String {
+    let age = match origin.age_hours {
+        Some(h) => format!("{h:.1}h old"),
+        None => "stamp missing or unreadable".to_string(),
+    };
+    format!(
+        "⚠ stale-mirror hint: from {} — exported {} ({age}, threshold {}h). Re-export on the source machine and pull.",
+        origin.machine,
+        origin.exported_at.as_deref().unwrap_or("?"),
+        origin.threshold_hours,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use edda_core::event::{finalize_event, new_note_event};
+    use edda_core::Event;
+    use edda_ledger::ledger::{init_branches_json, init_head, init_workspace};
+    use edda_ledger::paths::EddaPaths;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A real on-disk ledger — this workspace does not mock internal crates,
+    /// and the short-circuit below is a claim about what SQLite holds.
+    fn setup() -> Ledger {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!("edda_ask_mirror_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let paths = EddaPaths::discover(&tmp);
+        init_workspace(&paths).unwrap();
+        init_head(&paths, "main").unwrap();
+        init_branches_json(&paths, "main").unwrap();
+        Ledger::open(&tmp).unwrap()
+    }
+
+    fn append(ledger: &Ledger, event: &Event) -> String {
+        let mut chained = event.clone();
+        chained.parent_hash = ledger.last_event_hash().unwrap();
+        finalize_event(&mut chained).unwrap();
+        ledger.append_event(&chained).unwrap();
+        chained.event_id
+    }
+
+    fn note(text: &str) -> Event {
+        new_note_event("main", None, "system", text, &[]).unwrap()
+    }
+
+    /// A `decision_import` carrying the stamp `sync::make_import_event` writes.
+    fn mirror_import(machine: &str, exported_at: &str) -> Event {
+        let mut e = note("[sync] imported db.engine=sqlite");
+        e.event_type = "decision_import".to_string();
+        e.payload["mirror"] = serde_json::json!({
+            "machine": machine,
+            "exported_at": exported_at,
+        });
+        e
+    }
+
+    fn hit(event_id: &str) -> DecisionHit {
+        DecisionHit {
+            event_id: event_id.to_string(),
+            key: "db.engine".to_string(),
+            value: "sqlite".to_string(),
+            reason: String::new(),
+            domain: "db".to_string(),
+            branch: "main".to_string(),
+            ts: "2026-09-07T00:00:00Z".to_string(),
+            is_active: true,
+            governance: crate::DecisionGovernance::default(),
+            tags: Vec::new(),
+            village_id: None,
+            staleness: None,
+            mirror: None,
+        }
+    }
+
+    fn at(ts: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(ts, &Rfc3339).unwrap()
+    }
+
+    fn payload(exported_at: Option<&str>) -> serde_json::Value {
+        match exported_at {
+            Some(ts) => serde_json::json!({"mirror": {"machine": "4090", "exported_at": ts}}),
+            None => serde_json::json!({"mirror": {"machine": "4090", "exported_at": null}}),
+        }
+    }
+
+    #[test]
+    fn a_decision_that_never_rode_a_mirror_has_no_origin() {
+        // The single-machine case: every decision, and the reason the marker
+        // does not become noise in a solo project.
+        let local = serde_json::json!({"role": "system", "decision": {"key": "db.engine"}});
+        assert!(origin_from_payload(&local, at("2026-09-07T00:00:00Z"), None).is_none());
+    }
+
+    #[test]
+    fn a_fresh_mirror_is_not_marked() {
+        let o = origin_from_payload(
+            &payload(Some("2026-09-07T00:00:00Z")),
+            at("2026-09-07T06:00:00Z"),
+            None,
+        )
+        .expect("mirror payload");
+        assert_eq!(o.machine, "4090");
+        assert!(!o.is_stale, "6h < 24h threshold");
+        assert!((o.age_hours.expect("parsed stamp") - 6.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_mirror_past_the_threshold_is_marked_stale() {
+        let o = origin_from_payload(
+            &payload(Some("2026-09-01T00:00:00Z")),
+            at("2026-09-07T00:00:00Z"),
+            None,
+        )
+        .expect("mirror payload");
+        assert!(o.is_stale, "144h >= 24h threshold");
+        assert!(stale_hint(&o).contains("4090"));
+        assert!(stale_hint(&o).contains("144.0h old"));
+    }
+
+    #[test]
+    fn exactly_at_the_threshold_is_stale() {
+        // Boundary matches `MirrorFreshness::is_stale`: `>=`, not `>`.
+        let o = origin_from_payload(
+            &payload(Some("2026-09-06T00:00:00Z")),
+            at("2026-09-07T00:00:00Z"),
+            None,
+        )
+        .expect("mirror payload");
+        assert!(o.is_stale);
+    }
+
+    #[test]
+    fn a_fresh_checkout_clears_a_marker_the_frozen_stamp_would_hold_forever() {
+        // The round-3 P1. An already-imported decision is skipped on every
+        // later import, so `payload["mirror"]["exported_at"]` is frozen at
+        // whatever it was the first time. Ageing that meant a machine that
+        // pulls faithfully still read stale after 24h, permanently, and the
+        // hint's own remedy could not clear it. Freshness is the mirror this
+        // checkout holds now.
+        let frozen_and_ancient = payload(Some("2026-08-01T00:00:00Z"));
+        let now = at("2026-09-07T00:00:00Z");
+
+        let without_live =
+            origin_from_payload(&frozen_and_ancient, now, None).expect("mirror payload");
+        assert!(
+            without_live.is_stale,
+            "no live mirror to read ⇒ the frozen stamp is all we have"
+        );
+
+        let with_live = origin_from_payload(
+            &frozen_and_ancient,
+            now,
+            Some(("2026-09-06T18:00:00Z", "4090")),
+        )
+        .expect("mirror payload");
+        assert!(
+            !with_live.is_stale,
+            "a mirror re-exported 6h ago is not stale, whatever the import stamp said"
+        );
+        assert_eq!(
+            with_live.exported_at.as_deref(),
+            Some("2026-09-06T18:00:00Z"),
+            "the stamp reported is the one freshness was judged against"
+        );
+        assert_eq!(
+            with_live.machine, "4090",
+            "provenance still comes from the import event, not the live index"
+        );
+    }
+
+    #[test]
+    fn another_machines_fresh_export_does_not_clear_this_ones_marker() {
+        // Round 4. The checkout's `docs/decisions/` is rewritten by whichever
+        // machine last ran the wave-close export — routinely this box, not the
+        // one a given decision came from. Taking its stamp unconditionally
+        // cleared the marker for a mirror nobody re-pulled and printed
+        // "from 4090 — exported <this box's timestamp>", which is false.
+        let from_4090 = payload(Some("2026-08-01T00:00:00Z"));
+        let now = at("2026-09-07T00:00:00Z");
+
+        let foreign =
+            origin_from_payload(&from_4090, now, Some(("2026-09-06T23:00:00Z", "docs-box")))
+                .expect("mirror payload");
+        assert!(
+            foreign.is_stale,
+            "a fresh export by docs-box says nothing about how current 4090's rulings are"
+        );
+        assert_eq!(
+            foreign.exported_at.as_deref(),
+            Some("2026-08-01T00:00:00Z"),
+            "the frozen stamp is reported, never another machine's"
+        );
+
+        // Same stamp, same machine: that is the pull the marker exists to
+        // reward, and it must still clear.
+        let ours = origin_from_payload(&from_4090, now, Some(("2026-09-06T23:00:00Z", "4090")))
+            .expect("mirror payload");
+        assert!(!ours.is_stale);
+        assert_eq!(ours.exported_at.as_deref(), Some("2026-09-06T23:00:00Z"));
+    }
+
+    #[test]
+    fn an_unreadable_stamp_is_stale_not_silently_fresh() {
+        // Death visibility: unknown freshness must be visible.
+        let missing = origin_from_payload(&payload(None), at("2026-09-07T00:00:00Z"), None)
+            .expect("mirror payload");
+        assert!(missing.is_stale);
+        assert!(missing.age_hours.is_none());
+        assert!(stale_hint(&missing).contains("stamp missing or unreadable"));
+
+        let garbage = origin_from_payload(
+            &payload(Some("not-a-timestamp")),
+            at("2026-09-07T00:00:00Z"),
+            None,
+        )
+        .expect("mirror payload");
+        assert!(garbage.is_stale);
+        assert!(garbage.age_hours.is_none());
+    }
+
+    /// The half of the short-circuit that must NOT fire: a ledger holding a
+    /// mirror import still resolves provenance one hit at a time. The
+    /// locally-decided row beside it stays `None`, so a passing probe cannot be
+    /// mistaken for a blanket "everything here came over a mirror".
+    #[test]
+    fn a_ledger_with_a_mirror_import_annotates_exactly_the_imported_hit() {
+        let ledger = setup();
+        let local = append(&ledger, &note("decided here this morning"));
+        let imported = append(&ledger, &mirror_import("4090", "2026-01-01T00:00:00Z"));
+
+        let mut hits = vec![hit(&imported), hit(&local), hit("evt_not_in_this_ledger")];
+        let origins = origins_for_hits(&ledger, &hits, None);
+        annotate_hits(&mut hits, &origins);
+
+        let o = hits[0].mirror.as_ref().expect("the import carries a stamp");
+        assert_eq!(o.machine, "4090");
+        assert_eq!(o.exported_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert!(o.is_stale, "a stamp from 2026-01-01 is long past 24h");
+        assert!(
+            hits[1].mirror.is_none(),
+            "a locally-decided row in a mirror-fed ledger did not ride a mirror"
+        );
+        assert!(
+            hits[2].mirror.is_none(),
+            "an event that cannot be read is not evidence of a mirror"
+        );
+    }
+
+    /// The single-machine case the short-circuit exists for. The `None`s here
+    /// have to be the same `None`s the per-hit path produced, so the test pins
+    /// both halves: the events really are in the ledger (a lookup would have
+    /// found them and still answered `None`), and there is no
+    /// `decision_import` for one to find.
+    #[test]
+    fn a_ledger_with_no_mirror_import_answers_none_for_every_hit() {
+        let ledger = setup();
+        let local = append(&ledger, &note("decided here this morning"));
+
+        assert!(
+            ledger.get_event(&local).unwrap().is_some(),
+            "the row is present, so `None` below is the short-circuit's answer \
+             and not a lookup that missed"
+        );
+        assert!(
+            ledger
+                .iter_events_by_type(MIRROR_STAMP_EVENT_TYPE)
+                .unwrap()
+                .is_empty(),
+            "the condition the short-circuit keys on"
+        );
+
+        let mut hits = vec![hit(&local), hit("evt_not_in_this_ledger")];
+        let origins = origins_for_hits(&ledger, &hits, None);
+        assert_eq!(
+            origins.len(),
+            hits.len(),
+            "one answer per hit, short-circuit or not — `annotate_hits` zips \
+             the two and would silently drop the tail"
+        );
+        assert!(origins.iter().all(Option::is_none));
+        annotate_hits(&mut hits, &origins);
+        assert!(hits.iter().all(|h| h.mirror.is_none()));
+
+        assert!(
+            origins_for_hits(&ledger, &[], None).is_empty(),
+            "no hits, no probe: a query that matched nothing did no ledger \
+             work before this short-circuit and must do none after"
+        );
+    }
+}

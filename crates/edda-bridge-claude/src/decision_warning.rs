@@ -326,6 +326,7 @@ mod tests {
             supersedes_id: None,
             review_after: None,
             village_id: None,
+            source_event_id: None,
         };
         let warning = format_warning(&[&view]);
         assert!(warning.contains("`test.key=val` [active]"));

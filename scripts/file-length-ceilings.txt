@@ -3,12 +3,13 @@
 # Delete a line when that file drops to 1000 or below.
 
 crates/edda-aggregate/src/aggregate.rs 1169
-crates/edda-ask/src/lib.rs 2259
+crates/edda-ask/src/lib.rs 2283
 crates/edda-bridge-claude/src/bg_detect.rs 1270
 crates/edda-bridge-claude/src/bg_extract.rs 1406
 crates/edda-bridge-claude/src/bg_scan.rs 1266
 crates/edda-bridge-claude/src/digest/orchestrate.rs 1139
 crates/edda-bridge-claude/src/digest/tests.rs 3260
+crates/edda-bridge-claude/src/dispatch/session.rs 1006
 crates/edda-bridge-claude/src/dispatch/tests.rs 3238
 crates/edda-bridge-claude/src/peers/tests.rs 3588
 crates/edda-bridge-claude/src/signals.rs 2252

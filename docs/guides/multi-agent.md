@@ -223,6 +223,131 @@ The coordination layer runs entirely on local files:
 
 No central server, no network communication. Two Claude Code sessions on the same repo coordinate automatically.
 
+## Cross-machine decision mirror (GH-671)
+
+Everything above coordinates sessions on one machine. Decisions recorded in a
+ledger are machine-local by design (`#613` §2: `.edda/` is gitignored), so
+`edda ask` on machine B cannot see a ruling made on machine A. The binding
+ruling is:
+
+`ledger.cross-machine-projection=committed-mirror-stamped-at-wave-close-quote-never-paraphrase`
+
+The cross-machine projection of decisions is a **git-committed mirror**, not a
+network protocol:
+
+- **Write (source machine).** The ruling fixes the path, the cadence and the
+  commit subject; they are quoted here, not restated. It binds "(1) the export
+  is committed as a generated MIRROR under `docs/decisions/`, every file marked
+  generated-do-not-edit and carrying its source event id" and "(3) regeneration
+  happens at wave close, not per decision ... always in its own commit
+  `chore(ledger): export decision projection @ <ts>`". The trigger that carries
+  it is
+  `fleet.ledger-sync-trigger=import-on-sessionstart-export-at-wave-close-post-merge`:
+  the export runs from the post-merge step `scripts/fleet/ratify-merged.sh`,
+  because decisions become binding at merge (`decision.auto-ratify`), which is
+  the wave-close moment clause (3) asks for. Two constraints that decision
+  measured shape the step: `main` is protected (PR required, `CI Gate` +
+  `Independent Review` required, zero bypass actors), so the projection commit
+  reaches `main` through a PR rather than a direct push; and INDEX.md's
+  `- **Exported at**:` stamp is rewritten on every export, so the tree is
+  always dirty afterwards and the no-op test compares decision *content* with
+  that stamp excluded.
+- **Read (target machine).** The import half of the same trigger key runs at
+  **SessionStart** — `crates/edda-bridge-claude/src/mirror_import.rs`, called
+  from `dispatch_session_start`. It is in-process (never a subprocess: a spawn
+  costs ~2.7 s on every session of every project), it returns before opening
+  the ledger unless the mirror's `- **Exported at**:` stamp differs from the
+  one recorded in `state/mirror_import.json`, it degrades to silence rather
+  than failing or delaying session start, and when it does import something it
+  injects a `## Cross-machine mirror` line into the pack — an import nobody is
+  told about is the same as no import. `edda sync --from-mirror docs/decisions`
+  remains the manual equivalent and is what reports a real error.
+  Same rule as sqlite sync (#394): same key with a different value imports
+  **inactive** — merge, never overwrite (the injected line names the count,
+  because an inactive row is invisible to `edda ask` until someone resolves
+  it). A decision whose original event already exists locally is skipped, so a
+  machine importing its own mirror is a no-op.
+- **Identity is the origin's, so a mesh converges.** The export publishes the
+  event id of the machine that *first recorded* the decision
+  (`DecisionView::source_event_id`), never the local row id. Publishing the
+  local id would give an imported decision a fresh identity on every hop: A
+  decides, B imports, B re-exports under B's id, and A imports its own ruling
+  back as if B had made it — once per wave, forever, each time superseding A's
+  original row and stamping it as a peer's. The origin id is what the
+  importer's self-import guard tests, so the loop closes instead of running.
+- **Ratified state travels; operator authority does not.** A ratified decision
+  arrives ratified — the state is part of the round trip doneWhen — replayed as
+  an append-only `decision_ratify` event. But that ratification is read from a
+  `- **Governance**: ratified by <who> at <ts>` line in a text file: no hash
+  chain, no source event hash, and since the SessionStart trigger, no human in
+  the loop at all. So the replay is attributed to `mirror:<machine>` under
+  `ratify.authority=typed-prefix`, never to the name the markdown claimed, and
+  `edda ask` renders it `ratified on <machine> (via mirror)`. Anything else
+  would let a text file mint local operator authority on every machine that
+  pulls, against the invariant in `edda_core::event::new_decision_ratify_event`
+  that operator authority is conferred by an event and never self-declared on
+  write.
+- **Values are quoted, never paraphrased.** The mirror carries the verbatim
+  value and reason of every decision; the import must never mint a value from
+  an INDEX gloss (INDEX.md carries counts and freshness only). The
+  `fleet.lane-profile` acceptance is the worked example: the verbatim value
+  `agent-actor-is-the-profile` with its six-point reason must survive the
+  round trip — the design-doc gloss `actor-is-profile` must not win.
+- **Citations ride the mirror.** `edda decide --cite` records the authority a
+  decision rests on, and `cites` lives in the decision event payload rather
+  than a projected column (`decision.cites=event-payload-not-sqlite-column`).
+  The export reads it from there and emits `- **Cites**:`; the import writes it
+  back into `payload["decision"]["cites"]` on the `decision_import` event,
+  which is the shape `edda ratify --by-rule` consumes. Dropping it would leave
+  a mirror that lies by omission about *why* a decision binds.
+- **Freshness (death visibility), at both ends.** `INDEX.md` is stamped on
+  every export with `- **Exported at**:` (RFC 3339) and
+  `- **Exporting machine**:`. If the stamp is older than **24 hours** (default,
+  `edda-ledger::sync::DEFAULT_MIRROR_STALE_HOURS`) — or unreadable — `edda
+  sync --from-mirror` prints a visible `⚠ STALE MIRROR` line naming the
+  threshold, stamp and machine before importing. Unknown freshness is treated
+  as stale, never silently fresh.
+  That warning dies with the command, so freshness is re-derived at query
+  time from the mirror **this checkout holds now** — not from the stamp
+  frozen on the import event, which can never be rewritten because an
+  already-imported decision is skipped on every later import, and ageing
+  it left a faithful machine permanently marked stale with no way back.
+  `edda ask` prints
+  `⚠ stale-mirror hint: …` under any decision that arrived over a mirror past
+  the threshold (`crates/edda-ask/src/mirror.rs`). A locally-decided row is
+  never marked, and a fresh mirror stays silent — the marker is the exception,
+  which is what keeps it worth reading. In `--json` the field is `mirror`,
+  omitted entirely when absent.
+- **Doorbell boundary.** The mirror is truth-layer replication: it rides git
+  and delivers whenever the clone pulls, with no resident process. There is
+  deliberately **no cross-platform doorbell** in this issue — live push over
+  Tailscale (`edda node` / `edda inbox`) is #685, as is session identity
+  (`label@machine`, collision warning). The mirror carries the *decisions*;
+  it does not implement them.
+
+### Auditing a doneWhen that says 「決策 X 已在帳本」(`audit.ledger-donewhen`)
+
+This is the named home of the audit rule. When an issue's doneWhen claims a
+decision of the form 「決策 X 已在帳本」("decision X is in the ledger"), audit it
+by **citing the decision key and the machine**:
+
+1. Name the exact key (e.g. `fleet.merge-authority`) and the machine whose
+   ledger is claimed to hold it (e.g. `4090`).
+2. Check the committed mirror of that machine: look up the key under
+   `docs/decisions/decisions/<domain>.md` in a checkout that carries machine's
+   mirror push, or run `edda ask <key>` on the machine itself. The INDEX
+   stamp tells you how fresh the evidence is (see the 24h threshold above).
+   That directory is generated, so it does not exist in a fresh clone: it
+   appears once the first projection PR merges. Its absence is "no wave has
+   closed yet", never "the decision was not made".
+3. **not-found is ledger locality, not an absent ruling.** If the key is not
+   in *your* ledger or mirror, that means the ruling lives on another
+   machine's ledger, or your mirror checkout is stale — re-export or
+   `edda sync --from-mirror docs/decisions` before concluding anything. It does
+   **not** mean the decision was never made. Only after the machine named in
+   the claim provably lacks the key (fresh mirror, key absent) is the claim
+   refuted.
+
 ## Typical workflow
 
 ```bash
@@ -245,3 +370,6 @@ Each agent will:
 - **Same machine only** — peer discovery uses local filesystem
 - **Bash bypass** — scope claims apply to Edit/Write tools; `sed` and `mv` in Bash are not checked
 - **Stale heartbeats** — heartbeats older than 120 seconds are considered inactive
+- **Decision mirrors** — the committed mirror under `docs/decisions/` is generated
+  by `edda export md` (see the section above); hand-edits to it are lost on the
+  next export, and the SQLite ledger stays the single source of truth

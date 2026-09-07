@@ -61,8 +61,38 @@ case $pr in
 esac
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/ratify-merged.XXXXXX")
-cleanup() { rm -rf "$work"; }
-trap cleanup 0 HUP INT TERM
+
+# `projection()` below leaves two marks on the operator's own checkout: the
+# generated mirror in the working tree, and the scratch branch it commits on.
+# Undoing both belongs here and not at each call site, because the paths that
+# lose the operator their branch are the ones that never reach a call site —
+# a `set -e` abort, or an INT during `git push`.
+restore_branch=""
+
+# The mirror is generated, so discarding it costs nothing — but it has to go
+# all the way down to untracked files. `git checkout --` alone cannot: a
+# half-written export stays in the tree, and every later run then stops at the
+# clean-tree guard until someone clears it by hand. Path-limited throughout:
+# nothing outside the generated mirror is ever swept.
+reset_mirror() {
+    git reset --quiet -- docs/decisions 2>/dev/null || true
+    git checkout --quiet -- docs/decisions 2>/dev/null || true
+    git clean --quiet --force -d -- docs/decisions 2>/dev/null || true
+}
+
+cleanup() {
+    if [ -n "$restore_branch" ]; then
+        reset_mirror
+        git checkout --quiet "$restore_branch" 2>/dev/null || true
+        restore_branch=""
+    fi
+    rm -rf "$work"
+}
+trap cleanup 0
+# A signal has to stop the script. Left as a plain `trap cleanup INT`, the
+# shell resumes at the next command — which would run `gh pr create` on a
+# branch cleanup() has already switched away from.
+trap 'cleanup; exit 130' HUP INT TERM
 
 body=$work/body.md
 if [ -n "$body_file" ]; then
@@ -90,10 +120,9 @@ keys=$(sed -n 's/^[Dd]ecision:[[:space:]]*//p' "$body" | tr ',' '\n' \
 
 if [ -z "$keys" ]; then
     echo "ratify-merged: pr#$pr has no Decision: line — nothing to ratify"
-    exit 0
 fi
 
-printf '%s\n' "$keys" | while IFS= read -r key; do
+[ -z "$keys" ] || printf '%s\n' "$keys" | while IFS= read -r key; do
     [ -n "$key" ] || continue
     if [ -n "$title" ]; then
         edda ratify "$key" --evidence "pr#$pr@$sha" --note "$title" || code=$?
@@ -104,5 +133,110 @@ printf '%s\n' "$keys" | while IFS= read -r key; do
     echo "ratify-merged: $key -> exit $code"
     unset code
 done
+
+# ── decision projection (GH-671) ─────────────────────────────────────
+#
+# `ledger.cross-machine-projection` (ratified) is quoted, not restated: the
+# mirror is committed under `docs/decisions/`, regeneration "happens at wave
+# close, not per decision ... always in its own commit chore(ledger): export
+# decision projection @ <ts>".
+#
+# This is the export half of
+# `fleet.ledger-sync-trigger=import-on-sessionstart-export-at-wave-close-post-merge`.
+# Two constraints that decision measured shape the rest:
+#
+#   (a) `main` is protected — PR required, `CI Gate` + `Independent Review`
+#       required, zero bypass actors — so the projection commit reaches
+#       `main` through a PR. This step never commits on the default branch
+#       itself: it branches, commits, pushes and opens the PR.
+#   (b) INDEX.md's `- **Exported at**:` stamp is rewritten on every export,
+#       so the tree is *always* dirty afterwards. The no-op test below
+#       compares decision CONTENT with that stamp excluded; comparing the
+#       stamp would open a chore commit after every merge, forever.
+#
+# Fail-soft throughout: every failure reports and returns 0, for the same
+# reason a failing `edda ratify` is not fatal. Nothing below restores the
+# checkout or the tree itself — `cleanup()` at the top of the file owns that,
+# so the operator lands back on their branch whether this returns, aborts, or
+# is interrupted.
+projection() {
+    if [ "${EDDA_PROJECTION:-on}" = off ]; then
+        echo "ratify-merged: projection off (EDDA_PROJECTION=off)"
+        return 0
+    fi
+    if ! command -v edda >/dev/null 2>&1; then
+        echo "ratify-merged: projection skipped — edda not on PATH" >&2
+        return 0
+    fi
+    default=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    default=${default:-main}
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "$default" ]; then
+        echo "ratify-merged: projection skipped — on '$branch', not '$default'"
+        return 0
+    fi
+    # A dirty tree would ride along into the branch switch below.
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "ratify-merged: projection skipped — working tree not clean"
+        return 0
+    fi
+
+    # From here the tree is dirty by our own hand and, shortly, the checkout
+    # is off $default; arming cleanup() before the export is what makes an
+    # interrupted export reversible too.
+    restore_branch=$default
+
+    if ! edda export md --out docs/decisions >/dev/null; then
+        echo "ratify-merged: projection skipped — edda export md failed" >&2
+        return 0
+    fi
+
+    # (b): the stamp line is excluded, so an export that moved nothing but
+    # the clock counts as unchanged.
+    #
+    # Drop ONLY the `+++ `/`--- ` file headers. The obvious-looking
+    # `grep -v '^[+-][+-]'` also eats every added or removed markdown bullet
+    # (`+- **Value**: …`, `-- **Value**: …`), and `render_domain` writes a
+    # decision's whole payload as those bullets — so editing a decision inside
+    # an already-tracked domain file produced a diff made of nothing else,
+    # `changed` came back empty, and the projection reported "unchanged" and
+    # never opened a PR. Only brand-new domains got through, via `added`.
+    changed=$(git diff -U0 -- docs/decisions | grep '^[+-]' | grep -v '^+++ ' | grep -v '^--- ' | grep -v '^[+-]- \*\*Exported at\*\*:' | head -n 1)
+    added=$(git ls-files --others --exclude-standard -- docs/decisions | head -n 1)
+    if [ -z "$changed" ] && [ -z "$added" ]; then
+        echo "ratify-merged: projection unchanged — no decision content moved"
+        return 0
+    fi
+
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    work_branch="ledger/projection-$(printf '%s' "$ts" | tr ':' '-')"
+    if ! git checkout --quiet -b "$work_branch"; then
+        echo "ratify-merged: projection skipped — cannot branch" >&2
+        return 0
+    fi
+    # Path-limited: never sweeps anything outside the generated mirror.
+    if ! git add -- docs/decisions; then
+        echo "ratify-merged: projection skipped — cannot stage the mirror" >&2
+        return 0
+    fi
+    if ! git commit --quiet -m "chore(ledger): export decision projection @ $ts" -- docs/decisions; then
+        echo "ratify-merged: projection commit failed" >&2
+        return 0
+    fi
+    if git push --quiet origin "$work_branch" 2>/dev/null; then
+        gh pr create --base "$default" --head "$work_branch" --title "chore(ledger): export decision projection @ $ts" --body-file - <<PRBODY || echo "ratify-merged: projection PR not opened — open it from $work_branch" >&2
+Generated at wave close by \`scripts/fleet/ratify-merged.sh\`.
+
+Regenerates the committed decision mirror under \`docs/decisions/\` per
+\`ledger.cross-machine-projection\`. Every file is generated by
+\`edda export md\` — never hand-edit one.
+PRBODY
+    else
+        echo "ratify-merged: projection pushed nothing — branch $work_branch is local" >&2
+    fi
+    echo "ratify-merged: projection exported @ $ts on $work_branch"
+}
+
+projection
 
 exit 0
