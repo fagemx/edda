@@ -205,7 +205,7 @@ fn render_domain(
             out.push_str(&format!(
                 "- **Cites**: {}\n",
                 list.iter()
-                    .map(|c| format!("`{}`", c))
+                    .map(|c| format!("`{}`", escape_field(c)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -215,7 +215,7 @@ fn render_domain(
                 "- **Affected paths**: {}\n",
                 row.affected_paths
                     .iter()
-                    .map(|p| format!("`{}`", p))
+                    .map(|p| format!("`{}`", escape_field(p)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -225,7 +225,7 @@ fn render_domain(
                 "- **Tags**: {}\n",
                 row.tags
                     .iter()
-                    .map(|t| format!("`{}`", t))
+                    .map(|t| format!("`{}`", escape_field(t)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

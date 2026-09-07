@@ -16,13 +16,30 @@
 //! Staleness matches [`edda_ledger::sync::MirrorFreshness::is_stale`]: older
 //! than the threshold, **or unreadable**. Unknown freshness must be visible,
 //! never silently fresh.
+//!
+//! **Provenance is frozen; freshness is live.** Which machine a decision came
+//! over is a fact about the past and is read from the import event. How stale
+//! that is cannot be, because an already-imported decision is *skipped* on
+//! every later import (`sync_from_mirror`'s self-import guard), so the stamp on
+//! its import event is never rewritten. Ageing that frozen stamp meant every
+//! mirrored decision on a perfectly current machine read stale 24 hours after
+//! it first arrived, forever, and the hint's own remedy — re-export and pull —
+//! could not clear it. So freshness is taken from the mirror **in this
+//! checkout at query time**, which is what "讀端過期" names and what pulling a
+//! fresh mirror actually changes. The frozen stamp is the fallback for a
+//! checkout that has no mirror to read.
 
 use crate::DecisionHit;
 use edda_ledger::sync::DEFAULT_MIRROR_STALE_HOURS;
 use edda_ledger::Ledger;
 use serde::Serialize;
+use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+/// Repo-relative mirror directory, fixed by `ledger.cross-machine-projection`
+/// clause (1). Kept in step with `edda_bridge_claude::mirror_import`.
+const MIRROR_INDEX: &str = "docs/decisions/INDEX.md";
 
 /// The only event type that can carry `payload["mirror"]`.
 ///
@@ -39,7 +56,9 @@ pub struct MirrorOrigin {
     /// Exporting machine from the mirror's `INDEX.md`, or the directory name
     /// when the stamp named none.
     pub machine: String,
-    /// The mirror's `- **Exported at**:` stamp; absent when it was missing.
+    /// The `- **Exported at**:` stamp freshness was judged against: the mirror
+    /// in this checkout when there is one, otherwise the stamp this row was
+    /// imported under. Absent when neither could be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exported_at: Option<String>,
     /// Age of that stamp in hours at query time; `None` when unparseable.
@@ -55,7 +74,11 @@ pub struct MirrorOrigin {
 /// Best-effort by construction: a hit whose event cannot be read maps to
 /// `None` rather than failing the query — an unreadable event is not evidence
 /// that a decision came from a mirror.
-pub fn origins_for_hits(ledger: &Ledger, hits: &[DecisionHit]) -> Vec<Option<MirrorOrigin>> {
+pub fn origins_for_hits(
+    ledger: &Ledger,
+    hits: &[DecisionHit],
+    repo_root: Option<&Path>,
+) -> Vec<Option<MirrorOrigin>> {
     // `edda ask` runs this twice per query (decisions + timeline) and once more
     // per project under `--fleet`, so the per-hit `get_event` below is paid ~2N
     // times — for a field that is `None` on every row of a single-machine
@@ -68,15 +91,30 @@ pub fn origins_for_hits(ledger: &Ledger, hits: &[DecisionHit]) -> Vec<Option<Mir
         return vec![None; hits.len()];
     }
     let now = OffsetDateTime::now_utc();
+    // Read once for the whole list: it is the same mirror for every hit.
+    let live = repo_root.and_then(live_mirror_stamp);
     hits.iter()
         .map(|h| {
             ledger
                 .get_event(&h.event_id)
                 .ok()
                 .flatten()
-                .and_then(|e| origin_from_payload(&e.payload, now))
+                .and_then(|e| origin_from_payload(&e.payload, now, live.as_deref()))
         })
         .collect()
+}
+
+/// The `- **Exported at**:` stamp of the committed mirror in this checkout.
+///
+/// Prefix and trimming match `edda_ledger::sync::parse_index_meta` and
+/// `edda_bridge_claude::mirror_import::read_stamp` — three readers of one line,
+/// which only stay in agreement if they all strip it the same way.
+fn live_mirror_stamp(repo_root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(repo_root.join(MIRROR_INDEX)).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("- **Exported at**:"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Whether a per-hit lookup could find any provenance at all.
@@ -99,18 +137,25 @@ pub fn annotate_hits(hits: &mut [DecisionHit], origins: &[Option<MirrorOrigin>])
     }
 }
 
-/// The pure half: read `payload["mirror"]` and age its stamp against `now`.
-fn origin_from_payload(payload: &serde_json::Value, now: OffsetDateTime) -> Option<MirrorOrigin> {
+/// The pure half: read `payload["mirror"]` for provenance, and age the mirror
+/// this checkout actually holds — falling back to the frozen import stamp only
+/// when there is no live mirror to read.
+fn origin_from_payload(
+    payload: &serde_json::Value,
+    now: OffsetDateTime,
+    live: Option<&str>,
+) -> Option<MirrorOrigin> {
     let mirror = payload.get("mirror")?.as_object()?;
     let machine = mirror
         .get("machine")
         .and_then(|v| v.as_str())
         .unwrap_or("?")
         .to_string();
-    let exported_at = mirror
+    let frozen = mirror
         .get("exported_at")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let exported_at = live.map(str::to_string).or(frozen);
     let age_hours = exported_at.as_deref().and_then(|ts| {
         OffsetDateTime::parse(ts, &Rfc3339)
             .ok()
@@ -224,7 +269,7 @@ mod tests {
         // The single-machine case: every decision, and the reason the marker
         // does not become noise in a solo project.
         let local = serde_json::json!({"role": "system", "decision": {"key": "db.engine"}});
-        assert!(origin_from_payload(&local, at("2026-09-07T00:00:00Z")).is_none());
+        assert!(origin_from_payload(&local, at("2026-09-07T00:00:00Z"), None).is_none());
     }
 
     #[test]
@@ -232,6 +277,7 @@ mod tests {
         let o = origin_from_payload(
             &payload(Some("2026-09-07T00:00:00Z")),
             at("2026-09-07T06:00:00Z"),
+            None,
         )
         .expect("mirror payload");
         assert_eq!(o.machine, "4090");
@@ -244,6 +290,7 @@ mod tests {
         let o = origin_from_payload(
             &payload(Some("2026-09-01T00:00:00Z")),
             at("2026-09-07T00:00:00Z"),
+            None,
         )
         .expect("mirror payload");
         assert!(o.is_stale, "144h >= 24h threshold");
@@ -257,15 +304,51 @@ mod tests {
         let o = origin_from_payload(
             &payload(Some("2026-09-06T00:00:00Z")),
             at("2026-09-07T00:00:00Z"),
+            None,
         )
         .expect("mirror payload");
         assert!(o.is_stale);
     }
 
     #[test]
+    fn a_fresh_checkout_clears_a_marker_the_frozen_stamp_would_hold_forever() {
+        // The round-3 P1. An already-imported decision is skipped on every
+        // later import, so `payload["mirror"]["exported_at"]` is frozen at
+        // whatever it was the first time. Ageing that meant a machine that
+        // pulls faithfully still read stale after 24h, permanently, and the
+        // hint's own remedy could not clear it. Freshness is the mirror this
+        // checkout holds now.
+        let frozen_and_ancient = payload(Some("2026-08-01T00:00:00Z"));
+        let now = at("2026-09-07T00:00:00Z");
+
+        let without_live =
+            origin_from_payload(&frozen_and_ancient, now, None).expect("mirror payload");
+        assert!(
+            without_live.is_stale,
+            "no live mirror to read ⇒ the frozen stamp is all we have"
+        );
+
+        let with_live = origin_from_payload(&frozen_and_ancient, now, Some("2026-09-06T18:00:00Z"))
+            .expect("mirror payload");
+        assert!(
+            !with_live.is_stale,
+            "a mirror re-exported 6h ago is not stale, whatever the import stamp said"
+        );
+        assert_eq!(
+            with_live.exported_at.as_deref(),
+            Some("2026-09-06T18:00:00Z"),
+            "the stamp reported is the one freshness was judged against"
+        );
+        assert_eq!(
+            with_live.machine, "4090",
+            "provenance still comes from the import event, not the live index"
+        );
+    }
+
+    #[test]
     fn an_unreadable_stamp_is_stale_not_silently_fresh() {
         // Death visibility: unknown freshness must be visible.
-        let missing = origin_from_payload(&payload(None), at("2026-09-07T00:00:00Z"))
+        let missing = origin_from_payload(&payload(None), at("2026-09-07T00:00:00Z"), None)
             .expect("mirror payload");
         assert!(missing.is_stale);
         assert!(missing.age_hours.is_none());
@@ -274,6 +357,7 @@ mod tests {
         let garbage = origin_from_payload(
             &payload(Some("not-a-timestamp")),
             at("2026-09-07T00:00:00Z"),
+            None,
         )
         .expect("mirror payload");
         assert!(garbage.is_stale);
@@ -291,7 +375,7 @@ mod tests {
         let imported = append(&ledger, &mirror_import("4090", "2026-01-01T00:00:00Z"));
 
         let mut hits = vec![hit(&imported), hit(&local), hit("evt_not_in_this_ledger")];
-        let origins = origins_for_hits(&ledger, &hits);
+        let origins = origins_for_hits(&ledger, &hits, None);
         annotate_hits(&mut hits, &origins);
 
         let o = hits[0].mirror.as_ref().expect("the import carries a stamp");
@@ -332,7 +416,7 @@ mod tests {
         );
 
         let mut hits = vec![hit(&local), hit("evt_not_in_this_ledger")];
-        let origins = origins_for_hits(&ledger, &hits);
+        let origins = origins_for_hits(&ledger, &hits, None);
         assert_eq!(
             origins.len(),
             hits.len(),
@@ -344,7 +428,7 @@ mod tests {
         assert!(hits.iter().all(|h| h.mirror.is_none()));
 
         assert!(
-            origins_for_hits(&ledger, &[]).is_empty(),
+            origins_for_hits(&ledger, &[], None).is_empty(),
             "no hits, no probe: a query that matched nothing did no ledger \
              work before this short-circuit and must do none after"
         );

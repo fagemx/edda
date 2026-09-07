@@ -307,8 +307,12 @@ network protocol:
   sync --from-mirror` prints a visible `⚠ STALE MIRROR` line naming the
   threshold, stamp and machine before importing. Unknown freshness is treated
   as stale, never silently fresh.
-  That warning dies with the command, so the stamp is also **persisted** on
-  the import event and re-derived at query time: `edda ask` prints
+  That warning dies with the command, so freshness is re-derived at query
+  time from the mirror **this checkout holds now** — not from the stamp
+  frozen on the import event, which can never be rewritten because an
+  already-imported decision is skipped on every later import, and ageing
+  it left a faithful machine permanently marked stale with no way back.
+  `edda ask` prints
   `⚠ stale-mirror hint: …` under any decision that arrived over a mirror past
   the threshold (`crates/edda-ask/src/mirror.rs`). A locally-decided row is
   never marked, and a fresh mirror stays silent — the marker is the exception,

@@ -172,39 +172,68 @@ REAL_GIT=$(command -v git)
 export REAL_GIT
 
 # `edda export md` writes a stamp line that moves on every run over content
-# that does not — the shape case 9 turns on. Same layout as render_index() in
-# crates/edda-cli/src/cmd_export.rs.
+# that does not — the shape case 9 turns on. Everything else here reproduces
+# what crates/edda-cli/src/cmd_export.rs writes for the one flag this hook
+# passes (`--out`): the generated-file banner (`HEADER`, cmd_export.rs:150),
+# `<out>/INDEX.md` from `render_index` (cmd_export.rs:272-313), and one
+# `<out>/decisions/<domain>.md` per domain from `render_domain`
+# (cmd_export.rs:42-52, 153-246) — note the `decisions/` level, which the
+# projection's own paths and case 12 both depend on. Simplified: one domain
+# holding one unratified decision with fixed field values, and no `notes.md`,
+# because `--include-notes` is a flag the hook never passes.
 cat >"$work/pbin/edda" <<'STUB'
 #!/bin/sh
 [ "${1:-}" = export ] || { echo "Ratified — now binding."; exit 0; }
 out=docs/decisions
+machine=
 while [ $# -gt 0 ]; do
     case $1 in
         --out) out=$2; shift 2 ;;
+        --machine) machine=$2; shift 2 ;;
         *) shift ;;
     esac
 done
-mkdir -p "$out/ledger"
+# resolve_machine()'s precedence (cmd_export.rs:321-347). Constant for the
+# life of a run, so unlike the stamp it never moves the diff on its own.
+machine=${machine:-${EDDA_MACHINE:-${COMPUTERNAME:-${HOSTNAME:-unknown}}}}
+header='<!-- edda-ledger-export v1 — GENERATED FILE, DO NOT EDIT — SQLite ledger is authoritative -->'
+mkdir -p "$out/decisions"
+# The bullet shape `render_domain` actually writes: a decision's whole payload
+# is `- **Field**: …` lines. Case 12 depends on that, because a diff made only
+# of those lines is what the change detector used to throw away.
+# EDDA_EXPORT_VALUE moves one decision's value without touching anything else.
 {
-    printf '%s\n' '# Ledger export index' ''
-    printf '%s\n' "- **Exported at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf '%s\n' '- **Total decisions**: 1' ''
-    printf '%s\n' '## Decisions by domain' ''
-    printf '%s\n' '- [`ledger`](./ledger/ledger.md) — 1 decision(s)'
-} >"$out/INDEX.md"
+    printf '%s\n' "$header"
+    printf '%s\n' '# Domain: `ledger`' ''
+    printf '%s\n' '1 active decision(s), sorted by key.' ''
+    printf '%s\n' '## `ledger.cross-machine-projection`' ''
+    printf '%s\n' "- **Value**: \`${EDDA_EXPORT_VALUE:-committed-mirror}\`"
+    printf '%s\n' '- **Reason**: seeded by the stub'
+    printf '%s\n' '- **Branch/ts**: `main` · 2026-01-01T00:00:00Z'
+    printf '%s\n' '- **Governance**: unratified (agent)'
+    printf '%s\n' '- **Scope**: local'
+    printf '%s\n' '- **Authority**: agent'
+    printf '%s\n' '- **Reversibility**: medium'
+    printf '%s\n' '- **event_id**: `evt_stub`' ''
+} >"$out/decisions/ledger.md"
 # Half a mirror, then failure: the export is not atomic, so a run that dies
-# mid-way is the state case 11 has to survive.
+# mid-way is the state case 11 has to survive. `execute()` writes the domain
+# files first and INDEX.md last, so this is where a real mid-run death lands.
 if [ -n "${EDDA_EXPORT_PARTIAL:-}" ]; then
     echo "edda export md: simulated failure" >&2
     exit 1
 fi
-# The bullet shape `render_domain` actually writes (crates/edda-cli/src/
-# cmd_export.rs): a decision's whole payload is `- **Field**: …` lines. Case 12
-# depends on that, because a diff made only of those lines is what the change
-# detector used to throw away. EDDA_EXPORT_VALUE moves one decision's value
-# without touching anything else.
-printf '# Domain: `ledger`\n\n## `ledger.cross-machine-projection`\n\n- **Value**: `%s`\n- **Reason**: seeded by the stub\n- **event_id**: `evt_stub`\n' \
-    "${EDDA_EXPORT_VALUE:-committed-mirror}" >"$out/ledger/ledger.md"
+{
+    printf '%s\n' "$header"
+    printf '%s\n' '# Ledger export index' ''
+    printf '%s\n' "- **Exported at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' "- **Exporting machine**: $machine"
+    printf '%s\n' '- **Total decisions**: 1' ''
+    printf '%s' 'SQLite ledger is the single source of truth. These files exist so '
+    printf '%s\n' 'humans can `git diff` a snapshot of decisions and notes.' ''
+    printf '%s\n' '## Decisions by domain' ''
+    printf '%s\n' '- [`ledger`](./decisions/ledger.md) — 1 decision(s)' ''
+} >"$out/INDEX.md"
 STUB
 
 cat >"$work/pbin/gh" <<'STUB'
@@ -409,12 +438,13 @@ case $out in
         fail "case 12: an edited decision was reported unchanged: $out" ;;
 esac
 [ -s "$GH_CALLS" ] || fail "case 12: no PR opened for an edited decision: $out"
-grep -q 'ruling-was-revised' \
-    "$work/proj-edit.git/../proj-edit/docs/decisions/ledger/ledger.md" 2>/dev/null \
-    || true
 branch=$(git -C "$work/proj-edit.git" for-each-ref --format='%(refname:short)' refs/heads/ledger)
 [ -n "$branch" ] || fail "case 12: nothing pushed for an edited decision"
-git -C "$work/proj-edit.git" show "$branch:docs/decisions/ledger/ledger.md" \
+# The pushed branch is where the revised value has to be. The operator's own
+# checkout is deliberately NOT: cleanup() puts it back on main, so the file in
+# the working tree holds the seeded value again — which is what the clean-tree
+# assertion below pins.
+git -C "$work/proj-edit.git" show "$branch:docs/decisions/decisions/ledger.md" \
     | grep -q 'ruling-was-revised' \
     || fail "case 12: the pushed branch does not carry the revised value"
 [ -z "$(git -C "$work/proj-edit" status --porcelain)" ] \

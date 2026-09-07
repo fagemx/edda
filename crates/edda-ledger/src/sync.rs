@@ -382,6 +382,19 @@ pub fn sync_from_mirror(
             });
         }
 
+        // Same ruling, already ratified here by someone other than a mirror:
+        // there is nothing to learn from a peer's copy. Importing it would
+        // supersede the row the operator ratified, and ratification binds to a
+        // decision event, so the key would come out **unratified** — or, if the
+        // mirror's own ratification were replayed over it, restated as
+        // `mirror:<machine>`, silently losing whose act it was. Both are worse
+        // than doing nothing. Asked before the insert, because afterwards the
+        // active row is the one just written and the answer is always "no".
+        if !is_conflict && ratified_locally(target, &branch, &md.row.key)? {
+            result.skipped += 1;
+            continue;
+        }
+
         if dry_run {
             result.imported.push(ImportedDecision {
                 key: md.row.key.clone(),
@@ -410,6 +423,13 @@ pub fn sync_from_mirror(
         // (the latest decision for the key), so `edda ask` and exports show
         // it ratified without any view-layer special case. Conflicts import
         // inactive and never carry ratification.
+        //
+        // Never over an operator's own ratification, though: derivation takes
+        // the LATEST ratify per (branch, key), so replaying here would silently
+        // restate a local operator act as `mirror:<machine>`. The direction is
+        // conservative — it can only weaken attribution, never mint authority —
+        // but a machine that has already ruled on a key locally does not need a
+        // peer's copy of that fact, and must not lose whose ruling it was.
         if !is_conflict {
             if let Some(by) = &md.ratified_by {
                 append_mirror_ratification(target, &branch, &md.row.key, by, &source_name)?;
@@ -420,6 +440,19 @@ pub fn sync_from_mirror(
     }
 
     Ok(result)
+}
+
+/// Whether this key already carries a ratification that did **not** come from
+/// a mirror — i.e. one an operator issued on this machine.
+fn ratified_locally(target: &Ledger, branch: &str, key: &str) -> anyhow::Result<bool> {
+    let active = target.sqlite.find_active_decision(branch, key)?;
+    let Some(row) = active else {
+        return Ok(false);
+    };
+    Ok(target
+        .ratified_decisions_map()?
+        .get(&row.event_id)
+        .is_some_and(|info| !info.ratified_by.starts_with("mirror:")))
 }
 
 /// Replay a mirror ratification as an append-only fact, attributed to the
@@ -687,10 +720,14 @@ fn backtick_list_to_json(s: &str) -> String {
     serde_json::to_string(&backtick_list(s)).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// `` `a`, `b` `` → `vec!["a", "b"]`.
+/// `` `a`, `b` `` → `vec!["a", "b"]`, each item unescaped.
+///
+/// The export escapes every item (`cmd_export::escape_field`), so a tag or a
+/// citation containing a backslash or a newline survives the single-line
+/// encoding instead of splitting the list or truncating the value.
 fn backtick_list(s: &str) -> Vec<String> {
     s.split("`, `")
-        .map(|p| p.trim_matches('`').trim().to_string())
+        .map(|p| unescape_field(p.trim_matches('`').trim()))
         .filter(|p| !p.is_empty())
         .collect()
 }

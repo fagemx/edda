@@ -80,9 +80,9 @@ pub fn execute(
 
     // GH-671: mark decisions that arrived over a dead cross-machine mirror.
     // Same query-time derivation as staleness above; the ledger is untouched.
-    let decisions_mirror = origins_for_hits(&ledger, &result.decisions);
+    let decisions_mirror = origins_for_hits(&ledger, &result.decisions, Some(repo_root));
     annotate_mirror(&mut result.decisions, &decisions_mirror);
-    let timeline_mirror = origins_for_hits(&ledger, &result.timeline);
+    let timeline_mirror = origins_for_hits(&ledger, &result.timeline, Some(repo_root));
     annotate_mirror(&mut result.timeline, &timeline_mirror);
 
     if json {
@@ -172,9 +172,9 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
         // GH-671, same pass as the single-project arm: a sibling's decision
         // that rode a dead mirror is exactly as misleading read across the
         // fleet as it is read at home.
-        let decisions_mirror = origins_for_hits(&ledger, &result.decisions);
+        let decisions_mirror = origins_for_hits(&ledger, &result.decisions, Some(root));
         annotate_mirror(&mut result.decisions, &decisions_mirror);
-        let timeline_mirror = origins_for_hits(&ledger, &result.timeline);
+        let timeline_mirror = origins_for_hits(&ledger, &result.timeline, Some(root));
         annotate_mirror(&mut result.timeline, &timeline_mirror);
 
         Ok(vec![result])

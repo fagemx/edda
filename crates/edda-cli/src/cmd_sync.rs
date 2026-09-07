@@ -618,7 +618,10 @@ mod tests {
         );
         drop(a);
 
-        let mirror = a_root.join("docs").join("decisions");
+        // The mirror lives in B's checkout, which is the real shape: it is a
+        // git-committed directory both machines have. Freshness is read from
+        // it at query time, so ageing it here is what a stale pull looks like.
+        let mirror = b_root.join("docs").join("decisions");
         crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
 
         // Age the mirror by rewriting its stamp — the same edit a checkout
@@ -647,13 +650,54 @@ mod tests {
             ..Default::default()
         };
         let mut result = edda_ask::ask(&b, "fleet.lane-profile", &opts, None).unwrap();
-        let origins = edda_ask::mirror::origins_for_hits(&b, &result.decisions);
+        let origins = edda_ask::mirror::origins_for_hits(&b, &result.decisions, Some(&b_root));
         edda_ask::mirror::annotate_hits(&mut result.decisions, &origins);
-        result
+        let hit = result
             .decisions
-            .into_iter()
+            .iter()
             .find(|d| d.key == "fleet.lane-profile")
             .expect("ask sees the imported decision")
+            .clone();
+
+        // Round 3, P1: the marker has to CLEAR. An already-imported decision is
+        // skipped on every later import, so the stamp on its import event is
+        // frozen forever — ageing that meant a fully current machine read stale
+        // 24h after the first import and could never get back, with the hint's
+        // own remedy powerless. Freshness is the live mirror's, so re-exporting
+        // and pulling clears it. This is that pull.
+        // A real `edda export md` always writes the stamp, including into the
+        // unreadable-stamp variant that has none — so the refresh inserts it
+        // rather than only rewriting one that happens to be there.
+        let now_stamp = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let mut refreshed: Vec<String> = fs::read_to_string(&index_path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("- **Exported at**:"))
+            .map(str::to_string)
+            .collect();
+        refreshed.insert(1, format!("- **Exported at**: {now_stamp}"));
+        fs::write(&index_path, refreshed.join("\n")).unwrap();
+
+        let mut after = edda_ask::ask(&b, "fleet.lane-profile", &opts, None).unwrap();
+        let origins = edda_ask::mirror::origins_for_hits(&b, &after.decisions, Some(&b_root));
+        edda_ask::mirror::annotate_hits(&mut after.decisions, &origins);
+        let cleared = after
+            .decisions
+            .iter()
+            .find(|d| d.key == "fleet.lane-profile")
+            .expect("still visible")
+            .mirror
+            .clone()
+            .expect("still carries provenance");
+        assert!(
+            !cleared.is_stale,
+            "a re-exported, re-pulled mirror must clear the marker; it read {:?}",
+            cleared.age_hours
+        );
+
+        hit
     }
 
     /// A locally-decided row carries no mirror provenance — the reason the
@@ -671,7 +715,7 @@ mod tests {
             ..Default::default()
         };
         let mut result = edda_ask::ask(&l, "db.engine", &opts, None).unwrap();
-        let origins = edda_ask::mirror::origins_for_hits(&l, &result.decisions);
+        let origins = edda_ask::mirror::origins_for_hits(&l, &result.decisions, Some(&root));
         edda_ask::mirror::annotate_hits(&mut result.decisions, &origins);
         let hit = result
             .decisions
@@ -855,5 +899,59 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(cites, vec!["operator:2026-09-02", "issue:#671"]);
+    }
+    /// Round 3, P2 — the mirror must not restate an operator's own act.
+    /// Derivation takes the latest ratify per (branch, key), so a replay after
+    /// a local ratification silently rewrote "ratified by operator, here" into
+    /// "ratified on 4090 (via mirror)". Conservative in direction, but it loses
+    /// whose ruling it was, and nothing visible says so.
+    #[test]
+    fn a_mirror_does_not_restate_a_local_operator_ratification() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+
+        // A ratifies and exports.
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        decide_event(
+            &a,
+            "fleet.lane-profile",
+            LANE_PROFILE_VALUE,
+            LANE_PROFILE_REASON,
+        );
+        ratify_event(&a, "fleet.lane-profile", "operator");
+        drop(a);
+        let mirror = a_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
+
+        // B reached the same decision independently and its operator ratified
+        // it here. Then B imports A's mirror.
+        let b = Ledger::open_or_init(&b_root).unwrap();
+        decide_event(
+            &b,
+            "fleet.lane-profile",
+            LANE_PROFILE_VALUE,
+            LANE_PROFILE_REASON,
+        );
+        ratify_event(&b, "fleet.lane-profile", "operator");
+        drop(b);
+        execute(&b_root, None, Some(mirror.to_str().unwrap()), false).unwrap();
+
+        let b = Ledger::open(&b_root).unwrap();
+        let row = b
+            .find_active_decision("main", "fleet.lane-profile")
+            .unwrap()
+            .expect("still active on B");
+        let ratified = b.ratified_decisions_map().unwrap();
+        assert_eq!(
+            ratified
+                .get(&row.event_id)
+                .expect("still ratified")
+                .ratified_by,
+            "operator",
+            "B's own operator ratification was restated as the mirror's"
+        );
     }
 }
