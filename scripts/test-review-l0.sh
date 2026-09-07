@@ -85,7 +85,21 @@ make_fixture() {
   git -C "$fix" config user.name fixture
   printf '[workspace.package]\nversion = "0.0.0-fixture"\n' > "$fix/Cargo.toml"
   printf '# fixture lint stub\nexit 0\n' > "$fix/scripts/lint-markdown-content.sh"
-  printf '# fixture wiring stub\nexit 0\n' > "$fix/scripts/wiring-scan.sh"
+  # The wiring stub mirrors the one thing about the real script the runner
+  # has to classify: its refusal (scripts/wiring-scan.sh:30-34). An
+  # unconditional `exit 0` would make WIRING report PASS on a range no block
+  # can resolve, which is exactly the GH-950 defect the §7a case exists to
+  # catch — the stub would hide it rather than stand in for the tool.
+  cat > "$fix/scripts/wiring-scan.sh" <<'STUB'
+# fixture wiring stub — mirrors the real script's refusal contract
+for ref in "$1" "$2"; do
+  if ! git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
+    echo "error: unknown revision $ref" >&2
+    exit 2
+  fi
+done
+exit 0
+STUB
   git -C "$fix" add -A
   git -C "$fix" commit -q -m "chore(fleet): fixture base"
   git -C "$fix" rev-parse HEAD > "$TMP/base-sha"
@@ -123,12 +137,15 @@ make_fixture() {
 run_l0() { # <fixture-dir> <spec> <out-file> [PR-number] — runner exit code via $?
   # With no PR-number argument the runner runs in the pre-push shape
   # (GH-922): U1/C5/R3 must still run, from the runner's own file list.
+  # L0_BASE overrides the <base> argument for the GH-950 cases; every other
+  # caller gets the ordinary origin/main shape.
   (cd "$1" \
     && PATH="$TMP/bin:$PATH" \
        GH_STUB_DIR="$TMP" \
        REVIEW_L0_SPEC="$2" \
-       sh "$RUNNER" origin/main HEAD ${4:-}) > "$3" 2>&1
+       sh "$RUNNER" "${L0_BASE:-origin/main}" HEAD ${4:-}) > "$3" 2>&1
 }
+L0_BASE=
 
 # ---- 1. dirty fixture: R1 + R3 FAIL, exit 1 ---------------------------------
 make_fixture dirty
@@ -248,5 +265,76 @@ grep -F '| U1 |' "$TMP/undeclared.out" | grep -Fq 'N.A.(needs PR number)' \
 grep -F '| C5 |' "$TMP/undeclared.out" | grep -Fq 'N.A.(needs PR number)' \
   && fail "attribute fixture: C5 keeps its attribute and must still run"
 echo "attribute fixture: the gate reads the marker, not the command text — OK"
+
+# ---- 7. a block that never ran is ERROR, never PASS or FAIL (GH-950) -------
+# 7a. A full SHA as <base>. The blocks diff "origin/$BASE..$SHA", so
+# "origin/<40-hex>" is not a revision and every git-backed block refuses. The
+# refusal text arrives as ordinary output — the failing stage's status never
+# reaches the classifier ($? is the pipeline's last stage) — so before the fix
+# D1 and D3 reported PASS with a `fatal:` line sitting in their own evidence,
+# and U4, C2, C4, R1 reported FAIL. None of them ran.
+make_fixture clean
+# A prefix assignment on a function call persists in POSIX sh, so set and
+# clear it explicitly rather than relying on that.
+L0_BASE=$(cat "$TMP/base-sha")
+rc=0
+run_l0 "$FIXDIR" "$SPEC" "$TMP/sha-base.out" || rc=$?
+L0_BASE=
+[ "$rc" -ne 0 ] || fail "full-SHA base: runner exited 0 over rules that never ran"
+grep -Fq 'fatal:' "$TMP/sha-base.out" \
+  || fail "full-SHA base: fixture produced no refusal at all — the case is not being exercised"
+# The defect in one assertion: no row may carry a verdict over a refusal —
+# stated over both wordings, because the two arrive by different routes. A
+# git-backed block's `fatal:` survives only as text (its status is eaten by
+# the grep it feeds); WIRING's tool is invoked directly, so its `error:` line
+# comes with a truthful exit 2. Asserting only the first would leave the
+# doneWhen's "ERROR for every affected rule" half-tested.
+verdicts=$(grep -E '\| (PASS|FAIL) \|' "$TMP/sha-base.out" | grep -E 'fatal:|error: unknown revision' || true)
+[ -z "$verdicts" ] \
+  || fail "full-SHA base: a PASS/FAIL row reports a verdict over a refusal: $verdicts"
+grep -F '| ERROR |' "$TMP/sha-base.out" | grep -Fq 'fatal:' \
+  || fail "full-SHA base: no ERROR row for the refused blocks"
+# WIRING by name: it is the rule the `fatal:` net alone does not reach, and
+# the one that proved the runner still had to key on the exit code too.
+wiring=$(grep -F '| WIRING |' "$TMP/sha-base.out")
+case "$wiring" in
+  *'| ERROR '*) : ;;
+  *) fail "full-SHA base: WIRING refused and was not ERROR: $wiring" ;;
+esac
+# Exit 2 (a rule could not run), not 1 (a rule failed): with every affected
+# rule ERROR there is no finding left to report, and the two exits mean
+# different things to a caller.
+[ "$rc" -eq 2 ] || fail "full-SHA base: expected runner exit 2 (could not run), got $rc"
+echo "full-SHA base: refused blocks are ERROR, none PASS/FAIL — OK"
+
+# 7b. The generic case, with no bad range anywhere: a block that prints a
+# `fatal:` line and still EXITS 0 through a grep tail. Before the fix this was
+# the reassuring misreading — an enumerator tail with output reads as FAIL, and
+# with none as PASS; either way the runner reports a verdict for a rule that
+# refused to run. The fix is at the classifier, so it holds for any block and
+# any cause, not only for git and not only for this argument shape.
+sub_cmd='echo "fatal: simulated refusal" >&2; echo ok | grep -v ZZZ'
+awk -v s="$sub_cmd" '
+  /^# review-spec:check U5( |$)/ { print; print "```sh"; print s; print "```"; incut = 1; next }
+  incut && /^# review-spec:check-end$/ { incut = 0; print; next }
+  incut { next }
+  { print }
+' "$SPEC" > "$TMP/fatal-spec.md"
+grep -Fq 'fatal: simulated refusal' "$TMP/fatal-spec.md" \
+  || fail "generic fatal: the substituted spec copy was not produced"
+make_fixture clean
+rc=0
+run_l0 "$FIXDIR" "$TMP/fatal-spec.md" "$TMP/fatal.out" || rc=$?
+u5=$(grep -F '| U5 |' "$TMP/fatal.out")
+case "$u5" in
+  *'| ERROR |'*) : ;;
+  *) fail "generic fatal: U5 exited 0 with a 'fatal:' line and was not ERROR: $u5" ;;
+esac
+case "$u5" in
+  *'exit=0'*) : ;;
+  *) fail "generic fatal: U5's evidence does not record the exit-0 contradiction: $u5" ;;
+esac
+[ "$rc" -eq 2 ] || fail "generic fatal: expected runner exit 2 (ERROR, no FAIL), got $rc"
+echo "generic fatal: an exit-0 block printing 'fatal:' is ERROR — OK"
 
 echo "test-review-l0.sh: all fixture assertions held"
