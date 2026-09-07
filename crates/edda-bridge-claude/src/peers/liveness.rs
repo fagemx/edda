@@ -81,8 +81,38 @@ pub fn classify_session_liveness_at(
 
 /// Classify one session's liveness using the current clock.
 pub fn classify_session_liveness(project_id: &str, session_id: &str) -> SessionLiveness {
-    let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
-    classify_session_liveness_at(project_id, session_id, now)
+    classify_session_liveness_at(project_id, session_id, now_epoch())
+}
+
+/// The clock reading both criteria are measured against.
+pub fn now_epoch() -> u64 {
+    parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0)
+}
+
+/// Age of a board claim, from the claim's own recorded timestamp.
+///
+/// This is a different fact from the claimant session's heartbeat age. A
+/// claim records when it was written; a heartbeat records when the session
+/// was last heard from. For a bare CLI session (`cli-*`) only the first
+/// exists — nothing ever refreshes a heartbeat for a one-shot process — so
+/// the claim's own age is the only judgeable thing about it.
+///
+/// An unparseable timestamp reads as epoch 0, i.e. maximally old. That is the
+/// same reading `edda peers --json` has always given it, and it fails towards
+/// "this claim is ancient" rather than "this claim is fresh".
+pub fn claim_age_secs_at(claim_ts: &str, now_epoch: u64) -> u64 {
+    now_epoch.saturating_sub(parse_rfc3339_to_epoch(claim_ts).unwrap_or(0))
+}
+
+/// Is this board claim stale by its own timestamp?
+///
+/// The rule `edda peers --json` publishes for every claim (GH-569): older
+/// than [`stale_secs`] is stale, so a 55-day-old zombie claim and a
+/// 37-second-old live one are distinguishable to a program. It lives here,
+/// beside the session criterion, because a caller asking "does this claim
+/// still stand?" must share one rule rather than grow a second (GH-1018).
+pub fn claim_is_stale_at(claim_ts: &str, now_epoch: u64) -> bool {
+    claim_age_secs_at(claim_ts, now_epoch) > stale_secs()
 }
 
 #[cfg(test)]
@@ -172,5 +202,25 @@ mod tests {
             liveness_from_heartbeat(&hb, t0 + stale_secs() + 1),
             SessionLiveness::Stale { .. }
         ));
+    }
+
+    #[test]
+    fn claim_staleness_shares_the_session_boundary() {
+        // The claim rule reads its own timestamp, but against the same
+        // threshold and the same `age > threshold` boundary as the session
+        // criterion above — that shared edge is the point (GH-1018).
+        let t0 = parse_rfc3339_to_epoch("2026-09-02T12:00:00Z").unwrap();
+        let ts = "2026-09-02T12:00:00Z";
+        assert_eq!(claim_age_secs_at(ts, t0 + 30), 30);
+        assert!(!claim_is_stale_at(ts, t0 + stale_secs()));
+        assert!(claim_is_stale_at(ts, t0 + stale_secs() + 1));
+    }
+
+    #[test]
+    fn an_unparseable_claim_timestamp_reads_as_ancient() {
+        // Fail towards "ancient", never towards "fresh": a claim nobody can
+        // date must not be able to stand forever by being unreadable.
+        assert!(claim_is_stale_at("not a timestamp", 1_000_000));
+        assert!(claim_is_stale_at("", 1_000_000));
     }
 }

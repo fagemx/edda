@@ -81,6 +81,46 @@ pub(crate) fn write_aged_heartbeat(
     .expect("heartbeat file");
 }
 
+/// Append one claim event to the coordination board, dated `age_secs` ago.
+///
+/// The board is append-only and nothing expires a claim on it, so this is the
+/// only way to reproduce the shape a long-lived machine accumulates: a claim
+/// whose session left months ago (GH-1018).
+pub(crate) fn write_aged_claim(
+    project_id: &str,
+    session_id: &str,
+    age_secs: u64,
+    paths: &[String],
+) {
+    let _ = edda_store::ensure_dirs(project_id);
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs()
+        .saturating_sub(age_secs);
+    let ts = time::OffsetDateTime::from_unix_timestamp(now as i64)
+        .expect("unix timestamp")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("rfc3339");
+    let event = serde_json::json!({
+        "ts": ts,
+        "session_id": session_id,
+        "event_type": "claim",
+        "payload": { "label": session_id, "paths": paths },
+    });
+    let mut line = event.to_string();
+    line.push('\n');
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_dir.join("coordination.jsonl"))
+        .expect("coordination board");
+    file.write_all(line.as_bytes()).expect("append claim event");
+}
+
 // Guard-restore semantics (RAII on drop, panic safety, thread locality) are
 // tested at the source in `edda-store::test_support`; a duplicate here could
 // only re-prove them through an extra indirection.

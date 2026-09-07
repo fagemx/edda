@@ -1,8 +1,8 @@
+use edda_bridge_claude::peers::liveness;
 use std::path::Path;
 
 /// JSON board snapshot for `edda peers --json`.
 pub(super) fn peers_json(project_id: &str) -> serde_json::Value {
-    let stale_threshold = edda_bridge_claude::peers::stale_secs();
     let sessions: Vec<serde_json::Value> =
         edda_bridge_claude::peers::discover_all_sessions(project_id)
             .into_iter()
@@ -17,21 +17,17 @@ pub(super) fn peers_json(project_id: &str) -> serde_json::Value {
     // GH-569: claims are part of the JSON surface programs consume, so each
     // carries its age and a stale flag — otherwise a 55-day-old zombie claim
     // and a 37-second-old live claim are indistinguishable to a program.
-    let now_epoch = time::OffsetDateTime::now_utc().unix_timestamp();
+    // The rule itself lives in `peers::liveness` beside the session criterion
+    // so the dispatch guard can honour the same verdict (GH-1018).
+    let now_epoch = liveness::now_epoch();
     let claims: Vec<serde_json::Value> = board
         .claims
         .iter()
         .map(|claim| {
             let mut value = serde_json::to_value(claim).unwrap_or_default();
-            let ts_epoch = time::OffsetDateTime::parse(
-                &claim.ts,
-                &time::format_description::well_known::Rfc3339,
-            )
-            .map(|t| t.unix_timestamp())
-            .unwrap_or(0);
-            let age_secs = (now_epoch - ts_epoch).max(0) as u64;
-            value["age_secs"] = serde_json::json!(age_secs);
-            value["stale"] = serde_json::json!(age_secs > stale_threshold);
+            value["age_secs"] =
+                serde_json::json!(liveness::claim_age_secs_at(&claim.ts, now_epoch));
+            value["stale"] = serde_json::json!(liveness::claim_is_stale_at(&claim.ts, now_epoch));
             value
         })
         .collect();
