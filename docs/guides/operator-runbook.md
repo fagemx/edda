@@ -133,7 +133,24 @@
     Rust lane 設 `CARGO_TARGET_DIR` 為
     `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2|verifier|verifier-2`。
    lane 的**啟動方式**用 `scripts/fleet/lane-launch.ps1`（見 START HERE；Task Scheduler，不是 nohup，規則見 §六）。
-4. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
+4. **審查：強引擎直審是預設，watcher lane 是 flash 檔與獨立性來源**
+   （`review.default-path=direct-review-default-shell-reserved-for-flash`，
+   `review.merge-gate=ci-gate-only-independent-review-status-removed`，兩者皆 2026-09-07）。
+
+   預設路徑：任一在線的強引擎 session 直接讀 diff、照 `REVIEW.md` 從頭跑到尾、把 §7 判決貼上
+   PR，LGTM 且 CI 綠即可合。**不起 lane、不建 review worktree、不做全檔快照。**
+   這條路今天實測每張 PR 約 5–20 分鐘；同一批 PR 的 watcher lane 在 40 分鐘後仍卡在快照階段。
+   審查內容一點都沒放寬——`REVIEW.md` 全規則照跑、判決釘 full SHA、每次 push 使前一輪失效、
+   合前做窗檢查——省掉的只有排隊。
+
+   `Independent Review` 必要 status 已於同日從 ruleset 移除，合併閘只剩 `CI Gate`；
+   watcher 照跑但**判決降為 advisory**，它死了不再擋任何事。回復路徑是把 context 加回 ruleset。
+
+   仍然走下面 watcher lane 的兩種情況：(a) flash 引擎執行的單——brief 渲染、`brief-validate`、
+   oracle bundle、資格表、SHADOW 校準整套是它安全上工的前提；(b) 需要一個不是實作者、
+   也不是控制者的獨立判決時（例如控制者自己派的 lane 寫的 PR）。殼的成本只該由需要殼的引擎付。
+
+5. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
    `scripts/pr-review-launch.ps1` 註冊成隱藏排程任務 `edda-pr-review-watcher`）每 60 秒掃 open PR：
    非 draft、head 沒審過的 PR 在 **3 分鐘內**自動起唯讀審查者（Claude Opus `claude-opus-5`，經
    `edda dispatch --agent claude` 訂閱運輸——pi/openrouter 到不了 Anthropic；Task Scheduler 隱藏視窗，
@@ -153,13 +170,13 @@
    provider 過載時：同模型探測通過後重試一次（同一 `edda dispatch --agent claude` 運輸），仍沒有判決就標
    `review:unreviewed` 並對該 head 停手
    （v1 無 codex 後備——它做不到唯讀，且在新決策下 codex 也到不了 Opus；§六 `fleet.review-provider-overload` 的決策全文仍可 `edda ask` 查）。
-   啟停、狀態檔與疑難排解見 `docs/guides/pr-review-watcher.md`。watcher **不合併**——合併仍在第 6 步、要授權。
-5. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。
-6. **合併**（有操作者授權時）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過。取得合併授權後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
+   啟停、狀態檔與疑難排解見 `docs/guides/pr-review-watcher.md`。watcher **不合併**——合併仍在第 7 步、要授權。
+6. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。走第 4 步直審路徑時不需要 driver：判決與修正在同一個 session 內來回。
+7. **合併**（有操作者授權時）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過。取得合併授權後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 
    手動啟動與 watcher 共用 `scripts/review-round.sh` 的每個 repository／PR 認領與輪次，儲存在 `$HOME/.edda/review-coordination/`，不跟隨個別 scratch 目錄。已發表的 PR 審查輪次是下限；有尚未寫入終止 receipt 的審查時，第二個啟動者會被拒絕。中斷且沒有 receipt 的認領保持拒絕狀態，操作者應先確認舊 lane 已停止再恢復，不能只依 PID 或經過時間認定它已退出。
-7. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
-8. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
+8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
+9. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
 
 ---
 
