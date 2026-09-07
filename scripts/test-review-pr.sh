@@ -158,6 +158,23 @@ Some preamble about the defect.
 nothing
 EOF
 
+# GH-953: the heading is written by hand and is not always the repo's own
+# `## doneWhen` spelling — #902 writes `## Done when`, and #953 itself does
+# too. A case-sensitive extractor yields an EMPTY ceiling, not an error, so
+# the brief tells the reviewer to judge against a doneWhen it never received.
+cat >"$GH_ISSUE_DIR/902" <<'EOF'
+Some preamble about the defect.
+
+## Done when
+
+- the machine assignee identity is validated before dispatch
+- `sh -n scripts/review-pr.sh` exits 0
+
+## Predicted surface
+
+nothing
+EOF
+
 fail() { printf 'FAIL %s\n' "$1" >&2; failures=$((failures + 1)); }
 
 # Run one --dry-run and leave stdout in $out, the brief path in $brief.
@@ -357,6 +374,27 @@ if ! grep -qi 'no acceptance criteria' "$brief"; then
 fi
 if ! grep -q '#683' "$tmp/err"; then
     fail "D2e: a brief generated with no acceptance criteria printed no warning on stderr"
+fi
+
+# D2f (#953): the heading spelling is the issue author's, not the repo's. A
+# case-sensitive '/^## doneWhen/' silently yields an EMPTY ceiling for the
+# `## Done when` issues that already exist (#902, and #953 itself), which is
+# the same failure D2e guards against — except nothing warns, because an issue
+# WAS linked and its section WAS "found". The brief must carry the items.
+dry_run 'Closes #902.\n\nSome prose about the change.\n'
+if [ "$(field issues)" != "902" ]; then
+    fail "D2f: a body linking its issue as 'Closes #902' yielded issues=$(field issues)"
+fi
+if ! grep -q '^### Issue #902 doneWhen' "$brief"; then
+    fail "D2f: the brief carries no doneWhen section for #902"
+fi
+if ! grep -q 'the machine assignee identity is validated before dispatch' "$brief"; then
+    fail "D2f: '## Done when' yielded an empty acceptance ceiling — the heading was matched case-sensitively (#953)"
+fi
+# The section must still END at the next heading: an over-eager match would
+# swallow '## Predicted surface' into the ceiling.
+if grep -q 'Predicted surface' "$brief"; then
+    fail "D2f: the doneWhen extraction ran past the next '## ' heading"
 fi
 
 # --- D3 (#691): the reviewer must never be told to open a browser manual -------
