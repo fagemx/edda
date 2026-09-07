@@ -897,6 +897,14 @@ pub(super) fn dispatch_session_start(
         tail.push_str(&format!("\n\n{coord}"));
     }
 
+    // The import half of the cross-machine mirror (GH-671). In the tail
+    // because an import nobody is told about is the same as no import, so the
+    // line must survive budget cuts. See `crate::mirror_import` for why this
+    // is in-process, and when it stays silent.
+    if let Some(line) = crate::mirror_import::import_on_session_start(cwd, project_id) {
+        tail.push_str(&format!("\n\n{line}"));
+    }
+
     // What the sibling projects ruled and what they have waiting (GH-408).
     //
     // Last, and hard-capped: it is the least important thing in the pack, so it

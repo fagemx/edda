@@ -3,6 +3,7 @@ use edda_ledger::DecisionView;
 use edda_ledger::Ledger;
 use serde::{Deserialize, Serialize};
 
+pub mod mirror;
 pub mod staleness;
 
 const SEMANTIC_CANDIDATE_LIMIT: usize = 500;
@@ -130,6 +131,13 @@ pub struct DecisionHit {
     /// present so existing JSON consumers stay unaffected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub staleness: Option<crate::staleness::DecisionStaleness>,
+    /// Cross-machine mirror provenance (GH-671). `Some` only for a decision
+    /// that arrived over a committed mirror, so a reader can tell how dead
+    /// the mirror was. `None` for every locally-decided row — which is every
+    /// row in a single-machine project. Serialized only when present, so the
+    /// golden JSON contract for existing consumers is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<crate::mirror::MirrorOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,6 +362,7 @@ pub fn ask(
                                     tags: dp.tags.unwrap_or_default(),
                                     village_id: dp.village_id,
                                     staleness: None,
+                                    mirror: None,
                                 });
                             }
                         }
@@ -865,6 +874,14 @@ pub fn format_human(result: &AskResult) -> String {
                     }
                 }
             }
+            // GH-671: a decision that rode a dead mirror says so at the read
+            // end. A fresh mirror stays silent — the marker is the exception,
+            // so it keeps meaning something when it appears.
+            if let Some(m) = &d.mirror {
+                if m.is_stale {
+                    out.push_str(&format!("  {}\n", mirror::stale_hint(m)));
+                }
+            }
             out.push('\n');
         }
     }
@@ -997,6 +1014,7 @@ fn to_decision_hit(row: &DecisionView) -> DecisionHit {
         tags: row.tags.clone(),
         village_id: row.village_id.clone(),
         staleness: None,
+        mirror: None,
     }
 }
 
@@ -1725,6 +1743,7 @@ mod tests {
                 tags: vec![],
                 village_id: None,
                 staleness: None,
+                mirror: None,
             }],
             timeline: vec![],
             related_commits: vec![CommitHit {
@@ -2154,6 +2173,7 @@ mod tests {
                 tags: vec![],
                 village_id: None,
                 staleness: None,
+                mirror: None,
             }],
             timeline: vec![],
             related_commits: vec![],

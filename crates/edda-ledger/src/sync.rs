@@ -161,6 +161,10 @@ pub fn sync_from_sources(
                 &source.project_name,
                 decision,
                 !is_conflict,
+                // A sqlite source carries neither citations (they live in the
+                // peer's event payload, which this path never opens) nor a
+                // mirror stamp. Only the committed mirror does.
+                ImportExtras::default(),
             )?;
             result.imported.push(imported);
         }
@@ -179,6 +183,7 @@ fn import_decision(
     source_project_name: &str,
     decision: &DecisionRow,
     import_active: bool,
+    extras: ImportExtras<'_>,
 ) -> anyhow::Result<ImportedDecision> {
     let parent_hash = target.last_event_hash()?;
 
@@ -188,6 +193,7 @@ fn import_decision(
         decision,
         source_project_id,
         source_project_name,
+        extras,
     )?;
     finalize_event(&mut event)?;
 
@@ -280,6 +286,24 @@ struct MirrorDecision {
     row: DecisionRow,
     ratified_by: Option<String>,
     ratified_at: Option<String>,
+    /// The citation chain (GH-761). Not a `DecisionRow` field: `cites` lives
+    /// in the decision event payload, never in the projected row
+    /// (`decision.cites=event-payload-not-sqlite-column`), so it rides the
+    /// mirror separately and is written back into the import event.
+    cites: Vec<String>,
+}
+
+/// Provenance an import carries beyond the projected row.
+///
+/// A sqlite-source import has neither; a mirror import has both, and both go
+/// into the `decision_import` event payload rather than a new column — the
+/// ledger is append-only and old ledgers stay readable.
+#[derive(Default, Clone, Copy)]
+struct ImportExtras<'a> {
+    /// GH-761 citations, read back by `edda ratify --by-rule`.
+    cites: &'a [String],
+    /// GH-671 mirror stamp, read back by `edda ask` as the staleness signal.
+    mirror: Option<&'a MirrorImportMeta>,
 }
 
 /// Import decisions from a committed markdown mirror (GH-671).
@@ -375,6 +399,10 @@ pub fn sync_from_mirror(
             &source_name,
             &md.row,
             !is_conflict,
+            ImportExtras {
+                cites: &md.cites,
+                mirror: result.mirror.as_ref(),
+            },
         )?;
 
         // Preserve ratified/unratified: replay the mirror's ratification as
@@ -537,6 +565,7 @@ fn parse_domain_markdown(file_domain: &str, text: &str) -> anyhow::Result<Vec<Mi
                 },
                 ratified_by: None,
                 ratified_at: None,
+                cites: Vec::new(),
             });
             continue;
         }
@@ -618,6 +647,11 @@ fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
         row.reversibility = v.trim().to_string();
     } else if let Some(v) = line.strip_prefix("- **Village**: ") {
         row.village_id = Some(v.trim().to_string());
+    } else if let Some(v) = line.strip_prefix("- **Cites**: ") {
+        // GH-761 citations ride the mirror as a backtick list, same encoding
+        // as Tags and Affected paths. Dropping them would make the mirror lie
+        // by omission about what authority a decision rests on.
+        decision.cites = backtick_list(v);
     } else if let Some(v) = line.strip_prefix("- **event_id**: `") {
         let v = v.strip_suffix('`').unwrap_or(v);
         row.event_id = v.trim().to_string();
@@ -626,12 +660,15 @@ fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
 
 /// `` `a`, `b` `` → `["a","b"]` as a JSON array string.
 fn backtick_list_to_json(s: &str) -> String {
-    let items: Vec<String> = s
-        .split("`, `")
+    serde_json::to_string(&backtick_list(s)).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// `` `a`, `b` `` → `vec!["a", "b"]`.
+fn backtick_list(s: &str) -> Vec<String> {
+    s.split("`, `")
         .map(|p| p.trim_matches('`').trim().to_string())
         .filter(|p| !p.is_empty())
-        .collect();
-    serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+        .collect()
 }
 
 /// Inverse of `edda-cli::cmd_export::escape_field` — a left-to-right scan so
@@ -663,10 +700,11 @@ fn make_import_event(
     decision: &crate::sqlite_store::DecisionRow,
     source_project_id: &str,
     source_project_name: &str,
+    extras: ImportExtras<'_>,
 ) -> anyhow::Result<Event> {
     let affected_paths: serde_json::Value = serde_json::from_str(&decision.affected_paths)?;
     let decision_tags: serde_json::Value = serde_json::from_str(&decision.tags)?;
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "role": "system",
         "text": format!(
             "[sync] imported {key}={value} from {source}",
@@ -691,6 +729,24 @@ fn make_import_event(
         "source_project_name": source_project_name,
         "source_event_id": decision.event_id,
     });
+
+    // GH-761: `cites` is read back from `payload["decision"]["cites"]` by the
+    // ratify sweep (`edda ratify --by-rule`), keyed on this event's id — which
+    // is also the imported row's `event_id`. Emitted only when non-empty, so
+    // an import that carries no citations is byte-identical to before.
+    if !extras.cites.is_empty() {
+        payload["decision"]["cites"] = serde_json::json!(extras.cites);
+    }
+
+    // GH-671: the mirror stamp the row arrived under. `edda ask` reads it back
+    // as the staleness signal, so a decision imported from a dead mirror is
+    // marked at the read end and not only at import time.
+    if let Some(meta) = extras.mirror {
+        payload["mirror"] = serde_json::json!({
+            "machine": meta.source_name,
+            "exported_at": meta.freshness.exported_at,
+        });
+    }
 
     let provenance = vec![Provenance {
         target: decision.event_id.clone(),

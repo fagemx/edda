@@ -11,11 +11,12 @@
 //!   timestamp (`- **Exported at**: ...`) and exporting machine identity
 //!   (GH-806) for cross-machine provenance, and is updated on each export run.
 //! - Round trip (GH-671): each decision additionally carries Scope, Authority,
-//!   Reversibility and — when set — Review after and Village, because the
-//!   committed-mirror import in `edda-ledger::sync` needs those fields to
+//!   Reversibility and — when set — Review after, Village and Cites, because
+//!   the committed-mirror import in `edda-ledger::sync` needs those fields to
 //!   restore the row faithfully (original actor included). Values and reasons
 //!   are escaped (`\` and newline) so multi-line reasons survive the
-//!   single-line markdown encoding losslessly.
+//!   single-line markdown encoding losslessly. Cites (GH-761) is read from the
+//!   decision event payload, not the projected row — see [`collect_cites`].
 //! - Layout:
 //!   <out>/INDEX.md             — table of contents with freshness metadata
 //!   <out>/decisions/<domain>.md — one file per domain (active decisions)
@@ -42,13 +43,14 @@ pub fn execute(
     fs::create_dir_all(&decisions_dir).with_context(|| format!("create {decisions_dir:?}"))?;
 
     let active = ledger.active_decisions(None, None, None, None)?;
+    let cites = collect_cites(&ledger, &active)?;
     let by_domain = group_by_domain(active);
 
     let mut domain_stats: Vec<(String, usize, PathBuf)> = Vec::with_capacity(by_domain.len());
     for (domain, mut rows) in by_domain {
         rows.sort_by(|a, b| a.key.cmp(&b.key));
         let path = decisions_dir.join(format!("{domain}.md"));
-        let body = render_domain(&domain, &rows, &ratifications);
+        let body = render_domain(&domain, &rows, &ratifications, &cites);
         write_if_changed(&path, &body)?;
         domain_stats.push((domain, rows.len(), path));
     }
@@ -90,6 +92,38 @@ pub fn execute(
     Ok(())
 }
 
+/// Citations (GH-761) for the rows about to be exported, keyed by event id.
+///
+/// `cites` lives in the decision event payload, never in the projected row
+/// (`decision.cites=event-payload-not-sqlite-column`), so the export reads it
+/// the same way the ratify sweep does. Without this the committed mirror
+/// drops the authority chain of every decision it carries — a mirror that
+/// lies by omission, against `ledger.cross-machine-projection` clause (5)
+/// `quote-never-paraphrase`.
+fn collect_cites(
+    ledger: &Ledger,
+    rows: &[edda_ledger::DecisionView],
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let wanted: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.event_id.as_str()).collect();
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in ledger.iter_events_by_type("note")? {
+        if !wanted.contains(e.event_id.as_str()) {
+            continue;
+        }
+        if let Some(list) = e.payload["decision"]["cites"].as_array() {
+            let cites: Vec<String> = list
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if !cites.is_empty() {
+                out.insert(e.event_id.clone(), cites);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn group_by_domain(
     rows: Vec<edda_ledger::DecisionView>,
 ) -> BTreeMap<String, Vec<edda_ledger::DecisionView>> {
@@ -112,6 +146,7 @@ fn render_domain(
     domain: &str,
     rows: &[edda_ledger::DecisionView],
     ratifications: &std::collections::BTreeMap<String, edda_ledger::RatificationInfo>,
+    cites: &BTreeMap<String, Vec<String>>,
 ) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(HEADER);
@@ -157,6 +192,15 @@ fn render_domain(
         }
         if let Some(village) = &row.village_id {
             out.push_str(&format!("- **Village**: {village}\n"));
+        }
+        if let Some(list) = cites.get(&row.event_id) {
+            out.push_str(&format!(
+                "- **Cites**: {}\n",
+                list.iter()
+                    .map(|c| format!("`{}`", c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         if !row.affected_paths.is_empty() {
             out.push_str(&format!(
@@ -343,7 +387,12 @@ mod tests {
     #[test]
     fn render_domain_names_all_columns_including_affected_paths() {
         let rows = vec![dec("db.engine", "sqlite", "db", vec!["src/db.rs"])];
-        let md = render_domain("db", &rows, &std::collections::BTreeMap::new());
+        let md = render_domain(
+            "db",
+            &rows,
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         assert!(md.contains("GENERATED FILE"));
         assert!(md.contains("# Domain: `db`"));
         assert!(md.contains("`db.engine`"));
@@ -368,7 +417,12 @@ mod tests {
         row.reversibility = "hard".into();
         row.review_after = Some("2027-01-01".into());
         row.village_id = Some("village-alpha".into());
-        let md = render_domain("fleet", &[row], &std::collections::BTreeMap::new());
+        let md = render_domain(
+            "fleet",
+            &[row],
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         assert!(md.contains("- **Scope**: local"), "{md}");
         assert!(md.contains("- **Authority**: agent"), "{md}");
         assert!(md.contains("- **Reversibility**: hard"), "{md}");
@@ -382,7 +436,12 @@ mod tests {
     fn render_domain_escapes_newlines_and_backslashes_in_value_and_reason() {
         let mut row = dec("esc.k", "a\\b\nc", "esc", vec![]);
         row.reason = "r1\nr2 \\ path".into();
-        let md = render_domain("esc", &[row], &std::collections::BTreeMap::new());
+        let md = render_domain(
+            "esc",
+            &[row],
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         assert!(
             md.contains("- **Value**: `a\\\\b\\nc`"),
             "escaped value: {md}"
@@ -401,7 +460,12 @@ mod tests {
     fn render_domain_scrubs_secrets_in_reason() {
         let mut row = dec("test.key", "val", "test", vec![]);
         row.reason = "temp token sk-abcdefghijklmnopqrstuvwxyz012345".into();
-        let md = render_domain("test", &[row], &std::collections::BTreeMap::new());
+        let md = render_domain(
+            "test",
+            &[row],
+            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         assert!(
             md.contains("[REDACTED:openai_api_key]"),
             "export must not leak old secrets: {md}"
@@ -494,8 +558,18 @@ mod tests {
         let mut b = rows;
         b.sort_by(|x, y| x.key.cmp(&y.key));
         assert_eq!(
-            render_domain("mix", &a, &std::collections::BTreeMap::new()),
-            render_domain("mix", &b, &std::collections::BTreeMap::new())
+            render_domain(
+                "mix",
+                &a,
+                &std::collections::BTreeMap::new(),
+                &BTreeMap::new()
+            ),
+            render_domain(
+                "mix",
+                &b,
+                &std::collections::BTreeMap::new(),
+                &BTreeMap::new()
+            )
         );
     }
 

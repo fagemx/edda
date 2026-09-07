@@ -7,6 +7,7 @@ pub mod bg_scan;
 pub mod controls_suggest;
 pub mod digest;
 pub mod issue_proposal;
+pub mod mirror_import;
 pub mod pattern;
 pub mod peers;
 pub mod redact;

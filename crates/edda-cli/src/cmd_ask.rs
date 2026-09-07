@@ -1,6 +1,7 @@
 use edda_ask::{
-    affected_paths_for_hits, ask, format_human, staleness::annotate_hits, AskOptions,
-    ConversationHit, TranscriptSearchFn,
+    affected_paths_for_hits, ask, format_human, mirror::annotate_hits as annotate_mirror,
+    mirror::origins_for_hits, staleness::annotate_hits, AskOptions, ConversationHit,
+    TranscriptSearchFn,
 };
 use edda_ledger::Ledger;
 use std::path::Path;
@@ -76,6 +77,13 @@ pub fn execute(
     annotate_hits(&mut result.decisions, &decisions_paths, Some(repo_root));
     let timeline_paths = affected_paths_for_hits(&ledger, &result.timeline);
     annotate_hits(&mut result.timeline, &timeline_paths, Some(repo_root));
+
+    // GH-671: mark decisions that arrived over a dead cross-machine mirror.
+    // Same query-time derivation as staleness above; the ledger is untouched.
+    let decisions_mirror = origins_for_hits(&ledger, &result.decisions);
+    annotate_mirror(&mut result.decisions, &decisions_mirror);
+    let timeline_mirror = origins_for_hits(&ledger, &result.timeline);
+    annotate_mirror(&mut result.timeline, &timeline_mirror);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -160,6 +168,14 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
         annotate_hits(&mut result.decisions, &decisions_paths, Some(root));
         let timeline_paths = affected_paths_for_hits(&ledger, &result.timeline);
         annotate_hits(&mut result.timeline, &timeline_paths, Some(root));
+
+        // GH-671, same pass as the single-project arm: a sibling's decision
+        // that rode a dead mirror is exactly as misleading read across the
+        // fleet as it is read at home.
+        let decisions_mirror = origins_for_hits(&ledger, &result.decisions);
+        annotate_mirror(&mut result.decisions, &decisions_mirror);
+        let timeline_mirror = origins_for_hits(&ledger, &result.timeline);
+        annotate_mirror(&mut result.timeline, &timeline_mirror);
 
         Ok(vec![result])
     });

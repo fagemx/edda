@@ -226,6 +226,16 @@ mod tests {
     const GLOSS: &str = "actor-is-profile";
 
     fn decide_event(ledger: &Ledger, key: &str, value: &str, reason: &str) {
+        decide_event_cites(ledger, key, value, reason, None);
+    }
+
+    fn decide_event_cites(
+        ledger: &Ledger,
+        key: &str,
+        value: &str,
+        reason: &str,
+        cites: Option<Vec<String>>,
+    ) {
         let branch = ledger.head_branch().unwrap();
         let parent = ledger.last_event_hash().unwrap();
         let dp = edda_core::types::DecisionPayload {
@@ -239,6 +249,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites,
         };
         let ev = edda_core::event::new_decision_event(&branch, parent.as_deref(), "worker-1", &dp)
             .unwrap();
@@ -293,7 +304,7 @@ mod tests {
         drop(a);
 
         // What the trigger runs: export to the git-tracked mirror directory.
-        let mirror = a_root.join("docs").join("ledger");
+        let mirror = a_root.join("docs").join("decisions");
         crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
 
         // A hand-added INDEX gloss must never mint a decision value.
@@ -387,7 +398,7 @@ mod tests {
             LANE_PROFILE_REASON,
         );
         drop(a);
-        let mirror = a_root.join("docs").join("ledger");
+        let mirror = a_root.join("docs").join("decisions");
         crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
 
         // B already holds the gloss as its local active value.
@@ -444,7 +455,7 @@ mod tests {
             .unwrap()
             .event_id;
         drop(a);
-        let mirror = a_root.join("docs").join("ledger");
+        let mirror = a_root.join("docs").join("decisions");
         crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
 
         execute(&a_root, None, Some(mirror.to_str().unwrap()), false).unwrap();
@@ -482,5 +493,189 @@ mod tests {
             line.contains("2026-09-04T03:00:00Z"),
             "stamp visible: {line}"
         );
+    }
+    /// GH-761 through the mirror: the citation chain is the authority a
+    /// decision rests on, and `cites` lives in the event payload rather than
+    /// a projected column (`decision.cites=event-payload-not-sqlite-column`).
+    /// A mirror that drops it lies by omission about why the decision binds,
+    /// which is exactly what `quote-never-paraphrase` forbids.
+    #[test]
+    fn mirror_round_trip_carries_the_citation_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        decide_event_cites(
+            &a,
+            "fleet.merge-authority",
+            "controller-merges-on-current-head-lgtm",
+            "operator ruling 2026-09-02",
+            Some(vec![
+                "operator:2026-09-02".to_string(),
+                "issue:#671".to_string(),
+            ]),
+        );
+        // Paired presence control: a decision with no citations must round
+        // trip with no `Cites` line, so the assertion below is testing the
+        // carrier and not the absence of the feature.
+        decide_event(
+            &a,
+            "coord.session-identity",
+            "label-and-machine-explicit",
+            "identity half is #685 scope",
+        );
+        drop(a);
+
+        let mirror = a_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
+
+        let fleet_md = fs::read_to_string(mirror.join("decisions").join("fleet.md")).unwrap();
+        assert!(
+            fleet_md.contains("- **Cites**: `operator:2026-09-02`, `issue:#671`"),
+            "citations are exported: {fleet_md}"
+        );
+        let coord_md = fs::read_to_string(mirror.join("decisions").join("coord.md")).unwrap();
+        assert!(
+            !coord_md.contains("**Cites**"),
+            "an uncited decision gains no Cites line: {coord_md}"
+        );
+
+        Ledger::open_or_init(&b_root).unwrap();
+        execute(&b_root, None, Some(mirror.to_str().unwrap()), false).unwrap();
+
+        // `edda ratify --by-rule` reads citations from
+        // `payload["decision"]["cites"]`, keyed on the row event_id — which
+        // for an import is the import event own id. So this is the shape the
+        // rule actually consumes on B, not a private encoding.
+        let b = Ledger::open(&b_root).unwrap();
+        let row = b
+            .find_active_decision("main", "fleet.merge-authority")
+            .unwrap()
+            .expect("merge-authority visible on B");
+        let import = b
+            .get_event(&row.event_id)
+            .unwrap()
+            .expect("row resolves to its import event");
+        let cites: Vec<&str> = import.payload["decision"]["cites"]
+            .as_array()
+            .expect("cites survive the mirror")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(cites, vec!["operator:2026-09-02", "issue:#671"]);
+
+        let uncited_row = b
+            .find_active_decision("main", "coord.session-identity")
+            .unwrap()
+            .expect("session-identity visible on B");
+        let uncited = b.get_event(&uncited_row.event_id).unwrap().unwrap();
+        assert!(
+            uncited.payload["decision"]["cites"].is_null(),
+            "no citations in, no citations out"
+        );
+    }
+
+    /// GH-671 doneWhen 2, freshness clause: the stale signal has to survive
+    /// the import command that printed it. A decision that arrived over a dead
+    /// mirror must read as dead on B, not as one decided here this morning.
+    #[test]
+    fn ask_marks_a_decision_that_rode_a_stale_mirror() {
+        let fresh = "2026-09-07T03:00:00Z";
+        let stale_hit = ask_hit_after_import_stamped(None);
+        let fresh_hit = ask_hit_after_import_stamped(Some(fresh));
+
+        // Paired presence control: the same round trip differing only in the
+        // stamp, so a passing assertion cannot be the annotator never running.
+        let stale = stale_hit.mirror.expect("mirror provenance recorded");
+        assert!(stale.is_stale, "an unreadable stamp reads as dead");
+        assert_eq!(stale.machine, "4090", "the source machine is named");
+
+        let fresh_origin = fresh_hit.mirror.expect("mirror provenance recorded");
+        assert_eq!(fresh_origin.exported_at.as_deref(), Some(fresh));
+    }
+
+    /// Run the whole A-export-B-import-ask path with the mirror
+    /// `Exported at` stamp rewritten, and return the annotated hit.
+    fn ask_hit_after_import_stamped(stamp: Option<&str>) -> edda_ask::DecisionHit {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        decide_event(
+            &a,
+            "fleet.lane-profile",
+            LANE_PROFILE_VALUE,
+            LANE_PROFILE_REASON,
+        );
+        drop(a);
+
+        let mirror = a_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
+
+        // Age the mirror by rewriting its stamp — the same edit a checkout
+        // that nobody re-exported presents days later. `None` drops the line
+        // entirely, the unreadable case.
+        let index_path = mirror.join("INDEX.md");
+        let index = fs::read_to_string(&index_path).unwrap();
+        let rewritten: Vec<String> = index
+            .lines()
+            .filter_map(|l| {
+                if l.starts_with("- **Exported at**:") {
+                    stamp.map(|s| format!("- **Exported at**: {s}"))
+                } else {
+                    Some(l.to_string())
+                }
+            })
+            .collect();
+        fs::write(&index_path, rewritten.join("\n")).unwrap();
+
+        Ledger::open_or_init(&b_root).unwrap();
+        execute(&b_root, None, Some(mirror.to_str().unwrap()), false).unwrap();
+
+        let b = Ledger::open(&b_root).unwrap();
+        let opts = edda_ask::AskOptions {
+            limit: 10,
+            ..Default::default()
+        };
+        let mut result = edda_ask::ask(&b, "fleet.lane-profile", &opts, None).unwrap();
+        let origins = edda_ask::mirror::origins_for_hits(&b, &result.decisions);
+        edda_ask::mirror::annotate_hits(&mut result.decisions, &origins);
+        result
+            .decisions
+            .into_iter()
+            .find(|d| d.key == "fleet.lane-profile")
+            .expect("ask sees the imported decision")
+    }
+
+    /// A locally-decided row carries no mirror provenance — the reason the
+    /// marker stays meaningful instead of decorating every decision.
+    #[test]
+    fn ask_does_not_mark_a_locally_decided_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("solo");
+        fs::create_dir_all(&root).unwrap();
+        let l = Ledger::open_or_init(&root).unwrap();
+        decide_event(&l, "db.engine", "sqlite", "embedded, zero-config");
+
+        let opts = edda_ask::AskOptions {
+            limit: 10,
+            ..Default::default()
+        };
+        let mut result = edda_ask::ask(&l, "db.engine", &opts, None).unwrap();
+        let origins = edda_ask::mirror::origins_for_hits(&l, &result.decisions);
+        edda_ask::mirror::annotate_hits(&mut result.decisions, &origins);
+        let hit = result
+            .decisions
+            .iter()
+            .find(|d| d.key == "db.engine")
+            .expect("ask sees the local decision");
+        assert!(hit.mirror.is_none());
+        assert!(!edda_ask::format_human(&result).contains("stale-mirror"));
     }
 }

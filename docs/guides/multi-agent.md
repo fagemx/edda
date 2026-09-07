@@ -252,26 +252,50 @@ network protocol:
   `- **Exported at**:` stamp is rewritten on every export, so the tree is
   always dirty afterwards and the no-op test compares decision *content* with
   that stamp excluded.
-- **Read (target machine).** After pulling, `edda sync --from-mirror
-  docs/decisions` imports the mirror into the local ledger. Same rule as sqlite
-  sync (#394): same key with a different value imports **inactive** — merge,
-  never overwrite. A decision whose original event already exists locally is
-  skipped, so a machine importing its own mirror is a no-op. Ratified
-  decisions arrive ratified: the mirror's ratification is replayed as an
-  append-only `decision_ratify` event.
+- **Read (target machine).** The import half of the same trigger key runs at
+  **SessionStart** — `crates/edda-bridge-claude/src/mirror_import.rs`, called
+  from `dispatch_session_start`. It is in-process (never a subprocess: a spawn
+  costs ~2.7 s on every session of every project), it returns before opening
+  the ledger unless the mirror's `- **Exported at**:` stamp differs from the
+  one recorded in `state/mirror_import.json`, it degrades to silence rather
+  than failing or delaying session start, and when it does import something it
+  injects a `## Cross-machine mirror` line into the pack — an import nobody is
+  told about is the same as no import. `edda sync --from-mirror docs/decisions`
+  remains the manual equivalent and is what reports a real error.
+  Same rule as sqlite sync (#394): same key with a different value imports
+  **inactive** — merge, never overwrite (the injected line names the count,
+  because an inactive row is invisible to `edda ask` until someone resolves
+  it). A decision whose original event already exists locally is skipped, so a
+  machine importing its own mirror is a no-op. Ratified decisions arrive
+  ratified: the mirror's ratification is replayed as an append-only
+  `decision_ratify` event.
 - **Values are quoted, never paraphrased.** The mirror carries the verbatim
   value and reason of every decision; the import must never mint a value from
   an INDEX gloss (INDEX.md carries counts and freshness only). The
   `fleet.lane-profile` acceptance is the worked example: the verbatim value
   `agent-actor-is-the-profile` with its six-point reason must survive the
   round trip — the design-doc gloss `actor-is-profile` must not win.
-- **Freshness (death visibility).** `INDEX.md` is stamped on every export
-  with `- **Exported at**:` (RFC 3339) and `- **Exporting machine**:`. If the
-  stamp is older than **24 hours** (default,
+- **Citations ride the mirror.** `edda decide --cite` records the authority a
+  decision rests on, and `cites` lives in the decision event payload rather
+  than a projected column (`decision.cites=event-payload-not-sqlite-column`).
+  The export reads it from there and emits `- **Cites**:`; the import writes it
+  back into `payload["decision"]["cites"]` on the `decision_import` event,
+  which is the shape `edda ratify --by-rule` consumes. Dropping it would leave
+  a mirror that lies by omission about *why* a decision binds.
+- **Freshness (death visibility), at both ends.** `INDEX.md` is stamped on
+  every export with `- **Exported at**:` (RFC 3339) and
+  `- **Exporting machine**:`. If the stamp is older than **24 hours** (default,
   `edda-ledger::sync::DEFAULT_MIRROR_STALE_HOURS`) — or unreadable — `edda
   sync --from-mirror` prints a visible `⚠ STALE MIRROR` line naming the
   threshold, stamp and machine before importing. Unknown freshness is treated
   as stale, never silently fresh.
+  That warning dies with the command, so the stamp is also **persisted** on
+  the import event and re-derived at query time: `edda ask` prints
+  `⚠ stale-mirror hint: …` under any decision that arrived over a mirror past
+  the threshold (`crates/edda-ask/src/mirror.rs`). A locally-decided row is
+  never marked, and a fresh mirror stays silent — the marker is the exception,
+  which is what keeps it worth reading. In `--json` the field is `mirror`,
+  omitted entirely when absent.
 - **Doorbell boundary.** The mirror is truth-layer replication: it rides git
   and delivers whenever the clone pulls, with no resident process. There is
   deliberately **no cross-platform doorbell** in this issue — live push over

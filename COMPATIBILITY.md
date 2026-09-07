@@ -86,7 +86,7 @@ Ledger decision: `compat.stable-json-surfaces=dispatch-verify-ask-status-mcp`
 Exactly the surfaces enumerated below are stable. **Everything not listed
 here is unstable by default** — including every other `--json` flag in the
 CLI (e.g. `edda phase --json`, `edda ask --fleet --json`
-(`crates/edda-cli/src/cmd_ask.rs:172-173#let payload = crate::fleet::json_envelope(projects, &misses);`)): it may change shape in any
+(`crates/edda-cli/src/cmd_ask.rs:188-189#let payload = crate::fleet::json_envelope(projects, &misses);`)): it may change shape in any
 release without notice.
 
 Within 0.x, a stable surface may have keys **added**. Keys are never
@@ -137,7 +137,7 @@ both the intact and the broken side, through the real binary).
 
 One JSON object — the `AskResult` envelope
 (`crates/edda-ask/src/lib.rs:52-75#pub struct AskResult {`), printed at
-`crates/edda-cli/src/cmd_ask.rs:81-82#println!("{}", serde_json::to_string_pretty(&result)?);`. Keys always present: `query`
+`crates/edda-cli/src/cmd_ask.rs:89-90#println!("{}", serde_json::to_string_pretty(&result)?);`. Keys always present: `query`
 (string), `input_type` (string), `decisions`, `timeline`, `related_commits`,
 `related_notes`, `conversations` (arrays). Keys `tasks` (array, GH-404),
 `dependents` (array), `override_risk` (object), `workspace_event_count`
@@ -151,7 +151,9 @@ A `DecisionHit` (element of `decisions`/`timeline`;
 `crates/edda-ask/src/lib.rs`) always carries: `event_id`, `key`,
 `value`, `reason`, `domain`, `branch`, `ts` (strings), `is_active` (bool),
 and `governance` (object with `status`, optional `ratified_by`, `ratified_at`;
-GH-806); `tags` (array), `village_id` (string), and `staleness` (object) appear
+GH-806); `tags` (array), `village_id` (string), `staleness` (object) and
+`mirror` (object — cross-machine mirror provenance, GH-671: `machine`,
+optional `exported_at`/`age_hours`, `is_stale`, `threshold_hours`) appear
 only when non-empty / Some.
 
 Golden fixture: `crates/edda-cli/tests/ask_compat_contract.rs` →
