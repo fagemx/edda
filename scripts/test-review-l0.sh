@@ -85,7 +85,21 @@ make_fixture() {
   git -C "$fix" config user.name fixture
   printf '[workspace.package]\nversion = "0.0.0-fixture"\n' > "$fix/Cargo.toml"
   printf '# fixture lint stub\nexit 0\n' > "$fix/scripts/lint-markdown-content.sh"
-  printf '# fixture wiring stub\nexit 0\n' > "$fix/scripts/wiring-scan.sh"
+  # The wiring stub mirrors the one thing about the real script the runner
+  # has to classify: its refusal (scripts/wiring-scan.sh:30-34). An
+  # unconditional `exit 0` would make WIRING report PASS on a range no block
+  # can resolve, which is exactly the GH-950 defect the §7a case exists to
+  # catch — the stub would hide it rather than stand in for the tool.
+  cat > "$fix/scripts/wiring-scan.sh" <<'STUB'
+# fixture wiring stub — mirrors the real script's refusal contract
+for ref in "$1" "$2"; do
+  if ! git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
+    echo "error: unknown revision $ref" >&2
+    exit 2
+  fi
+done
+exit 0
+STUB
   git -C "$fix" add -A
   git -C "$fix" commit -q -m "chore(fleet): fixture base"
   git -C "$fix" rev-parse HEAD > "$TMP/base-sha"
@@ -269,12 +283,28 @@ L0_BASE=
 [ "$rc" -ne 0 ] || fail "full-SHA base: runner exited 0 over rules that never ran"
 grep -Fq 'fatal:' "$TMP/sha-base.out" \
   || fail "full-SHA base: fixture produced no refusal at all — the case is not being exercised"
-# The defect in one assertion: no row may carry a verdict over `fatal:` output.
-if grep -E '\| (PASS|FAIL) \|' "$TMP/sha-base.out" | grep -Fq 'fatal:'; then
-  fail "full-SHA base: a PASS/FAIL row reports a verdict over 'fatal:' output: $(grep -E '\| (PASS|FAIL) \|' "$TMP/sha-base.out" | grep -F 'fatal:')"
-fi
+# The defect in one assertion: no row may carry a verdict over a refusal —
+# stated over both wordings, because the two arrive by different routes. A
+# git-backed block's `fatal:` survives only as text (its status is eaten by
+# the grep it feeds); WIRING's tool is invoked directly, so its `error:` line
+# comes with a truthful exit 2. Asserting only the first would leave the
+# doneWhen's "ERROR for every affected rule" half-tested.
+verdicts=$(grep -E '\| (PASS|FAIL) \|' "$TMP/sha-base.out" | grep -E 'fatal:|error: unknown revision' || true)
+[ -z "$verdicts" ] \
+  || fail "full-SHA base: a PASS/FAIL row reports a verdict over a refusal: $verdicts"
 grep -F '| ERROR |' "$TMP/sha-base.out" | grep -Fq 'fatal:' \
   || fail "full-SHA base: no ERROR row for the refused blocks"
+# WIRING by name: it is the rule the `fatal:` net alone does not reach, and
+# the one that proved the runner still had to key on the exit code too.
+wiring=$(grep -F '| WIRING |' "$TMP/sha-base.out")
+case "$wiring" in
+  *'| ERROR '*) : ;;
+  *) fail "full-SHA base: WIRING refused and was not ERROR: $wiring" ;;
+esac
+# Exit 2 (a rule could not run), not 1 (a rule failed): with every affected
+# rule ERROR there is no finding left to report, and the two exits mean
+# different things to a caller.
+[ "$rc" -eq 2 ] || fail "full-SHA base: expected runner exit 2 (could not run), got $rc"
 echo "full-SHA base: refused blocks are ERROR, none PASS/FAIL — OK"
 
 # 7b. The generic case, with no bad range anywhere: a block that prints a

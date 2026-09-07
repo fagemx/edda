@@ -24,9 +24,11 @@
 #            blocks diff "origin/$BASE..$SHA", so a leading "origin/" is
 #            stripped before BASE is exported (a plain branch name works too).
 #            A full SHA is NOT an accepted shape: "origin/<40-hex>" is not a
-#            revision, so every block refuses and every routed rule reports
-#            ERROR. Pin an immutable base by naming a remote-tracking ref, or
-#            create one for the SHA (GH-950).
+#            revision, so every block that reads the range refuses and every
+#            rule routed to one of them reports ERROR. (A rule whose block
+#            never touches the range — U5 lints the tree — still runs and
+#            still reports its own verdict.) Pin an immutable base by naming a
+#            remote-tracking ref, or create one for the SHA (GH-950).
 #   <head>   a commit, a ref, or the literal HEAD. With the literal HEAD the
 #            classifier's file list is the working tree against <base>
 #            (staged and unstaged work included) while the blocks diff the
@@ -58,13 +60,28 @@
 #           "CANDIDATE" line (D1), or a "MISSING" line (D3) — or exited
 #           non-zero for any other reason. The script reports exit codes and
 #           printed lines; it does not adjudicate what a finding means.
-#   ERROR   the block failed for a non-finding reason: exit 127 (command not
-#           found), exit 128 (bad range), or output carrying a `fatal:` line —
-#           the command refused to run, so there is no verdict to report. The
-#           last is checked independently of the exit code, because a block
-#           that pipes a failing command into a grep reports the grep's status
-#           (REVIEW.md §0) and the failure would otherwise be read as a
-#           finding, or as a clean PASS (GH-950).
+#   ERROR   the block failed for a non-finding reason — it refused to run, so
+#           there is no verdict to report (GH-950). Two independent signals,
+#           because neither one covers the other:
+#             * output carrying a `fatal:` line, whatever the exit code. A
+#               block that pipes a failing command into a grep reports the
+#               grep's status (REVIEW.md §0), so git's 128 never arrives and
+#               the refusal would otherwise read as a finding, or as a clean
+#               PASS. Printed text is the only surviving evidence there —
+#               which is also this signal's limit: git localizes its messages,
+#               so a translated `fatal:` would not match. Measured English on
+#               the Git for Windows build here (2.49.0, which ships no
+#               share/locale); not guaranteed everywhere. The exit-code signal
+#               below is the locale-independent half, and reaches a refusal
+#               only when a pipeline has not swallowed the status.
+#             * exit 127 (command not found), 128 (bad range) or 2. Exit 2 is
+#               this repo's could-not-run code — the runner's own, grep's for
+#               a bad pattern (which a pipeline does report), and
+#               wiring-scan.sh's for a usage error or an unknown revision.
+#               It is needed because a refusal is not always worded `fatal:`:
+#               wiring-scan.sh writes `error:`, and that prefix must not be
+#               matched on, since check-cli-docs.sh uses the same word for
+#               genuine findings.
 #   N.A.    the rule needs reviewer input (D2's decision key), needs a PR
 #           number, or has no command block in the spec (U7, S2, S3, C1,
 #           R4, R5).
@@ -391,7 +408,21 @@ run_block() { # <rule> <class> <severity> <blocks-file line> <marker attrs>
     fi
     return
   fi
-  if [ "$rc" -eq 127 ] || [ "$rc" -eq 128 ]; then
+  # Exit codes that mean the block could not run. 2 joins 127/128 because a
+  # refusal is not always worded `fatal:` and the text net above cannot be
+  # widened to cover it: WIRING's tool refuses with `error: unknown revision`
+  # (scripts/wiring-scan.sh:32), but `^error:` is ambiguous in this repo —
+  # check-cli-docs.sh writes `error: undocumented verb` for a genuine finding,
+  # so matching that prefix would relabel findings as "did not run", which is
+  # the inverse of the bug GH-950 fixes.
+  #
+  # 2 is safe as a code where the prefix is not safe as text: it is this
+  # repo's could-not-run code (the runner's own exits, grep's for a bad
+  # pattern, wiring-scan.sh's for usage and unknown revisions), and no block
+  # in REVIEW.md signals a finding with it — the enumerator greps signal with
+  # 0/1, and the tools that signal by printed lines (U5, R3, D1, D3) are
+  # caught by `badline` above, which is checked first.
+  if [ "$rc" -eq 127 ] || [ "$rc" -eq 128 ] || [ "$rc" -eq 2 ]; then
     HAS_ERROR=1
     if [ -n "$OUT" ]; then ev=$(printf '%s\n' "$OUT" | oneline); else ev="(no output)"; fi
     print_row "$rule" "$2" "$3" "ERROR $rc" "$ev"
