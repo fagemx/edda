@@ -18,6 +18,40 @@ pub(crate) fn gh(repo: &Path, args: &[&str]) -> Result<Value> {
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
+/// Run `gh` for a write whose stdout is not JSON — a label edit, a comment
+/// post, and a status post each print a bare URL or nothing on success, so
+/// none of them can go through [`gh`], which parses stdout as JSON. Only
+/// the exit status is meaningful here; stdout is discarded.
+pub(crate) fn gh_write(repo: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("gh")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .context("run gh")?;
+    if !output.status.success() {
+        bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(())
+}
+
+/// The PR's current head SHA — a lighter read than [`resolve_pr`], which
+/// also fetches the head and base commits into private refs for `edda
+/// review`'s own diffing. `edda review deliver`'s moved-head check only
+/// ever compares this string; it has no need to make the commit locally
+/// resolvable.
+pub(crate) fn pr_head(repo: &Path, number: u64) -> Result<String> {
+    let value = gh(
+        repo,
+        &["pr", "view", &number.to_string(), "--json", "headRefOid"],
+    )?;
+    let head = value["headRefOid"].as_str().context("PR head missing")?;
+    anyhow::ensure!(
+        head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit()),
+        "invalid PR head SHA"
+    );
+    Ok(head.to_owned())
+}
+
 pub(crate) struct PrSubject {
     pub head: String,
     pub base: String,

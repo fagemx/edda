@@ -1342,10 +1342,11 @@ switch they believe they threw.
 
 #### `edda review deliver`
 
-Reads the §7 verdict comments GitHub holds for a pull request and reports what
-they amount to on one reviewed SHA. It is the product's half of the delivery
-path: the extraction the watcher did in awk (`verdict_body_lines`) plus the
-union rule `edda review gate` owns, in one call.
+Reads the §7 verdict comments GitHub holds for a pull request, reports what
+they amount to on one reviewed SHA, and delivers the writes that follow: the
+`review:lgtm` / `review:changes-requested` label, the `Independent Review`
+commit status, and — for a malformed verdict comment — a one-shot notice.
+This is `edda review`'s only subcommand that touches GitHub.
 
 ```bash
 edda review deliver --pr 1030
@@ -1358,21 +1359,46 @@ verdict comment counts only when it is pinned to that SHA.
 
 A comment is a verdict when its **first** line is the §7 heading. A heading
 anywhere else in the body is a transcript dump, not a verdict: it contributes
-nothing and is reported as `malformed <comment id>` so the round is not lost
-silently. A round whose heading carries ` (SHADOW)` — in either recorded
-position — is well formed and contributes nothing, because a SHADOW round is
-calibration evidence and never enters the union (REVIEW.md §8).
+nothing to the union, and its comment id gets a one-shot `review: malformed
+verdict comment <id>` notice — posted once (a later run recognizes the
+existing notice text and does not repeat it) — with no status and no label
+that run. A round whose heading carries ` (SHADOW)` — in either recorded
+position — is well formed and contributes nothing to the union, because a
+SHADOW round is calibration evidence, never a gate (REVIEW.md §8, rules.md
+R22); when it is the only signal standing on the SHA, deliver performs **zero
+GitHub writes** rather than reporting the SHA unreviewed.
 
 The verdict word is read in order: `Changes Requested` first, then the
 `Provisional — …` line written for an unqualified LGTM, then plain `LGTM`. A
 `P0=`/`P1=` count that is absent stays absent, and the union rule reads an
-unstated count as non-zero.
+unstated count as non-zero. A later LGTM never overrides an earlier Changes
+Requested standing on the same SHA (GH-742).
 
-Stdout is one line — `success`, `failure` or `error`, the SHA, and the number
-of verdicts standing — followed by one `malformed <id>` line per malformed
-comment. `--json` emits the same as an object with the verdict lines and the
-malformed ids.
+The `Independent Review` status is written for the union's state —
+`success`, `failure`, or `error` when no verdict stands at all — regardless
+of whether the PR's current head has since moved past the reviewed SHA. The
+`review:*` label is different: it is applied **only** while the current head
+still equals the reviewed SHA. A moved head still gets the status; it never
+gets the label.
 
-This verb **writes nothing**: no comment, no label, no commit status, no
-ledger event. Publishing those is the remaining half of GH-1030.
+Every write is idempotent by construction: deliver reads the label already on
+the PR, the latest `Independent Review` state already posted for the SHA, and
+the comments already present, before writing anything, so re-running deliver
+for an already-delivered verdict performs zero new GitHub calls.
+
+Stdout is one line — the union state, the SHA, and the number of verdicts
+standing — followed by one `malformed <id>` line per malformed comment, one
+`notice <id> <outcome>` line per notice attempted, and a `status`/`label`
+line for each of those writes. `--json` emits the same as an object, with an
+`outcome` of `done`, `skipped`, or `failed` (with a `reason`) for each write.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Delivered — every write this round called for succeeded, or none was due |
+| 1 | Partially delivered — some writes succeeded, at least one failed |
+| 2 | Failed — no write succeeded, the comment list was unreadable, or `--sha` was invalid |
+
+Launching reviews (`edda review`), the trigger policy (`edda review due`,
+GH-763), verdict semantics (`edda review gate`, GH-769), and merging
+(`edda prs check-merge`; GATE-01 — deliver never merges) stay out of scope.
 
