@@ -348,10 +348,11 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   # — Stop-ScheduledTask kills only the wrapper, leaving the child to be found
   # and killed by lane-stop's tree traversal (GH-672/GH-706), and a child
   # killed mid-git-write is what corrupts the config in the first place.
-  # The two wrapper generators write the cwd differently: lane-launch.ps1 emits
-  # `Set-Location -LiteralPath '<p>'`, while the review lanes of review-pr.sh
-  # and pr-review-launch.ps1 emit a bare `Set-Location '<p>'`. lane-stop claims
-  # to stop both families, so both shapes are exercised.
+  # Wrappers write the cwd in two shapes: lane-launch.ps1 emits
+  # `Set-Location -LiteralPath '<p>'`, while the review shell retired in
+  # GH-1061 emitted a bare `Set-Location '<p>'` and its wrappers still sit in
+  # the log directories lane-stop is pointed at. lane-stop claims to stop both
+  # families, so both shapes are exercised.
   # usage: start_fake_lane <lane> <repo> [literal|bare]
   start_fake_lane() {
     fl_lane=$1
@@ -462,8 +463,8 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   ok "lane-stop exits 1 when the config is corrupt and no backup can repair it"
 
   # --- case 13 (opt-in): review lanes get the check too ----------------------
-  # review-pr.sh:453 and pr-review-launch.ps1:64 write a bare `Set-Location`,
-  # and lane-stop.ps1 claims to stop those tasks (GH-712).
+  # Review-lane wrappers left by the shell retired in GH-1061 write a bare
+  # `Set-Location`, and lane-stop.ps1 claims to stop those tasks (GH-712).
   lane3=guard-e2e-review-$$
   repo10=$(new_repo e2e-review)
   guard -RepoPath "$repo10" -Backup >/dev/null 2>&1 || fail "e2e setup: backup failed"

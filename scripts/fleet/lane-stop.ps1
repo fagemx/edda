@@ -135,12 +135,13 @@ $brief = if ($wrapperBody -match '--prompt-file\s+[''"]([^''"]+)[''"]') {
 } else { $null }
 
 # The worktree the lane ran in, which resolves the SHARED .git/config this
-# script checks after the kill (GH-715). Both wrapper generators this script
+# script checks after the kill (GH-715). Every wrapper generator this script
 # stops must match: lane-launch.ps1:154 writes `Set-Location -LiteralPath '<p>'`
-# (single-quoted literal, embedded quotes doubled), while the review lanes of
-# review-pr.sh:453 and pr-review-launch.ps1:64 write a bare `Set-Location '<p>'`
-# — so the parameter name is optional here. Anchored to end of line because
-# both generators put nothing after the path.
+# (single-quoted literal, embedded quotes doubled). The parameter name stays
+# optional because the review shell retired in GH-1061 wrote a bare
+# `Set-Location '<p>'` and its wrappers still sit in the log directories this
+# script is pointed at. Anchored to end of line because no generator puts
+# anything after the path.
 $laneCwd = if ($wrapperBody -match "(?m)^\s*Set-Location\s+(?:-(?:LiteralPath|Path)\s+)?'((?:[^']|'')*)'\s*$") {
   $Matches[1] -replace "''", "'"
 } else { $null }

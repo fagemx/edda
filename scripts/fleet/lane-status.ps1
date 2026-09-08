@@ -1,5 +1,5 @@
 # lane-status.ps1 — one-line-per-lane status for fleet lanes launched by
-# lane-launch.ps1 or review-pr.sh. Replaces "check the log file's timestamp by hand" when
+# lane-launch.ps1. Replaces "check the log file's timestamp by hand" when
 # asking whether a lane is alive (fleet.lane-launch / fleet.lane-dispatch).
 #
 # usage:

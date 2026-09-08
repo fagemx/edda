@@ -17,8 +17,9 @@
 # writes to the ledger and never runs `edda decide` — it prints the for-ledger
 # block; the controller records it (design §3: 本 lane 不執行 edda decide).
 #
-# Launch lines follow the review transport conventions (README recipe and
-# scripts/review-pr.sh): pi is read-only via the --tools read,grep,find,ls
+# Launch lines follow the review transport conventions (README recipe and the
+# on-demand round in docs/guides/operator-runbook.md): pi is read-only via the
+# --tools read,grep,find,ls
 # allowlist; claude via the review allowlist
 # --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)".
 # Opus / Anthropic ids are never sent through pi
