@@ -26,7 +26,7 @@
 #   PR_REVIEW_WATCH_ACKS       acks file override    (used by tests)
 #
 # State (under $EDDA_FLEET_SCRATCH, not in git):
-#   review-state.tsv     pr<TAB>reviewed_sha<TAB>round
+#   review-state.tsv     pr<TAB>reviewed_sha<TAB>round<TAB>reviewed_at
 #   review-pending.tsv   pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched_epoch<TAB>postfails
 #   review-acks.tsv      pr<TAB>sha<TAB>attempts<TAB>status — heads launched but not
 #                        yet acked; the entry exists while the ack is pending
@@ -151,6 +151,10 @@ decide() {
     # event, so the daemon's own state is the only record that it happened.
     prev=$(awk -F'\t' -v n="$num" '$1 == n { last = $2 } END { print last }' \
       "$state" 2>/dev/null)
+    # Field 4 is when this daemon last reviewed the PR. Absent in rows written
+    # before it existed, which reads as "no record".
+    prev_at=$(awk -F'\t' -v n="$num" '$1 == n { last = $4 } END { print last }' \
+      "$state" 2>/dev/null)
 
     unreviewed=""
     case ",$labels," in *,review:unreviewed,*) unreviewed=--unreviewed-label ;; esac
@@ -170,7 +174,7 @@ decide() {
       ] | @tsv' 2>/dev/null); then
       :
     else
-      log "pr$num gh pr view failed; deciding without draft/push/response facts"
+      log "pr$num gh pr view failed; without a push time the verb holds this row"
       facts=""
     fi
     draft=$(printf '%s' "$facts" | cut -f1)
@@ -182,6 +186,7 @@ decide() {
     out=$SCRATCH/due.$num
     "${EDDA_BIN:-edda}" review due --head "$sha" --pr "$num" \
       ${prev:+--last-reviewed "$prev"} \
+      ${prev_at:+--last-reviewed-at "$prev_at"} \
       ${pushed_at:+--pushed-at "$pushed_at"} \
       ${response_at:+--response-at "$response_at"} \
       ${draft:+$draft} ${unreviewed:+$unreviewed} >"$out" 2>&1
@@ -499,8 +504,15 @@ pending_drop() {
 }
 
 state_set() { # $1=pr $2=sha $3=round
+  # Field 4 is when this review happened. `edda review due` needs it to tell a
+  # Review Response that arrived *after* a round from one that arrived before
+  # it: a ledger verdict answers the same question, but only when one exists,
+  # and a round published through the §7 comment path writes none (GH-763
+  # round 2). Rows written before this field existed read as empty, which the
+  # verb treats as "no record" — the behaviour they had already.
   awk -F'\t' -v pr="$1" '$1!=pr' "$STATE" > "$STATE.tmp"
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$STATE.tmp"
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$STATE.tmp"
   mv "$STATE.tmp" "$STATE"
 }
 

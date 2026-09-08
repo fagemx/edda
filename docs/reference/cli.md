@@ -1291,14 +1291,27 @@ The policy, in order — the first matching row wins:
 | `--draft` | `SKIP draft` |
 | `--unreviewed-label` and the head has not demonstrably moved | `SKIP review-unreviewed` |
 | `--ready` (the PR left draft this cycle) | `REVIEW ready` |
-| `--response-at` newer than the last verdict | `REVIEW response` |
+| `--response-at` newer than every record of having reviewed | `REVIEW response` |
 | head moved and the push has settled | `REVIEW push` |
 | head moved, still inside the debounce | `SKIP debounce <n>s` |
+| head moved, push time unknown | `SKIP debounce push-time-unknown` |
 | otherwise | `SKIP reviewed` |
 
 `ready` and `response` are one-time events the operator is waiting on, so
 neither is debounced; only `push` is, because only `push` repeats. A draft is
 refused first and cannot be enabled by any trigger.
+
+Two of those rows exist because `response` is *not* debounced, which makes a
+wrong "unanswered" answer cost one round per poll rather than one round. So it
+fires only when the response is newer than **both** records of having reviewed
+that may exist — the ledger verdict (`review_verdict`, which is absent for a
+round published through the §7 comment path, and does not cross machines) and
+the caller's own `--last-reviewed-at`. With neither, there is nothing to be
+newer than and the PR falls through to the debounced push rule.
+
+`SKIP debounce push-time-unknown` is the same caution: the caller cannot
+distinguish "this PR has no commit date" from "the forge call failed", and the
+second would otherwise open the switch for every PR at once.
 
 Facts come from the caller, and rounds from the ledger. `--last-reviewed`
 matters: a round published through the §7 comment path writes no

@@ -39,7 +39,7 @@ pub struct DueArgs {
     /// The PR's current head, as a full lowercase 40-hex SHA
     #[arg(long, value_name = "SHA")]
     pub head: String,
-    /// When that head was pushed (RFC3339); without it a moved head is due at once
+    /// When that head was pushed (RFC3339); without it a moved head waits
     #[arg(long, value_name = "RFC3339")]
     pub pushed_at: Option<String>,
     /// The PR left draft during this cycle
@@ -48,6 +48,14 @@ pub struct DueArgs {
     /// Timestamp of the newest `Review Response: Round N` comment (RFC3339)
     #[arg(long, value_name = "RFC3339")]
     pub response_at: Option<String>,
+    /// When the caller last reviewed this PR (RFC3339), from its own record
+    ///
+    /// A ledger verdict answers the same question but only when one exists:
+    /// verdicts do not cross machines (GH-671) and a round published through
+    /// the §7 comment path writes none at all. Without this, a response older
+    /// than a review that did happen still reads as unanswered.
+    #[arg(long, value_name = "RFC3339")]
+    pub last_reviewed_at: Option<String>,
     /// The PR is a draft
     #[arg(long)]
     pub draft: bool,
@@ -77,8 +85,11 @@ pub(crate) struct History {
     pub(crate) last_sha: Option<String>,
     /// Timestamp of that verdict's event.
     pub(crate) last_ts: Option<String>,
-    /// Reviewer session of round 1 — what a later round resumes.
+    /// Reviewer session of the lowest round present — what a later round
+    /// resumes. Round 1 when this ledger has it.
     pub(crate) first_session: Option<String>,
+    /// The round `first_session` came from; `u32::MAX` until one is seen.
+    pub(crate) first_round: u32,
     /// Rounds that produced a verdict.
     pub(crate) rounds: u32,
     /// Summed cost of those rounds, and whether every one of them was measured.
@@ -94,6 +105,19 @@ impl History {
     /// quietly contributing zero: a sum that silently drops a round reads as
     /// cheaper than the truth, which is the one direction a cost display must
     /// never fail in.
+    /// The ` --resume <session>` suffix on a REVIEW line, or empty.
+    ///
+    /// A second round resumes the first round's session: the reviewer already
+    /// holds the diff, the spec and its own findings, which is the difference
+    /// between a $2 round and a $0.02 one. Round 1's session is the one to
+    /// resume — a later round's reviewer holds a delta, not the whole subject.
+    pub(crate) fn resume_suffix(&self) -> String {
+        match (self.rounds >= 1, self.first_session.as_deref()) {
+            (true, Some(session)) => format!(" --resume {session}"),
+            _ => String::new(),
+        }
+    }
+
     pub(crate) fn cost_line(&self) -> String {
         let rounds = if self.rounds == 1 { "round" } else { "rounds" };
         if self.rounds == 0 {
@@ -124,6 +148,7 @@ pub(crate) fn history(repo: &Path, pr: u64) -> Result<History> {
     let ledger = Ledger::open(repo)?;
     let mut history = History {
         all_measured: true,
+        first_round: u32::MAX,
         ..Default::default()
     };
     for event in ledger.iter_events_by_type("review_verdict")? {
@@ -134,22 +159,45 @@ pub(crate) fn history(repo: &Path, pr: u64) -> Result<History> {
         // `refs.pr` from the raw JSON keeps one malformed event from turning
         // the whole daemon into `SKIP due-unknown` until the ledger is
         // repaired.
-        if event.payload.pointer("/refs/pr").and_then(|v| v.as_u64()) != Some(pr) {
-            continue;
+        // Skip only what is *positively* another PR's. An event whose
+        // `refs.pr` is absent or unreadable falls through to the full
+        // deserialize below, which either reads it or fails loudly — skipping
+        // it here would be the same blindness this gate exists to avoid, just
+        // moved one line up.
+        match event.payload.pointer("/refs/pr").and_then(|v| v.as_u64()) {
+            Some(other) if other != pr => continue,
+            _ => {}
         }
         let payload: ReviewVerdictPayload = serde_json::from_value(event.payload.clone())
             .with_context(|| format!("review_verdict event {}", event.event_id))?;
-        if payload.verdict == "unreviewed" {
+        // The raw gate above is a cheap pre-filter, not the decision. A
+        // verdict with no `refs.pr` at all — what `edda review --base X --head
+        // Y` writes when no PR is named — reaches here, and counting it as
+        // this PR's history would attribute another subject's rounds, cost and
+        // resume session to it, and raise `last_verdict_at` enough to answer a
+        // genuine Review Response with `SKIP reviewed`.
+        if payload.verdict == "unreviewed" || payload.refs.pr != Some(pr) {
             continue;
         }
         history.rounds += 1;
         history.last_sha = Some(payload.subject.head_sha.clone());
         history.last_ts = Some(event.ts.clone());
-        // Round 1's reviewer is the one to resume, and the payload says which
-        // round it is. Taking the first event seen would name whichever round
-        // happens to sit earliest in this ledger — not the same thing on a
-        // machine that only imported later rounds.
-        if payload.refs.round == Some(1) {
+        // Round 1's reviewer is the one to resume — it holds the whole
+        // subject, where a later round holds a delta — and the payload says
+        // which round it is. Selecting by ledger position instead would name
+        // whichever round happens to sit earliest here, which is not the same
+        // thing on a machine that imported only later rounds.
+        //
+        // When no round 1 is present at all, the lowest round that *is*
+        // present is the best available resume target; answering "no session"
+        // would send a continuing review back to round-1 price for want of an
+        // event this machine never received.
+        // A verdict that records no round at all still names a reviewer worth
+        // resuming; `u32::MAX` would leave `first_session` empty for a ledger
+        // where no event carries a round.
+        let round = payload.refs.round.unwrap_or(u32::MAX);
+        if round < history.first_round || history.first_session.is_none() {
+            history.first_round = round;
             history.first_session = Some(payload.reviewer.session_id.clone());
         }
         match (payload.cost.measured, payload.cost.usd) {
@@ -182,6 +230,8 @@ pub(crate) struct Facts<'a> {
     pub(crate) now: i64,
     pub(crate) last_sha: Option<&'a str>,
     pub(crate) last_verdict_at: Option<i64>,
+    /// When the caller itself last reviewed, if it keeps such a record.
+    pub(crate) last_reviewed_at: Option<i64>,
 }
 
 /// The trigger policy. Pure: same facts, same answer, on every machine.
@@ -211,23 +261,31 @@ pub(crate) fn decide(facts: &Facts, config: &DueConfig) -> Due {
     }
 
     // A Review Response is the implementer saying "look again", and it counts
-    // only if it arrived after the verdict it answers. An older one is the
+    // only if it arrived after the review it answers. An older one is the
     // previous round's, already answered.
     //
-    // A response with **no** verdict to compare against is not a trigger. It
-    // reads like one — the comment is right there — but this branch is not
-    // debounced and nothing records that a response was acted on, so answering
-    // "review" to an uncomparable response answers it again on the next poll,
-    // and every poll after that, each at round-1 price. Verdicts do not cross
-    // machines yet (GH-671: `review_verdict` is not among the event types the
-    // committed mirror imports) and a round published only through the §7
-    // comment path writes no event at all, so "no verdict in this ledger" is
-    // the common case rather than the exotic one. Such a PR falls through to
-    // the push rule below, which is debounced and reads the daemon's own
-    // recorded head — the record that actually exists.
+    // This branch is not debounced and nothing marks a response as consumed,
+    // so getting "already answered" wrong does not cost one wasted round — it
+    // costs one per poll, forever, each at round-1 price. It therefore
+    // measures against **every** record of having reviewed that the caller
+    // has, and fires only if the response is newer than all of them:
+    //
+    // - the ledger verdict, which exists only sometimes (verdicts do not cross
+    //   machines — GH-671 — and a round published through the §7 comment path
+    //   writes no event at all), and
+    // - the caller's own `--last-reviewed-at`, which is the record that does
+    //   exist for a round this daemon ran.
+    //
+    // With neither, there is nothing to be newer than and this is not a
+    // trigger: the PR falls through to the push rule below, which is debounced
+    // and reads the caller's recorded head.
     if config.enabled("response") {
-        if let (Some(response_at), Some(verdict_at)) = (facts.response_at, facts.last_verdict_at) {
-            if response_at > verdict_at {
+        let reviewed_at = match (facts.last_verdict_at, facts.last_reviewed_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (only, None) | (None, only) => only,
+        };
+        if let (Some(response_at), Some(reviewed_at)) = (facts.response_at, reviewed_at) {
+            if response_at > reviewed_at {
                 return Due::Review("response".into());
             }
         }
@@ -260,7 +318,10 @@ pub(crate) fn decide(facts: &Facts, config: &DueConfig) -> Due {
     if settled_for >= debounce {
         Due::Review("push".into())
     } else {
-        Due::Skip(format!("debounce {}s", debounce - settled_for))
+        Due::Skip(format!(
+            "debounce {}s",
+            debounce.saturating_sub(settled_for)
+        ))
     }
 }
 
@@ -313,6 +374,11 @@ fn judge(args: DueArgs, cwd: &Path) -> Result<()> {
         .as_deref()
         .map(|value| epoch(value, "--response-at"))
         .transpose()?;
+    let last_reviewed_at = args
+        .last_reviewed_at
+        .as_deref()
+        .map(|value| epoch(value, "--last-reviewed-at"))
+        .transpose()?;
 
     // The repo is only needed once a PR number gives the ledger something to
     // look up, so the flag-only cases work outside a checkout.
@@ -346,6 +412,7 @@ fn judge(args: DueArgs, cwd: &Path) -> Result<()> {
             now,
             last_sha,
             last_verdict_at,
+            last_reviewed_at,
         },
         &config,
     );
@@ -355,11 +422,7 @@ fn judge(args: DueArgs, cwd: &Path) -> Result<()> {
             // A second round resumes the first round's session: the reviewer
             // already holds the diff, the spec and its own findings, which is
             // the difference between a $2 round and a $0.02 one.
-            let resume = match (history.rounds >= 1, history.first_session.as_deref()) {
-                (true, Some(session)) => format!(" --resume {session}"),
-                _ => String::new(),
-            };
-            println!("REVIEW {reason}{resume}");
+            println!("REVIEW {reason}{}", history.resume_suffix());
             println!("{}", history.cost_line());
             Ok(())
         }
@@ -389,7 +452,51 @@ mod tests {
             now: 10_000,
             last_sha: None,
             last_verdict_at: None,
+            last_reviewed_at: None,
         }
+    }
+
+    #[test]
+    fn a_response_older_than_the_callers_own_review_is_already_answered() {
+        // Round 2's P1: requiring a verdict to *exist* is not the same as
+        // requiring it to be *current*. `response` never reads the recorded
+        // head, so a PR the daemon has already reviewed still re-fired on
+        // every poll — undebounced, and nothing marks a response consumed.
+        let config = DueConfig::default();
+        let mut f = facts();
+        f.last_sha = Some(HEAD); // the daemon reviewed this very head
+        f.last_verdict_at = Some(1_000); // an old verdict exists
+        f.response_at = Some(2_000); // newer than the verdict...
+        f.last_reviewed_at = Some(3_000); // ...but older than the review
+        assert_eq!(decide(&f, &config), Due::Skip("reviewed".into()));
+    }
+
+    #[test]
+    fn a_response_newer_than_every_record_of_reviewing_still_fires() {
+        // The trigger has to survive its own hardening: this is the case it
+        // exists for — the implementer answered a round without pushing.
+        let config = DueConfig::default();
+        let mut f = facts();
+        f.last_sha = Some(HEAD);
+        f.last_verdict_at = Some(1_000);
+        f.last_reviewed_at = Some(3_000);
+        f.response_at = Some(3_001);
+        assert_eq!(decide(&f, &config), Due::Review("response".into()));
+    }
+
+    #[test]
+    fn the_callers_own_record_counts_even_with_no_verdict_at_all() {
+        // The common shape: a round published through the §7 comment path
+        // writes no ledger event, so the caller's record is the only one.
+        let config = DueConfig::default();
+        let mut f = facts();
+        f.last_sha = Some(HEAD);
+        f.last_verdict_at = None;
+        f.last_reviewed_at = Some(3_000);
+        f.response_at = Some(2_999);
+        assert_eq!(decide(&f, &config), Due::Skip("reviewed".into()));
+        f.response_at = Some(3_001);
+        assert_eq!(decide(&f, &config), Due::Review("response".into()));
     }
 
     #[test]
@@ -470,6 +577,165 @@ mod tests {
             matches!(decide(&f, &config), Due::Skip(reason) if reason.starts_with("debounce ")),
             "a saturating debounce must hold, never open"
         );
+    }
+
+    /// A `review_verdict` payload with only the fields this policy reads.
+    fn verdict_payload(pr: u64, round: u32, head: &str, session: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "review_verdict/0",
+            "subject": {
+                "base_sha": "base", "head_sha": head,
+                "files": 1, "lines": 1, "coverage": "full"
+            },
+            "refs": { "pr": pr, "round": round },
+            "spec": { "mode": "spec-backed", "source": "issue", "trust": "declared" },
+            "brief": { "core": "review-spec-v1" },
+            "reviewer": {
+                "agent": "claude", "transport": "cli",
+                "model_requested": "m", "model_observed": "m",
+                "observed_via": "test", "session_id": session,
+                "session_label": session, "tool_policy": "read-only"
+            },
+            "independence": "clean", "independence_policy": "session",
+            "gates": { "status": "green" }, "verdict": "lgtm", "outcome": "pass",
+            "qualified": true,
+            "cost": { "usd": 1.0, "measured": true, "duration_ms": 1 },
+            "parse": "ok"
+        })
+    }
+
+    /// Append `review_verdict` events to a throwaway ledger and read them back
+    /// through the real `history()`, so the round-selection and PR-scoping
+    /// rules are exercised rather than assumed.
+    fn ledger_history(events: &[(u64, u32, &str, &str)], pr: u64) -> (tempfile::TempDir, History) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let ledger = edda_ledger::Ledger::open_or_init(&root).expect("ledger");
+        for (event_pr, round, head, session) in events {
+            let payload: edda_core::ReviewVerdictPayload =
+                serde_json::from_value(verdict_payload(*event_pr, *round, head, session))
+                    .expect("payload");
+            let event = edda_core::event::new_review_verdict_event(
+                "main",
+                ledger.last_event_hash().expect("hash").as_deref(),
+                &payload,
+                None,
+                None,
+                &[],
+            )
+            .expect("event");
+            ledger.append_event(&event).expect("append");
+        }
+        let history = history(&root, pr).expect("history");
+        (temp, history)
+    }
+
+    #[test]
+    fn the_session_to_resume_is_round_ones_by_number_not_by_ledger_position() {
+        // A machine that imported only later rounds would otherwise name
+        // whichever verdict happens to sit earliest in its own ledger. Round 1
+        // is the reviewer holding the whole subject; a later round holds a
+        // delta.
+        let (_temp, history) = ledger_history(
+            &[
+                (42, 2, "head2", "round-2-session"),
+                (42, 1, "head1", "round-1-session"),
+            ],
+            42,
+        );
+        assert_eq!(history.rounds, 2);
+        assert_eq!(history.resume_suffix(), " --resume round-1-session");
+    }
+
+    #[test]
+    fn a_verdict_with_no_pr_belongs_to_no_pr() {
+        // `edda review --base X --head Y` with no --pr writes a verdict whose
+        // refs.pr is absent. Counting it here would attribute another
+        // subject's rounds, cost and resume session to this PR — and raise
+        // last_verdict_at enough to answer a real Review Response with
+        // "reviewed", which is the under-review failure this policy exists to
+        // avoid.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let ledger = edda_ledger::Ledger::open_or_init(&root).expect("ledger");
+        let mut value = verdict_payload(42, 1, "orphan", "orphan-session");
+        value["refs"] = serde_json::json!({ "round": 1 });
+        let payload: edda_core::ReviewVerdictPayload =
+            serde_json::from_value(value).expect("payload");
+        let event = edda_core::event::new_review_verdict_event(
+            "main",
+            ledger.last_event_hash().expect("hash").as_deref(),
+            &payload,
+            None,
+            None,
+            &[],
+        )
+        .expect("event");
+        ledger.append_event(&event).expect("append");
+
+        let history = history(&root, 42).expect("history");
+        assert_eq!(
+            history.rounds, 0,
+            "a PR-less verdict is not this PR's round"
+        );
+        assert_eq!(history.resume_suffix(), "");
+        assert!(
+            history.last_ts.is_none(),
+            "and it cannot age this PR's verdict"
+        );
+    }
+
+    #[test]
+    fn another_prs_verdicts_are_not_this_prs_history() {
+        let (_temp, history) = ledger_history(
+            &[
+                (99, 1, "other", "other-session"),
+                (42, 1, "head1", "round-1-session"),
+            ],
+            42,
+        );
+        assert_eq!(history.rounds, 1);
+        assert_eq!(history.resume_suffix(), " --resume round-1-session");
+        assert_eq!(history.last_sha.as_deref(), Some("head1"));
+    }
+
+    #[test]
+    fn the_resume_suffix_names_round_ones_session_and_only_from_round_two() {
+        // Round 2's P1: dropping ` --resume {session}` from the decision line
+        // left every test green. The suffix is the whole point of the verb —
+        // a resumed round measured $0.02 against round 1's $1.28 — so its
+        // shape is pinned here rather than only in the ledger path.
+        let mut history = History {
+            rounds: 0,
+            first_session: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            history.resume_suffix(),
+            "",
+            "no round yet, nothing to resume"
+        );
+        history.rounds = 1;
+        history.first_session = Some("round-1-session".into());
+        assert_eq!(history.resume_suffix(), " --resume round-1-session");
+        // A round that recorded no session id cannot be resumed by guessing.
+        history.first_session = None;
+        assert_eq!(history.resume_suffix(), "");
+    }
+
+    #[test]
+    fn a_ledger_without_round_one_resumes_the_lowest_round_it_has() {
+        // A machine that imported only later rounds still has a reviewer worth
+        // resuming; answering "no session" would pay round-1 price for want of
+        // an event this machine never received.
+        let (_temp, history) = ledger_history(
+            &[
+                (42, 3, "head3", "round-3-session"),
+                (42, 2, "head2", "round-2-session"),
+            ],
+            42,
+        );
+        assert_eq!(history.resume_suffix(), " --resume round-2-session");
     }
 
     #[test]

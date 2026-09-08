@@ -450,12 +450,14 @@ fn collect_active_decisions(cwd: &str) -> Option<String> {
     render_decisions_two_tier(&decisions, &ratified)
 }
 
-/// Split active decisions into an operator-ratified (binding) tier and an
-/// unratified tier (GH-401). Binding status is decided solely by ratify
-/// events (via [`edda_ledger::view::is_decision_ratified`]) — never by the
-/// authority string — so the projection can never launder machine inference
-/// into operator authority. The unratified tier annotates each line with its
-/// authorship so agent-authored and legacy decisions read as non-binding.
+/// Split active decisions into a ratified (binding) tier and an unratified
+/// tier (GH-401). Binding status is decided solely by ratify events (via
+/// [`edda_ledger::view::is_decision_ratified`]) — never by the authority
+/// string — so the projection can never launder machine inference into
+/// binding authority. The events themselves record which path conferred it:
+/// an operator's `edda ratify`, or the cited-authority rule sweep
+/// (`decision.auto-ratify`). The unratified tier annotates each line with its
+/// authorship so agent-authored and legacy decisions read as not yet binding.
 fn render_decisions_two_tier(
     decisions: &[edda_ledger::view::DecisionView],
     ratified: &std::collections::BTreeSet<String>,
@@ -487,7 +489,9 @@ fn render_decisions_two_tier(
 
     let mut out = String::new();
     if !ratified_lines.is_empty() {
-        out.push_str("### Operator-ratified (binding)\n\n");
+        out.push_str(
+            "### Ratified (binding — by the operator or the cited-authority rule sweep)\n\n",
+        );
         out.push_str(&ratified_lines.join("\n"));
     }
     if !unratified_lines.is_empty() {
@@ -495,7 +499,7 @@ fn render_decisions_two_tier(
             out.push_str("\n\n");
         }
         out.push_str(
-            "### Unratified — recorded, not binding until `edda ratify` (agent working decisions)\n\n",
+            "### Unratified — recorded, not binding until ratified (rule sweep on cited authority; agent working decisions)\n\n",
         );
         out.push_str(&unratified_lines.join("\n"));
     }
