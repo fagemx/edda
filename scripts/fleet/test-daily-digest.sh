@@ -1,7 +1,7 @@
 #!/bin/sh
 # Offline fixtures for scripts/fleet/daily-digest.sh (GH-765).
 #
-# Style follows scripts/test-pr-review-watch.sh — POSIX sh, `set -eu`, a
+# Style follows the repo's shell tests — POSIX sh, `set -eu`, a
 # mktemp dir with trap cleanup, executable stubs in $tmp/bin prepended to
 # PATH that log their argv, assertions with grep -qF, `exit 1` with a
 # message on failure, final line "daily-digest fixtures passed".

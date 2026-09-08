@@ -6,7 +6,7 @@
 # comments come from EDDA_COMPARE_FIXTURE files holding the exact stream
 # `gh pr view <pr> --json comments --jq '.comments[] | "<<<COMMENT>>>", .body'`
 # prints, so no gh, no network, and no state outside the temp dir.
-# Style follows scripts/test-pr-review-watch.sh — no new tooling.
+# Style follows the repo's shell tests — no new tooling.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)

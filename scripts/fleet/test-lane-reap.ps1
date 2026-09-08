@@ -158,7 +158,7 @@ $wAlpha  = Join-Path $logDir 'alpha.wrapper.ps1'
 $wSolo   = Join-Path $logDir 'solo.wrapper.ps1'
 $wBeta   = Join-Path $logDir 'beta.wrapper.ps1'
 $wGh9    = Join-Path $logDir 'gh9-b-lane.wrapper.ps1'
-$wWatcher = Join-Path $logDir 'pr-review-watch-wrapper.ps1'
+$wOffFam = Join-Path $logDir 'off-family.wrapper.ps1'
 $wBad    = Join-Path $logDir 'bad.wrapper.ps1'
 
 Set-Content -LiteralPath $wGh772 -Encoding utf8 -Value "# fixture wrapper`n# lane-reap: issue=772`nSet-Location 'C:/ai_agent/edda-wt-gh772'"
@@ -167,7 +167,7 @@ Set-Content -LiteralPath $wAlpha -Encoding utf8 -Value "# fixture wrapper`n# lan
 Set-Content -LiteralPath $wSolo  -Encoding utf8 -Value "# fixture wrapper`n# lane-reap: controller-pid=999 controller-started=$T1"
 Set-Content -LiteralPath $wBeta  -Encoding utf8 -Value "# fixture wrapper`n# lane-reap: controller-pid=4242 controller-started=$T1"
 Set-Content -LiteralPath $wGh9   -Encoding utf8 -Value "# fixture wrapper`n# lane-reap: issue=9"
-Set-Content -LiteralPath $wWatcher -Encoding utf8 -Value "# fixture wrapper`n# lane-reap: issue=772"
+Set-Content -LiteralPath $wOffFam -Encoding utf8 -Value "# fixture wrapper`n# lane-reap: issue=772"
 Set-Content -LiteralPath $wBad   -Encoding utf8 -Value "# fixture wrapper`n# lane-reap: issue=abc"
 
 function Invoke-Scenario([hashtable]$Fixture, [bool]$Apply, [string]$TaskName = '', [string]$LogDir = '') {
@@ -289,18 +289,23 @@ try {
   Assert-Rows $r { $_.row -eq 'action' } 0 "8: no unregister action on unknown state (even under -Apply)"
   Assert-True (@($r.applied).Count -eq 0) "8: nothing applied"
 
-  # --- 9. persistent watcher and off-family tasks are never candidates -----
-  "=== 9. persistent watcher + off-family task excluded ==="
+  # --- 9. off-family tasks are never candidates -----------------------------
+  # Both fixtures sit outside $FleetTaskFamilies, so neither is enumerated —
+  # even though each is associated with a CLOSED issue that would make it
+  # removable if it ever were. Until GH-1061 the first was the review watcher,
+  # which this case also held against $PersistentTaskNames; that list is empty
+  # now, so what is asserted here is the family filter alone.
+  "=== 9. off-family tasks excluded ==="
   $r = Invoke-Scenario @{
     tasks = @(
-      @{ taskName = 'edda-pr-review-watcher'; state = 'Running'; actionArguments = "-File `"$wWatcher`"" },
-      @{ taskName = 'edda-other-thing';       state = 'Ready';  actionArguments = "-File `"$wGh772`"" }
+      @{ taskName = 'edda-persistent-thing'; state = 'Running'; actionArguments = "-File `"$wOffFam`"" },
+      @{ taskName = 'edda-other-thing';      state = 'Ready';   actionArguments = "-File `"$wGh772`"" }
     )
     gh = @{ 'issue:772' = @{ state = 'CLOSED' } }   # would be removable if ever considered
     processes = @{}
   } $true '' $logDir
   Assert-True ($r.exitCode -eq 0) "9: exits 0"
-  Assert-True (@($r.rows).Count -eq 0) "9: zero rows — the watcher and off-family tasks are not candidates ($(($r.rows | ConvertTo-Json -Compress)))"
+  Assert-True (@($r.rows).Count -eq 0) "9: zero rows — off-family tasks are not candidates ($(($r.rows | ConvertTo-Json -Compress)))"
   Assert-True ($r.candidateCount -eq 0) "9: candidateCount 0"
   Assert-True (@($r.applied).Count -eq 0) "9: nothing applied — no accidental unrelated-task deletion"
 

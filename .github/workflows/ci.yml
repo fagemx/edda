@@ -64,9 +64,9 @@ jobs:
           # — unrelated PRs keep it skipped (green-fast). On any diff failure
           # or unknown base we assume fleet tests changed too, same policy as
           # code above. The terms are globs: scripts/test-*.sh (added by
-          # #927) subsumes the scripts/test-review-capabilities.sh name an
-          # earlier revision listed here, and scripts/fleet/test-*.ps1 brings
-          # the Windows-only PowerShell tests under the same trigger.
+          # #927) subsumes the individual test names an earlier revision
+          # listed here, and scripts/fleet/test-*.ps1 brings the Windows-only
+          # PowerShell tests under the same trigger.
           fleet=false
           if [ -n "$base" ] \
             && git cat-file -e "$base" 2>/dev/null \
@@ -218,9 +218,9 @@ jobs:
   # scripts/fleet/test-*.sh, so a test added there later is picked up without
   # touching this file; a red test exits non-zero and ci-gate propagates it.
   #
-  # Not everything runs here. scripts/test-review-capabilities.sh runs in
-  # fleet-tests-windows below (ubuntu's dash rejects the `set -o pipefail` in
-  # the helper it generates). Some tests are QUARANTINED in the runner, which
+  # Not everything runs here. scripts/test-git-config-guard.sh and the
+  # scripts/fleet/test-*.ps1 group run in fleet-tests-windows below, which is
+  # the only Windows runner. Some tests are QUARANTINED in the runner, which
   # names each one, the measured failure, and the issue that owns removing it,
   # and prints a count so the list cannot grow quietly. That file is the single
   # source for which tests those are — deliberately not repeated here.
@@ -239,11 +239,9 @@ jobs:
         run: sh scripts/fleet/run-fleet-tests.sh
 
   # GH-896 round 1 (P0-1) asked for the second route #896's doneWhen offers,
-  # since some of its tests cannot run on ubuntu. This job is it, and it runs
-  # exactly one test: scripts/test-review-capabilities.sh, whose generated
-  # helper carries `set -o pipefail` (the `set -o pipefail` it writes into that runner, `scripts/review-pr.sh`) — ubuntu's sh
-  # is dash and rejects it with `Illegal option`, so there the test would fail
-  # for the shell rather than for anything it asserts. Here sh is Git Bash.
+  # since some of its tests cannot run on ubuntu. This job is it: the tests
+  # here need a Windows host, either because their subject is Windows-native
+  # or because they need sh to be Git Bash rather than ubuntu's dash.
   #
   # It does NOT run test-lane-helpers.sh: that test is red on this runner too
   # (case 0, `prepare: worktree not registered`) as well as on a Windows
@@ -270,12 +268,11 @@ jobs:
           # on a fatal 'ambiguous argument' rather than on anything they test.
           fetch-depth: 0
       - name: Run the Windows-only fleet tests
-        # Not the glob runner: this is the one test the ubuntu job cannot run
-        # but this one can. test-review-capabilities.sh generates a Linux
-        # runner from scripts/review-pr.sh carrying a bash shebang and
-        # `set -o pipefail`; ubuntu's sh is dash and rejects it with 'Illegal
-        # option', so there the test fails for the shell rather than for
-        # anything it asserts. Here sh is Git Bash, so it runs.
+        # Not the glob runner: these are the tests the ubuntu job cannot run
+        # but this one can. test-git-config-guard.sh drives
+        # git-config-guard.ps1, a Windows-native tool, through pwsh; its
+        # locked-config probe cannot run under Linux pwsh. run-fleet-tests.sh
+        # SKIPs it there with that reason, so it executes exactly here.
         #
         # The quarantined tests are NOT here either — they are red on this
         # runner too. run-fleet-tests.sh is the single place that names them
@@ -287,7 +284,6 @@ jobs:
         # Windows workstation the entrypoint runs the same group itself, so
         # the glob exists in exactly two places that never both execute.
         run: |
-          sh scripts/test-review-capabilities.sh
           sh scripts/test-git-config-guard.sh
           status=0
           for p in scripts/fleet/test-*.ps1; do
@@ -345,7 +341,7 @@ jobs:
           # GH-896: fleet-tests and fleet-tests-windows are evaluated FIRST
           # so their failure cannot be swallowed by the early success exits
           # below. Each is skipped only when detect decided no fleet path
-          # (scripts/fleet/**, scripts/test-review-capabilities.sh, workflow)
+          # (scripts/fleet/**, scripts/test-*.sh, workflow)
           # changed; any other skip, failure, or cancellation fails the gate.
           if [ "$FLEET_RESULT" = "success" ]; then
             echo "Fleet shell tests succeeded."

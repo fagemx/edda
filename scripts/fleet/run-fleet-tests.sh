@@ -18,22 +18,16 @@
 # the run with a message naming it — a silently empty glob is the defect this
 # gate exists to prevent, wearing a different hat.
 #
-# scripts/test-review-capabilities.sh is matched by the second glob and is
-# platform-bound, not quarantined: the helper it generates carries
-# `set -o pipefail`, which ubuntu's dash rejects, so a case arm below SKIPs it
-# with a printed reason; the `fleet-tests-windows` job runs it on
-# windows-latest, where sh is Git Bash.
-#
 # Some tests are QUARANTINED — excluded from every job, named and printed at
 # runtime with the issue that owns letting each back in, and counted, so the
 # list cannot grow quietly. No count is written here on purpose: a number in a
 # comment 35 lines above the arms it describes has already gone stale once.
 # The arms below carry the measured failure for each.
 #
-# #896's doneWhen names test-lane-helpers.sh and #927's names
-# scripts/test-review-adapter.sh among the tests that must run; each runs
-# nowhere, which is why the PRs opening these gates carry `Issue:` lines and
-# no closing keywords.
+# #896's doneWhen names test-lane-helpers.sh among the tests that must run and
+# it runs nowhere, which is why the PRs opening these gates carry `Issue:`
+# lines and no closing keywords. The other tests those doneWhens named belonged
+# to the review shell and were deleted with it (GH-1061).
 #
 # Entry point used by the `fleet-tests` job in .github/workflows/ci.yml; the
 # same command is reproducible locally on any POSIX sh.
@@ -71,38 +65,6 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
     q_issue=''
     q_why=''
     case "$t" in
-        scripts/test-review-capabilities.sh)
-            # Platform-bound, not quarantined: the helper this test generates
-            # carries `set -o pipefail`, which ubuntu's dash rejects with
-            # `Illegal option` — there it would fail for the shell rather
-            # than for anything it asserts. The `fleet-tests-windows` job
-            # runs it on windows-latest, where sh is Git Bash (GH-927).
-            printf 'SKIP %s (platform-bound: the fleet-tests-windows job runs it)
-' "$t"
-            continue
-            ;;
-        scripts/test-pr-review-watch.sh)
-            # Red on ubuntu in its first gated run (r22 live case 2 - the
-            # watcher wrote a status where the fixture expects none); green on
-            # the workstation where it has always been hand-run. Tracked as
-            # #1029, which owns removing this entry in the change that turns
-            # the test green everywhere.
-            q_issue='#1029'
-            q_why='r22 live case 2 red on ubuntu, green on the workstation'
-            ;;
-        scripts/test-review-pr.sh)
-            # Red in every CI environment that could carry it: on ubuntu case
-            # D1 fails by construction (it asserts the Windows path shapes the
-            # Scheduled-Tasks launcher produces; the scratch path is POSIX),
-            # and on windows-latest case D11 hit the nohup launch race in
-            # review-pr.sh's product-adapter path (`nohup process died
-            # immediately`) - measured there and on a workstation under load.
-            # It passes on workstation reruns, where it has always been
-            # hand-run. Tracked as #1024, which owns removing this entry in
-            # the change that turns the test green everywhere.
-            q_issue='#1024'
-            q_why='red on ubuntu by construction; nohup race on windows-latest'
-            ;;
         scripts/test-git-config-guard.sh)
             # Platform-bound subject: it drives git-config-guard.ps1, a
             # Windows-native tool, through pwsh; its locked-config probe
@@ -111,25 +73,6 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
             printf 'SKIP %s (platform-bound: drives Windows-native git-config-guard.ps1; the fleet-tests-windows job runs it)
 ' "$t"
             continue
-            ;;
-        scripts/test-review-product-adapter-r4.sh)
-            # Harness-bound, like test-detached-dispatch.ps1: its generated
-            # lane invokes the real `edda review` CLI, and no CI job compiles
-            # the workspace (it also needs cygpath for its Windows PATH
-            # fixture). Stated per #927's doneWhen; hand-run on the
-            # workstation, where it passes.
-            printf 'SKIP %s (harness-bound: needs the edda binary on PATH; no CI job compiles the workspace)
-' "$t"
-            continue
-            ;;
-        scripts/test-review-adapter.sh)
-            # Red on a Windows workstation against origin/main: the pwsh child
-            # of its Windows block exits 1 and `QUALIFIED=True` never lands in
-            # the fixture receipt. Measured twice, not a timing flake.
-            # Tracked as #987, which owns removing this entry in the same
-            # change that turns the test green.
-            q_issue='#987'
-            q_why='red on a Windows workstation (QUALIFIED=True never lands)'
             ;;
         scripts/fleet/test-lane-helpers.sh)
             # Red on windows-latest (case 0, `prepare: worktree not
@@ -141,13 +84,13 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
             q_why='red on every Windows environment'
             ;;
         scripts/fleet/test-next-loop.sh)
-            # Green on a Windows workstation; red on BOTH CI platforms for
-            # different reasons — ubuntu `dry-run output misses the launch
-            # command`, windows-latest case 7 gets the transport refusal
-            # rather than the missing-arm one it asserts. Green in exactly one
-            # place, the machine where it has always been hand-run.
+            # Green on a Windows workstation, red on ubuntu (`dry-run output
+            # misses the launch command`). Green in exactly one place, the
+            # machine where it has always been hand-run. Its windows-latest
+            # failure was case 7, which drove next-review.sh and went with the
+            # review shell (GH-1061); the ubuntu one is case 1 and stands.
             q_issue='#964'
-            q_why='red on both CI platforms'
+            q_why='red on ubuntu'
             ;;
     esac
     if [ -n "$q_issue" ]; then
