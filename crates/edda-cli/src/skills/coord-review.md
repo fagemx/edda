@@ -52,9 +52,12 @@ Flag requests that are blocking work.
 
 ### Step 3: Check Decision Conflicts
 
-Review recorded decisions for potential conflicts. Note (GH-401): decisions
-are agent-authored and *not binding* until an operator ratifies them via
-`edda ratify` — treat unratified records as working guidance, not settled law.
+Review recorded decisions for potential conflicts. Note (GH-401, GH-1063):
+decisions are agent-authored and *not binding* until ratified — by the
+operator via `edda ratify`, or by the cited-authority rule sweep
+(`edda ratify --by-rule cited-authority`) for a decision whose `--cite` names
+an operator carrier, an issue, or a binding decision. Treat unratified
+records as working guidance, not settled law.
 - Same key set by different sessions with different values (last-write-wins, but may indicate disagreement)
 - Decisions that contradict each other semantically
 

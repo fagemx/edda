@@ -313,6 +313,28 @@ mod tests {
                 content.contains(&format!("name: {name}")),
                 "{name} should have correct frontmatter"
             );
+
+            // GH-1063: these files are scaffolded into every new project, so
+            // whatever they say about binding authority is what every future
+            // session in that project learns. Assert against the scaffolded
+            // file on disk, not the source constant — the scaffold is the
+            // carrier, and a fixture that drifted from it would prove nothing.
+            //
+            // The superseded phrase is spelled in two pieces on purpose: the
+            // acceptance sweep greps `crates/` for it, and a guard that spelled
+            // it out would itself be the hit it exists to prevent.
+            let operator_only = concat!("until an operator ", "ratifies");
+            assert!(
+                !content.contains(operator_only),
+                "{name} still teaches operator-only binding authority"
+            );
+            if matches!(name, "coord-sync" | "coord-review") {
+                assert!(
+                    content.contains("edda ratify --by-rule cited-authority"),
+                    "{name} must name the cited-authority rule sweep — the second \
+                     binding path (decision.auto-ratify; PR #1016)"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&tmp);

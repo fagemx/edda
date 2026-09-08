@@ -33,7 +33,9 @@ fn two_tier_splits_ratified_from_unratified() {
 
     let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
     // Ratified section names the binding key; unratified section names the other.
-    assert!(out.contains("Operator-ratified"));
+    // "### Ratified" and not bare "Ratified": anchoring on the heading keeps the
+    // assertion off any decision line whose own key or reason carries the word.
+    assert!(out.contains("### Ratified"));
     assert!(out.contains("db.engine"));
     assert!(out.contains("Unratified"));
     assert!(out.contains("api.style"));
@@ -52,7 +54,7 @@ fn two_tier_annotates_unratified_authorship() {
     ];
     let out = render_decisions_two_tier(&decisions, &std::collections::BTreeSet::new()).unwrap();
     assert!(
-        !out.contains("Operator-ratified"),
+        !out.contains("### Ratified"),
         "no ratified section expected"
     );
     assert!(out.contains("[agent]"));
@@ -66,7 +68,7 @@ fn two_tier_legacy_unratified_all_in_unratified_tier() {
     // event — they must land in the unratified tier, never binding.
     let decisions = vec![dv("legacy.key", "v", "human", "2026-01-01T00:00:00Z")];
     let out = render_decisions_two_tier(&decisions, &std::collections::BTreeSet::new()).unwrap();
-    assert!(!out.contains("Operator-ratified"));
+    assert!(!out.contains("### Ratified"));
     assert!(out.contains("Unratified"));
     assert!(out.contains("legacy.key"));
 }
@@ -83,7 +85,7 @@ fn two_tier_all_ratified_omits_unratified_section() {
     let decisions = vec![dv("k", "v", "operator", "2026-07-14T00:00:00Z")];
     let ratified: std::collections::BTreeSet<String> = ["evt_k".to_string()].into();
     let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
-    assert!(out.contains("Operator-ratified"));
+    assert!(out.contains("### Ratified"));
     assert!(!out.contains("Unratified"));
 }
 

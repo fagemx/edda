@@ -266,9 +266,10 @@ impl EddaServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    /// Record a binding decision (key=value) with optional reason and auto-supersede
+    /// Record a decision (key=value) — agent-authored, unratified tier; binding
+    /// only after the cited-authority rule sweep (GH-1063)
     #[tool(
-        description = "Record a binding decision (key=value) with optional reason and auto-supersede detection"
+        description = "Record a decision (key=value) with optional reason and auto-supersede detection — agent-authored, lands in the unratified tier; binding only after the operator ratifies it or the cited-authority rule sweep does"
     )]
     async fn edda_decide(
         &self,

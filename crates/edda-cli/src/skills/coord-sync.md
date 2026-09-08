@@ -25,7 +25,7 @@ If no peers are active, report "Solo session — no coordination needed" and exi
 
 Run `edda coord` to get the full coordination protocol view including:
 - Peer claims (scope ownership)
-- Recorded decisions (coordination broadcasts — agent-authored, *not binding* until an operator ratifies them via `edda ratify`)
+- Recorded decisions (coordination broadcasts — agent-authored, *not binding* until ratified: by the operator via `edda ratify`, or by the cited-authority rule sweep `edda ratify --by-rule cited-authority` when the decision carries a `--cite`)
 - Pending requests
 
 ### Step 3: Analyze Scope
