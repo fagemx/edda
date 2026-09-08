@@ -66,6 +66,11 @@ pub(crate) trait Gh {
     /// itself, so a fake's call log is the truth for "zero new writes";
     /// this method is not required to be idempotent on its own.
     fn add_label(&self, pr: u64, label: &str) -> Result<()>;
+    /// Remove one label. Deliver only calls this as a best-effort sibling
+    /// cleanup right after a successful `add_label` — mirroring
+    /// `pr-review-watch.sh`'s `gh pr edit --remove-label ... || true` — so a
+    /// failure here must never turn a delivered label into a failed write.
+    fn remove_label(&self, pr: u64, label: &str) -> Result<()>;
     /// The latest `Independent Review` status state on `sha`, if that
     /// context has ever been posted there (`None` otherwise).
     fn latest_status(&self, sha: &str) -> Result<Option<String>>;
@@ -85,6 +90,13 @@ pub(crate) enum Write {
     Done,
     /// The call was made and failed; the message is the `gh` failure.
     Failed(String),
+    /// No call was made this round, but — unlike `Skipped` — the write WAS
+    /// due: R23 (#917) withholds status/label for any run that posts a new
+    /// malformed-comment notice, mirroring `pr-review-watch.sh`'s
+    /// `post_review_status` returning 3 ("status withheld this poll") to
+    /// tell its caller to come back. A withheld write must read as
+    /// outstanding, never as delivered — see [`Delivery::exit_code`].
+    Withheld(&'static str),
 }
 
 impl Write {
@@ -93,6 +105,7 @@ impl Write {
             Write::Skipped(_) => "skipped",
             Write::Done => "done",
             Write::Failed(_) => "failed",
+            Write::Withheld(_) => "withheld",
         }
     }
 
@@ -100,6 +113,7 @@ impl Write {
         match self {
             Write::Skipped(r) => Some(r),
             Write::Failed(e) => Some(e.as_str()),
+            Write::Withheld(r) => Some(r),
             Write::Done => None,
         }
     }
@@ -111,8 +125,12 @@ impl Write {
 pub(crate) struct Delivery {
     /// One entry per malformed comment id, in `Extracted::malformed` order.
     pub notices: Vec<(String, Write)>,
-    /// `None` only when withheld by rule: a new notice was just posted this
-    /// run, or the only standing signal on the SHA is SHADOW.
+    /// `None` only when nothing was due at all: the only standing signal on
+    /// the SHA is SHADOW, or a malformed notice failed to post (already
+    /// non-zero via the notice's own `Write::Failed`). A status that WAS due
+    /// but got deferred by a new, successfully posted malformed notice
+    /// (R23/#917) is `Some(Write::Withheld(_))`, never `None` — see
+    /// `Write::Withheld` and `exit_code`.
     pub status: Option<Write>,
     /// `(label, outcome)`; `None` when the union is `Union::None` (no label
     /// is due either way).
@@ -120,12 +138,18 @@ pub(crate) struct Delivery {
 }
 
 impl Delivery {
-    /// 0 delivered, 1 partially delivered, 2 failed — the exit-code
-    /// contract doneWhen requires: nothing here is silently dropped, every
-    /// attempted write's outcome feeds this. A run whose intended action
-    /// (a notice, or a status+label) fully succeeds, or whose intended
-    /// action was correctly "nothing" (SHADOW-only, an idempotent rerun),
-    /// is `delivered`.
+    /// 0 delivered, 1 partially delivered, 2 failed, 3 withheld — the
+    /// exit-code contract doneWhen requires: nothing here is silently
+    /// dropped, every attempted write's outcome feeds this. A run whose
+    /// intended action (a notice, or a status+label) fully succeeds, or
+    /// whose intended action was correctly "nothing" (SHADOW-only, an
+    /// idempotent rerun), is `delivered`. A run that withholds a due
+    /// status/label under R23 (#917) — a new malformed notice standing
+    /// alongside a real verdict — is never `delivered` even when the
+    /// notice itself posted cleanly: `Write::Withheld` must outrank 0, the
+    /// same way the shell's `post_review_status` returns 3 rather than 0
+    /// so the caller comes back. `Withheld` outcomes never count toward
+    /// `attempted`/`failed` — they were not attempted, deliberately.
     pub(crate) fn exit_code(&self) -> i32 {
         let outcomes: Vec<&Write> = self
             .notices
@@ -136,18 +160,22 @@ impl Delivery {
             .collect();
         let attempted = outcomes
             .iter()
-            .filter(|w| !matches!(w, Write::Skipped(_)))
+            .filter(|w| !matches!(w, Write::Skipped(_) | Write::Withheld(_)))
             .count();
         let failed = outcomes
             .iter()
             .filter(|w| matches!(w, Write::Failed(_)))
             .count();
-        if failed == 0 {
-            0
-        } else if attempted > 0 && failed == attempted {
-            2
+        if failed > 0 {
+            if attempted > 0 && failed == attempted {
+                2
+            } else {
+                1
+            }
+        } else if outcomes.iter().any(|w| matches!(w, Write::Withheld(_))) {
+            3
         } else {
-            1
+            0
         }
     }
 }
@@ -197,13 +225,40 @@ pub(crate) fn deliver(
                 .push((id.clone(), Write::Failed(error.to_string()))),
         }
     }
-    if new_notice {
-        return out;
-    }
+
     // The only standing signal on this SHA is a self-declared SHADOW round
     // (or a malformed comment already noticed on an earlier run): R22 /
-    // REVIEW.md §8 — zero further writes.
-    if extracted.lines.is_empty() && !extracted.shadow.is_empty() {
+    // REVIEW.md §8 — zero further writes, whether or not a notice was just
+    // posted.
+    let shadow_only = extracted.lines.is_empty() && !extracted.shadow.is_empty();
+
+    if new_notice {
+        // R23 (#917): a run that posts a new malformed-comment notice
+        // withholds status/label for THIS run regardless of `extracted.lines`
+        // — mirroring pr-review-watch.sh's `post_review_status`, whose
+        // `new_notice=1` sits outside the if/else on the `gh pr comment`
+        // call and whose caller returns 3 ("status withheld this poll") so
+        // the next poll retries. A failed notice post already withholds
+        // (this branch fires either way) and already reports non-zero via
+        // the notice's own `Write::Failed`, so status/label there stay
+        // `None` (nothing to add) rather than `Withheld`; a successfully
+        // posted notice must still not read as fully delivered when a real
+        // status (and, per the union, a label) was due — see
+        // `Delivery::exit_code`.
+        let notice_failed = out
+            .notices
+            .iter()
+            .any(|(_, w)| matches!(w, Write::Failed(_)));
+        if !notice_failed && !shadow_only {
+            const REASON: &str = "withheld: new malformed notice posted this run (R23/#917)";
+            out.status = Some(Write::Withheld(REASON));
+            if let Some(label) = label_for(union) {
+                out.label = Some((label.to_owned(), Write::Withheld(REASON)));
+            }
+        }
+        return out;
+    }
+    if shadow_only {
         return out;
     }
 
@@ -229,19 +284,33 @@ pub(crate) fn deliver(
         Err(error) => Write::Failed(format!("read latest status: {error}")),
     });
 
-    let label_target = match union {
-        Union::Pass => Some(LABEL_LGTM),
-        Union::Fail => Some(LABEL_CHANGES),
-        Union::None => None,
-    };
-    if let Some(label) = label_target {
+    if let Some(label) = label_for(union) {
+        // The sibling review:* label (GH-1081/P1-1): the shell this verb
+        // replaces removes it right after a successful add
+        // (`pr-review-watch.sh:925-928`) so a later verdict on the same SHA
+        // never leaves both labels standing. Only a freshly applied label
+        // triggers the removal — an "already applied" rerun makes zero new
+        // calls (GH-1030 doneWhen: idempotent rerun, zero new writes).
+        let sibling = if label == LABEL_LGTM {
+            LABEL_CHANGES
+        } else {
+            LABEL_LGTM
+        };
         let outcome = match gh.head(pr) {
             Ok(current) if current == sha => match gh.labels(pr) {
                 Ok(existing) if existing.iter().any(|l| l == label) => {
                     Write::Skipped("already applied")
                 }
-                Ok(_) => match gh.add_label(pr, label) {
-                    Ok(()) => Write::Done,
+                Ok(existing) => match gh.add_label(pr, label) {
+                    Ok(()) => {
+                        if existing.iter().any(|l| l == sibling) {
+                            // Best-effort, like the shell's `|| true`: a
+                            // failed removal must not turn a delivered
+                            // label into a failed write.
+                            let _ = gh.remove_label(pr, sibling);
+                        }
+                        Write::Done
+                    }
                     Err(error) => Write::Failed(error.to_string()),
                 },
                 Err(error) => Write::Failed(format!("read labels: {error}")),
@@ -253,6 +322,15 @@ pub(crate) fn deliver(
     }
 
     out
+}
+
+/// The `review:*` label the union rule calls for, if any.
+fn label_for(union: Union) -> Option<&'static str> {
+    match union {
+        Union::Pass => Some(LABEL_LGTM),
+        Union::Fail => Some(LABEL_CHANGES),
+        Union::None => None,
+    }
 }
 
 /// The real `gh`-backed [`Gh`]. `head`/`labels`/`latest_status` are reads;
@@ -286,6 +364,13 @@ impl Gh for GhCli<'_> {
         github::gh_write(
             self.repo,
             &["pr", "edit", &pr.to_string(), "--add-label", label],
+        )
+    }
+
+    fn remove_label(&self, pr: u64, label: &str) -> Result<()> {
+        github::gh_write(
+            self.repo,
+            &["pr", "edit", &pr.to_string(), "--remove-label", label],
         )
     }
 
@@ -355,6 +440,7 @@ mod tests {
         label_calls: RefCell<Vec<(u64, String)>>,
         status_calls: RefCell<Vec<(String, String, String)>>,
         comment_calls: RefCell<Vec<(u64, String)>>,
+        remove_label_calls: RefCell<Vec<(u64, String)>>,
     }
 
     impl FakeGh {
@@ -369,6 +455,7 @@ mod tests {
                 label_calls: RefCell::new(Vec::new()),
                 status_calls: RefCell::new(Vec::new()),
                 comment_calls: RefCell::new(Vec::new()),
+                remove_label_calls: RefCell::new(Vec::new()),
             }
         }
     }
@@ -384,6 +471,13 @@ mod tests {
             self.label_calls.borrow_mut().push((pr, label.to_owned()));
             anyhow::ensure!(!self.fail_add_label, "simulated add_label failure");
             self.labels.borrow_mut().push(label.to_owned());
+            Ok(())
+        }
+        fn remove_label(&self, pr: u64, label: &str) -> Result<()> {
+            self.remove_label_calls
+                .borrow_mut()
+                .push((pr, label.to_owned()));
+            self.labels.borrow_mut().retain(|l| l != label);
             Ok(())
         }
         fn latest_status(&self, _sha: &str) -> Result<Option<String>> {
@@ -451,6 +545,55 @@ mod tests {
     }
 
     #[test]
+    fn a_later_changes_requested_on_the_same_sha_removes_the_standing_lgtm_label_gh1081_p1_1() {
+        // GH-1081 Round 1 P1-1: the label carrier used to be add-only. Run 1
+        // delivers a lone LGTM (review:lgtm applied). A Changes Requested
+        // comment then lands on the SAME sha, so run 2's union flips to
+        // Fail (GH-742) and must apply review:changes-requested — and, per
+        // pr-review-watch.sh:925-928, remove the now-stale review:lgtm
+        // sibling so the two labels never stand together.
+        let gh = FakeGh::new(SHA);
+        let ext1 = extracted(&["LGTM\t0\t0"]);
+        let d1 = deliver(&gh, 1, SHA, &[], &ext1, union_of(&ext1));
+        assert_eq!(d1.label, Some((LABEL_LGTM.to_owned(), Write::Done)));
+        assert_eq!(gh.labels.borrow().as_slice(), [LABEL_LGTM.to_owned()]);
+        assert!(gh.remove_label_calls.borrow().is_empty());
+
+        let ext2 = extracted(&["LGTM\t0\t0", "Changes Requested\t0\t1"]);
+        let d2 = deliver(&gh, 1, SHA, &[], &ext2, union_of(&ext2));
+        assert_eq!(d2.label, Some((LABEL_CHANGES.to_owned(), Write::Done)));
+        assert_eq!(
+            gh.remove_label_calls.borrow().as_slice(),
+            [(1, LABEL_LGTM.to_owned())],
+            "the sibling review:lgtm must be removed, not left standing"
+        );
+        assert_eq!(
+            gh.labels.borrow().as_slice(),
+            [LABEL_CHANGES.to_owned()],
+            "only the new label stands after the removal"
+        );
+    }
+
+    #[test]
+    fn reapplying_the_same_label_makes_zero_new_remove_calls() {
+        // A rerun where the target label is already applied must not touch
+        // the sibling either — it takes the "already applied" Skipped path
+        // entirely, never reaching add_label, so there is nothing to clean
+        // up after (GH-1030 doneWhen: idempotent rerun, zero new writes).
+        let gh = FakeGh::new(SHA);
+        let ext = extracted(&["LGTM\t0\t0"]);
+        let d1 = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
+        assert_eq!(d1.label, Some((LABEL_LGTM.to_owned(), Write::Done)));
+
+        let d2 = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
+        assert_eq!(
+            d2.label,
+            Some((LABEL_LGTM.to_owned(), Write::Skipped("already applied")))
+        );
+        assert!(gh.remove_label_calls.borrow().is_empty());
+    }
+
+    #[test]
     fn no_verdicts_at_all_posts_error_and_applies_no_label() {
         let gh = FakeGh::new(SHA);
         let ext = extracted(&[]);
@@ -512,7 +655,7 @@ mod tests {
         assert_eq!(d.label, Some((LABEL_LGTM.to_owned(), Write::Done)));
     }
 
-    // ---- malformed heading: one notice, no status, no label -----------------
+    // ---- malformed heading: one notice, status/label withheld ---------------
 
     #[test]
     fn malformed_heading_posts_one_notice_and_withholds_status_and_label() {
@@ -529,10 +672,61 @@ mod tests {
             "review: malformed verdict comment 42"
         );
         assert_eq!(d.notices, vec![("42".to_owned(), Write::Done)]);
-        assert_eq!(d.status, None);
-        assert_eq!(d.label, None);
+        // No lines stood on this SHA, but an "error" status was still due
+        // (see no_verdicts_at_all_posts_error_and_applies_no_label) — R23
+        // withholds it rather than skipping it outright, so exit_code must
+        // say "come back", not "delivered" (GH-1081 P1-2).
+        assert!(matches!(d.status, Some(Write::Withheld(_))));
+        assert_eq!(d.label, None, "Union::None calls for no label either way");
         assert!(gh.status_calls.borrow().is_empty());
-        assert_eq!(d.exit_code(), 0);
+        assert_eq!(d.exit_code(), 3);
+    }
+
+    #[test]
+    fn malformed_notice_alongside_a_standing_verdict_withholds_status_and_label_gh1081_p1_2() {
+        // GH-1081 Round 1 P1-2: a not-yet-noticed malformed id used to take
+        // an early return regardless of `extracted.lines`, so a standing
+        // LGTM got no status that run, yet exit_code() answered 0
+        // ("delivered"). pr-review-watch.sh's post_review_status returns 3
+        // ("status withheld this poll") in exactly this case, which is what
+        // makes its caller come back on the next poll instead of treating
+        // the SHA as settled.
+        let gh = FakeGh::new(SHA);
+        let ext = Extracted {
+            lines: vec!["LGTM\t0\t0".to_owned()],
+            malformed: vec!["42".to_owned()],
+            shadow: vec![],
+        };
+        let d = deliver(&gh, 7, SHA, &[], &ext, union_of(&ext));
+        assert_eq!(d.notices, vec![("42".to_owned(), Write::Done)]);
+        assert!(
+            matches!(d.status, Some(Write::Withheld(_))),
+            "a standing LGTM makes the status due, not merely absent: {:?}",
+            d.status
+        );
+        assert!(
+            matches!(d.label, Some((_, Write::Withheld(_)))),
+            "the union (LGTM) calls for review:lgtm, withheld not skipped: {:?}",
+            d.label
+        );
+        assert!(
+            gh.status_calls.borrow().is_empty(),
+            "no status call — withheld means no gh write, not a failed one"
+        );
+        assert!(
+            gh.label_calls.borrow().is_empty(),
+            "no label call — withheld means no gh write, not a failed one"
+        );
+        assert_ne!(
+            d.exit_code(),
+            0,
+            "a withheld status must not read as delivered"
+        );
+        assert_eq!(
+            d.exit_code(),
+            3,
+            "withheld is its own outcome, distinct from partial (1) or full (2) failure"
+        );
     }
 
     #[test]

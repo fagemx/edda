@@ -1361,8 +1361,12 @@ A comment is a verdict when its **first** line is the §7 heading. A heading
 anywhere else in the body is a transcript dump, not a verdict: it contributes
 nothing to the union, and its comment id gets a one-shot `review: malformed
 verdict comment <id>` notice — posted once (a later run recognizes the
-existing notice text and does not repeat it) — with no status and no label
-that run. A round whose heading carries ` (SHADOW)` — in either recorded
+existing notice text and does not repeat it). Posting a *new* notice
+withholds status and label for that run, regardless of whether a real
+verdict also stands on the SHA (R23, #917); a withheld write reports outcome
+`withheld` (not `skipped`) and the run's exit code says so too (see the exit
+code table below), so a poller comes back rather than treating the round as
+settled. A round whose heading carries ` (SHADOW)` — in either recorded
 position — is well formed and contributes nothing to the union, because a
 SHADOW round is calibration evidence, never a gate (REVIEW.md §8, rules.md
 R22); when it is the only signal standing on the SHA, deliver performs **zero
@@ -1379,7 +1383,9 @@ The `Independent Review` status is written for the union's state —
 of whether the PR's current head has since moved past the reviewed SHA. The
 `review:*` label is different: it is applied **only** while the current head
 still equals the reviewed SHA. A moved head still gets the status; it never
-gets the label.
+gets the label. Applying a label removes its sibling when present — a later
+Changes Requested on the same SHA removes a standing `review:lgtm`, and vice
+versa — so the two never stand together.
 
 Every write is idempotent by construction: deliver reads the label already on
 the PR, the latest `Independent Review` state already posted for the SHA, and
@@ -1390,13 +1396,15 @@ Stdout is one line — the union state, the SHA, and the number of verdicts
 standing — followed by one `malformed <id>` line per malformed comment, one
 `notice <id> <outcome>` line per notice attempted, and a `status`/`label`
 line for each of those writes. `--json` emits the same as an object, with an
-`outcome` of `done`, `skipped`, or `failed` (with a `reason`) for each write.
+`outcome` of `done`, `skipped`, `withheld`, or `failed` (with a `reason`) for
+each write.
 
 | Exit | Meaning |
 |---|---|
 | 0 | Delivered — every write this round called for succeeded, or none was due |
 | 1 | Partially delivered — some writes succeeded, at least one failed |
 | 2 | Failed — no write succeeded, the comment list was unreadable, or `--sha` was invalid |
+| 3 | Withheld — a new malformed-comment notice posted this run held back a status/label that was due (R23, #917); rerun to retry |
 
 Launching reviews (`edda review`), the trigger policy (`edda review due`,
 GH-763), verdict semantics (`edda review gate`, GH-769), and merging

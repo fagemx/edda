@@ -306,8 +306,10 @@ pub fn run(args: DeliverArgs, cwd: &Path) -> Result<()> {
 }
 
 /// The read, decide, and write sequence; returns the exit code `run` should
-/// use on success (0 delivered, 1 partially delivered — never returned as
-/// an `Err`, since something WAS delivered).
+/// use on success (0 delivered, 1 partially delivered, 2 failed, 3 a due
+/// status/label withheld under R23/#917 — never returned as an `Err`, since
+/// something either succeeded or was deliberately withheld this round; see
+/// [`delivery::Delivery::exit_code`]).
 fn deliver_inner(args: &DeliverArgs, cwd: &Path) -> Result<i32> {
     let sha = match &args.sha {
         Some(sha) => sha.clone(),
