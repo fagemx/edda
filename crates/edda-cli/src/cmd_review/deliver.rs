@@ -196,19 +196,45 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
 }
 
 /// The §7 comments GitHub holds for one PR.
+///
+/// REST (`gh api`), not GraphQL (`gh pr view --json comments`): the GraphQL
+/// shape carries only base64 node ids, which the #917 malformed-notice
+/// contract cannot use — it needs the numeric id a human can resolve in the
+/// UI. `--paginate` alone (no `--slurp`) is enough: `gh` combines an
+/// array-shaped REST endpoint's pages into one JSON array before this ever
+/// sees it (verified live against this repo, forcing multiple pages with
+/// `per_page=2`), so a comment list longer than one page is never silently
+/// truncated on the merge-gate path.
 fn comments(repo: &Path, pr: u64) -> Result<Vec<Comment>> {
-    let value = gh(repo, &["pr", "view", &pr.to_string(), "--json", "comments"])
-        .with_context(|| format!("read comments of PR #{pr}"))?;
-    Ok(value["comments"]
+    let value = gh(
+        repo,
+        &[
+            "api",
+            "--paginate",
+            &format!("repos/{{owner}}/{{repo}}/issues/{pr}/comments"),
+        ],
+    )
+    .with_context(|| format!("read comments of PR #{pr}"))?;
+    Ok(parse_comments(&value))
+}
+
+/// Map REST issue-comment JSON (a numeric `id`, a string `body`) to
+/// [`Comment`]. Split out from [`comments`] so the mapping is testable
+/// without shelling out to `gh`.
+fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
+    value
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
         .map(|entry| Comment {
-            id: entry["id"].as_str().unwrap_or_default().to_owned(),
+            id: entry["id"]
+                .as_u64()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
             body: entry["body"].as_str().unwrap_or_default().to_owned(),
         })
-        .collect())
+        .collect()
 }
 
 /// `edda review deliver --pr <N>` — what the §7 comments on the reviewed SHA
@@ -385,5 +411,29 @@ mod tests {
             let got = extract(bad, &[comment("1", &body)]);
             assert!(got.lines.is_empty(), "accepted a malformed sha: {bad}");
         }
+    }
+
+    #[test]
+    fn parse_comments_reads_the_rest_shape_a_numeric_id_not_a_graphql_node_id() {
+        // gh api --paginate repos/{owner}/{repo}/issues/{n}/comments (REST)
+        // returns a numeric id — not the base64 GraphQL node id
+        // `gh pr view --json comments` would give, which the #917
+        // malformed-notice contract cannot use. 5573431960 is the id from
+        // this PR's own worked example (`malformed 5573431960`).
+        let value = serde_json::json!([
+            {"id": 5573431960u64, "body": "## Code Review: Round 1 — PR #1030 @ 0123"},
+            {"id": 5579340504u64, "body": "another comment"},
+        ]);
+        let got = parse_comments(&value);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].id, "5573431960");
+        assert_eq!(got[0].body, "## Code Review: Round 1 — PR #1030 @ 0123");
+        assert_eq!(got[1].id, "5579340504");
+    }
+
+    #[test]
+    fn parse_comments_on_an_unexpected_shape_yields_no_comments_rather_than_panicking() {
+        let got = parse_comments(&serde_json::json!({"not": "an array"}));
+        assert!(got.is_empty());
     }
 }
