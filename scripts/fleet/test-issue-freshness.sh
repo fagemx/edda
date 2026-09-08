@@ -72,7 +72,7 @@ cat >"$work/fixtures/issue-nodonewhen.json" <<'JSON'
 JSON
 cat >"$work/fixtures/issue-barename.json" <<'JSON'
 {"state":"OPEN","title":"feat(fleet): freshness bare name","labels":[{"name":"fleet:ready"}],"comments":[],
- "body":"Prose mentions bare `next-review.sh` here.\n\n## doneWhen\n- item\n"}
+ "body":"Prose mentions bare `next-issue.sh` here.\n\n## doneWhen\n- item\n"}
 JSON
 cat >"$work/fixtures/issue-concept.json" <<'JSON'
 {"state":"OPEN","title":"feat(fleet): freshness concept token","labels":[{"name":"fleet:ready"}],"comments":[],
@@ -240,7 +240,7 @@ if [ "$run_suite" -eq 1 ]; then
     # e. bare filename resolves to exactly one tracked file
     run_gated sh "$freshness" 995 >"$work/out-e.txt" 2>"$work/err-e.txt" ||
         fail "issue 995 must pass: rc=$? err=$(cat "$work/err-e.txt")"
-    grep -q '^PASS path next-review.sh (resolved scripts/fleet/next-review.sh)$' "$work/out-e.txt" ||
+    grep -q '^PASS path next-issue.sh (resolved scripts/fleet/next-issue.sh)$' "$work/out-e.txt" ||
         fail "issue 995 misses the resolved bare-name PASS line: $(cat "$work/out-e.txt")"
     echo "ok e bare name resolves"
 

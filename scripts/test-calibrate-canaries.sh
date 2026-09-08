@@ -18,7 +18,7 @@
 #   8. the clone is removed on every exit path and nothing is written outside
 #      the test's temp dir.
 #
-# Style follows scripts/test-review-capabilities.sh — no new tooling.
+# Style follows the repo's shell tests — no new tooling.
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1

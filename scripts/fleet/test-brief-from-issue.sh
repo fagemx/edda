@@ -58,9 +58,12 @@ echo "$TEST_UNAME"
 STUB
 chmod +x "$work/bin/uname"
 
-# Fixture: Predicted surface matches issue #880's shipped list.
+# Fixture: a six-path Predicted surface in issue #880's shape — two .sh, two
+# test .sh, one .ps1 under scripts/ and one under scripts/fleet/. The paths are
+# parse fixtures, not a claim about any issue's real surface; they were rebased
+# onto surviving files when GH-1061 deleted the review shell.
 cat >"$work/issue-880.json" <<'JSON'
-{"title":"fix(fleet): review-pr.sh has no pi arm","labels":[{"name":"fleet:ready"}],"body":"## What happened\nBasis.\n\n## Predicted surface\n\n`scripts/review-pr.sh`, `scripts/reviewer-capabilities.sh`, `scripts/fleet/reviewer-capabilities.ps1`, `scripts/test-review-capabilities.sh`, `scripts/pr-review-launch.ps1`, `scripts/pr-review-watch.sh`. No crate.\n\n## doneWhen\n- item\n"}
+{"title":"fix(fleet): review-l0.sh has no pi arm","labels":[{"name":"fleet:ready"}],"body":"## What happened\nBasis.\n\n## Predicted surface\n\n`scripts/review-l0.sh`, `scripts/reviewer-capabilities.sh`, `scripts/fleet/reviewer-capabilities.ps1`, `scripts/test-review-compare.sh`, `scripts/fleet/lane-launch.ps1`, `scripts/wiring-scan.sh`. No crate.\n\n## doneWhen\n- item\n"}
 JSON
 
 cat >"$work/issue-missing.json" <<'JSON'
@@ -71,10 +74,10 @@ cat >"$work/issue-empty.json" <<'JSON'
 {"title":"empty surface","labels":[],"body":"## What happened\n.\n\n## Predicted surface\n\nNo crate.\n\n## doneWhen\n- item\n"}
 JSON
 
-# Negated mentions: the real GH-880 surface ends with "No crate, no `REVIEW.md`,
+# Negated mentions: the surface ends with "No crate, no `REVIEW.md`,
 # no `Cargo.lock`." — those two tokens are named only to be excluded.
 cat >"$work/issue-negated.json" <<'JSON'
-{"title":"negated mentions","labels":[],"body":"## Predicted surface\n\n`scripts/review-pr.sh`, `scripts/pr-review-watch.sh`. No crate, no `REVIEW.md`, no `Cargo.lock`.\n\n## doneWhen\n- item\n"}
+{"title":"negated mentions","labels":[],"body":"## Predicted surface\n\n`scripts/review-l0.sh`, `scripts/wiring-scan.sh`. No crate, no `REVIEW.md`, no `Cargo.lock`.\n\n## doneWhen\n- item\n"}
 JSON
 
 run_ok() {
@@ -97,7 +100,7 @@ assert_facts() {
     grep -q 'issue: #880' "$out" || fail "missing issue: $(cat "$out")"
     grep -q 'base full SHA: 6486228c728dff5d488b5756e918af0bccde0eb5' "$out" \
         || fail "missing base SHA: $(cat "$out")"
-    grep -q 'scope paths: scripts/review-pr.sh, scripts/reviewer-capabilities.sh, scripts/fleet/reviewer-capabilities.ps1, scripts/test-review-capabilities.sh, scripts/pr-review-launch.ps1, scripts/pr-review-watch.sh' "$out" \
+    grep -q 'scope paths: scripts/review-l0.sh, scripts/reviewer-capabilities.sh, scripts/fleet/reviewer-capabilities.ps1, scripts/test-review-compare.sh, scripts/fleet/lane-launch.ps1, scripts/wiring-scan.sh' "$out" \
         || fail "missing scope paths: $(cat "$out")"
     grep -q 'entry: none: procedure below' "$out" || fail "missing entry"
     grep -q 'gate owner: not you; review queue' "$out" || fail "missing gate owner"
@@ -119,18 +122,18 @@ assert_skeleton() {
     grep -q '9. git ls-files --' "$out" || fail "missing preamble step 9"
     c=$(grep -c '<<AUTHORED STEPS>>' "$out" || true)
     [ "$c" -eq 1 ] || fail "marker count $c, want 1"
-    grep -q 'scripts/review-pr.sh' "$out" || fail "git status finish missing a scope path"
+    grep -q 'scripts/review-l0.sh' "$out" || fail "git status finish missing a scope path"
     grep -q 'DONE issue=#880 task=128' "$out" || fail "missing five-line report"
     grep -q 'stop=controller issues the next brief' "$out" || fail "missing report last line"
     grep -q '20. git rev-parse --git-path gh880-pr-body.md' "$out" \
         || fail "missing pr-body path resolution step"
     grep -q 'write({"path":"<pr_body_path>"' "$out" \
         || fail "write step must target the retained git-dir path"
-    grep -qF -- '--paths "scripts/review-pr.sh"' "$out" \
+    grep -qF -- '--paths "scripts/review-l0.sh"' "$out" \
         || fail "claim step paths must be quoted"
-    grep -qF 'git ls-files -- "scripts/review-pr.sh"' "$out" \
+    grep -qF 'git ls-files -- "scripts/review-l0.sh"' "$out" \
         || fail "ls-files step paths must be quoted"
-    grep -qF 'git add -- "scripts/review-pr.sh"' "$out" \
+    grep -qF 'git add -- "scripts/review-l0.sh"' "$out" \
         || fail "git add step paths must be quoted"
     if grep -qF '.git/gh880-pr-body.md' "$out"; then
         fail "hardcoded .git/ pr-body path still present (linked worktree .git is a file)"
@@ -148,7 +151,7 @@ run_ok 'MINGW64_NT-10.0' "$work/out/win.txt" || rc=$?
 [ "$rc" -eq 0 ] || fail "windows render exit $rc"
 assert_facts "$work/out/win.txt"
 assert_skeleton "$work/out/win.txt"
-grep -q 'Host: MINGW/MSYS. review-pr.sh --dry-run generates -lane.ps1 and no -run.sh.' \
+grep -q 'Host: MINGW/MSYS. sh is Git Bash; the .ps1 lane tools run through pwsh.' \
     "$work/out/win.txt" || fail "windows host fact: $(cat "$work/out/win.txt")"
 echo "ok 1 windows host facts and skeleton"
 
@@ -158,7 +161,7 @@ run_ok 'Linux' "$work/out/linux.txt" || rc=$?
 [ "$rc" -eq 0 ] || fail "linux render exit $rc"
 assert_facts "$work/out/linux.txt"
 assert_skeleton "$work/out/linux.txt"
-grep -q 'Host: Linux. review-pr.sh --dry-run generates -run.sh and no -lane.ps1.' \
+grep -q 'Host: Linux. sh is dash; the .ps1 lane tools do not run here.' \
     "$work/out/linux.txt" || fail "linux host fact: $(cat "$work/out/linux.txt")"
 echo "ok 2 linux host facts and skeleton"
 
@@ -205,7 +208,7 @@ TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-negated.json" \
     sh "$script" 880 --lane-name n --worktree /tmp/wt --branch b \
     >"$work/out/negated.txt" || rc=$?
 [ "$rc" -eq 0 ] || fail "negated render exit $rc"
-grep -q 'scope paths: scripts/review-pr.sh, scripts/pr-review-watch.sh' "$work/out/negated.txt" \
+grep -q 'scope paths: scripts/review-l0.sh, scripts/wiring-scan.sh' "$work/out/negated.txt" \
     || fail "negated scope paths wrong: $(grep 'scope paths' "$work/out/negated.txt")"
 if grep -E 'scope paths:.*REVIEW\.md|scope paths:.*Cargo\.lock' "$work/out/negated.txt"; then
     fail "negated mention leaked into scope paths"
@@ -215,7 +218,7 @@ echo "ok 6 negated mentions excluded from scope paths"
 # 7. shell-metacharacter stripping from the title: backtick and dollar must not
 # survive into the commit step, where the lane's shell would expand them.
 cat >"$work/issue-metachar.json" <<'JSON'
-{"title":"fix: broke `x` and $(rm -rf /) handling","labels":[],"body":"## Predicted surface\n\n`scripts/review-pr.sh`.\n\n## doneWhen\n- item\n"}
+{"title":"fix: broke `x` and $(rm -rf /) handling","labels":[],"body":"## Predicted surface\n\n`scripts/review-l0.sh`.\n\n## doneWhen\n- item\n"}
 JSON
 rc=0
 TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-metachar.json" \
@@ -232,7 +235,7 @@ echo "ok 7 title metacharacters stripped"
 
 # 8. a crafted Predicted-surface token is rejected, not rendered (R5)
 cat >"$work/issue-crafted.json" <<'JSON'
-{"title":"crafted","labels":[],"body":"## Predicted surface\n\n`scripts/review-pr.sh`, `docs/a; rm -rf ~`.\n\n## doneWhen\n- item\n"}
+{"title":"crafted","labels":[],"body":"## Predicted surface\n\n`scripts/review-l0.sh`, `docs/a; rm -rf ~`.\n\n## doneWhen\n- item\n"}
 JSON
 rc=0
 TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-crafted.json" \

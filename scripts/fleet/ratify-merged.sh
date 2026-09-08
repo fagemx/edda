@@ -26,8 +26,8 @@
 #
 # The merge step that should call this does not exist yet — #769 owns it
 # (#762 was closed NOT_PLANNED on 2026-09-06 and its substance folded into
-# #769's doneWhen), and `scripts/pr-review-watch.sh` never merges by design.
-# There it is one line. Until then this runs by hand after a merge.
+# #769's doneWhen). There it is one line. Until then this runs by hand after
+# a merge.
 #
 # Exit codes: 0 = ran (whatever the individual ratifies did), 2 = usage.
 # A failing `edda ratify` is logged, never fatal: a hook that aborts a

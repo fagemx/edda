@@ -145,41 +145,34 @@
    合前做窗檢查——省掉的只有排隊。
 
    `Independent Review` 必要 status 已於同日從 ruleset 移除，合併閘只剩 `CI Gate`。
-   **watcher 的輪詢已停用**（排程任務 `edda-pr-review-watcher` 設為 Disabled）：它對每一張
-   open PR 無差別自動派 lane，連只改一個 markdown 檔的 docs PR 也照收全額快照稅，
-   這正是樸實流程要拿掉的東西。回復路徑：`Enable-ScheduledTask -TaskName edda-pr-review-watcher`。
+   **輪詢器連同整套審查殼已退役**（GH-1061，`review.shell-branch`）：它對每一張 open PR
+   無差別自動派 lane，連只改一個 markdown 檔的 docs PR 也照收全額快照稅，這正是樸實流程要
+   拿掉的東西。腳本已從 repo 刪除，它註冊的隱藏排程任務已從本機解除註冊；
+   沒有回復路徑，也不需要——獨立輪次改成按需派，見第 5 步。
 
    要一份**獨立**判決時（實作者與控制者以外的第三方），用第 5 步的 lane 機制**按需刻意派一條**，
    不靠輪詢器。值得付這筆錢的兩種情況：(a) flash 引擎執行的單——brief 渲染、`brief-validate`、
    oracle bundle、資格表、SHADOW 校準整套是它安全上工的前提；(b) 實作者就是控制者的 PR。
    殼的成本只該由需要殼的引擎付，而且只在真的需要那一次付。
 
-5. **審查 lane 的機制**（`scripts/pr-review-watch.sh`，由 `scripts/pr-review-launch.ps1` 註冊成隱藏排程
-   任務 `edda-pr-review-watcher`）。**輪詢已停用**——以下是它啟用時的行為，也是按需派一條 lane 時
-   仍然成立的行為：每 60 秒掃 open PR，
-   非 draft、head 沒審過的 PR 在 **3 分鐘內**起唯讀審查者（Claude Opus `claude-opus-5`，經
-   `edda dispatch --agent claude` 訂閱運輸——pi/openrouter 到不了 Anthropic；Task Scheduler 隱藏視窗，
-   worktree 在 `$EDDA_FLEET_SCRATCH/wt-review-prN`；brief 超過 Windows 32767 字元 spawn 上限時，
-   lane 的 fallback 以唯讀工具集 `--allowedTools "Read,Glob,Grep,Bash"` 經 `claude -p` stdin 跑同一份 brief，
-   判決留言表頭印的是 `.done` `TRANSPORT=` 收據上的實際臂）並貼確認留言 `review: started on <full sha>`；
-   判決（含 observed model、cost、`reviewer_session`、釘死的 head SHA）在審查者跑完後（約 5–15 分鐘）自動貼上 PR，
-   並加 label `review:lgtm`／`review:changes-requested`；push 後 head 變了自動再審一輪。
-   **一張 PR 一個審查者對話**：session id 由 PR 編號推導（`SHA-1("edda-review-pr<N>")` 排成 v5 UUID），
-   第 1 輪 `--session-id` 開，之後每輪 `--resume` 續，所以第 2 輪只讀 delta
-   （`fleet.reviewer-agent` 當初選 pi 就是為了這個性質，GH-708 把它帶進 Opus 路徑）；
-   worktree 一輪結束就刪、下輪原地重建（續談與 cwd 無關，實測過）。
-   **前置條件**：lane 的續談用 `edda dispatch --resume`，所以 PATH 上的 `edda` 必須是
-   GH-708 之後建的；舊的 `edda` 第 1 輪照跑，第 2 輪會因未知旗標失敗（大聲失敗、標
-   `review:unreviewed`，不會產生假判決）。`cargo install --path crates/edda-cli --force` 更新。
-   檢查方式：`Get-ScheduledTask edda-pr-review-watcher`、`tail ~/.edda/fleet/watch.log`、PR 留言與 label。
-   provider 過載時：同模型探測通過後重試一次（同一 `edda dispatch --agent claude` 運輸），仍沒有判決就標
-   `review:unreviewed` 並對該 head 停手
-   （v1 無 codex 後備——它做不到唯讀，且在新決策下 codex 也到不了 Opus；§六 `fleet.review-provider-overload` 的決策全文仍可 `edda ask` 查）。
-   啟停、狀態檔與疑難排解見 `docs/guides/pr-review-watcher.md`。watcher **不合併**——合併仍在第 7 步、要授權。
+5. **按需派一條獨立輪次**（沒有殼、沒有輪詢器、沒有快照；三步，都是產品動詞）：
+
+   1. **派**：`edda review --pr <N> --agent claude --model claude-opus-5`。它自己組 brief
+      （`REVIEW.md` 讀 base SHA 那份）、以唯讀能力起審查者、把 `review_verdict` 事件寫進帳本。
+      要自己控制運輸時就 `edda dispatch --agent claude --exclude-tools Edit,Write,NotebookEdit`
+      餵同一份 brief——工具集是唯讀的那一半，brief 正文是另一半。
+   2. **貼**：審查者自己用 `gh pr comment` 貼 §7 判決，釘 full SHA。沒有中間人代貼。
+   3. **落**：`edda review deliver --pr <N>` 依 union 規則（`edda review gate`）結算
+      `review:*` label 與 `Independent Review` commit status；判決格式壞掉時它貼一次告示而不是猜。
+
+   **唯讀怎麼證**（`review.readonly-proof=capability-flags-not-per-file-hash`）：看 capability
+   旗標，加上前後各一次 `git status --porcelain`。**不做逐檔雜湊**——退役的殼對 1077 個檔案各
+   spawn 一次 `git hash-object`，在這台機器（spawn ~2.7 s）等於每輪 ~100 分鐘，而唯讀性早就由
+   `--exclude-tools` 結構性保證了。
+
+   **合併不在這一步**——仍在第 7 步、要操作者授權。
 6. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。走第 4 步直審路徑時不需要 driver：判決與修正在同一個 session 內來回。
 7. **合併**（有操作者授權時）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過。取得合併授權後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
-
-   手動啟動與 watcher 共用 `scripts/review-round.sh` 的每個 repository／PR 認領與輪次，儲存在 `$HOME/.edda/review-coordination/`，不跟隨個別 scratch 目錄。已發表的 PR 審查輪次是下限；有尚未寫入終止 receipt 的審查時，第二個啟動者會被拒絕。中斷且沒有 receipt 的認領保持拒絕狀態，操作者應先確認舊 lane 已停止再恢復，不能只依 PID 或經過時間認定它已退出。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
 
@@ -211,7 +204,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 |---|---|---|
 | 觀測 | `edda watch`、`edda peers`、`edda conduct status`、`gh pr checks`、`edda status` | dispatch lane 不在 peers（#569）；統一狀態面（#567）；孤兒回收（#573）；freshness（#604） |
 | 進度追蹤 | issue 標籤（pending → ready → PR → merged）；`edda task new <title> --after <id> --assignee <label>`、`edda task start <id>`、`edda task done <id> --receipt "<可驗的話>" --evidence <path>`；PR 上的審查輪 | 成本與模型不進帳本（#582、#574） |
-| 派發 | `edda dispatch --agent <claude|pi|codex> --prompt-file <f> [--session-id] [--cwd] [--budget-usd] [--timeout-sec] [--permission-mode] [--json]`；`edda conduct run <plan> --agent <x> [--cwd] [--dry-run] [--tmux] [--json]`；審查由本機 watcher 自動起並貼判決（`scripts/pr-review-watch.sh`，#632） | 選模型/思考深度/工具(#574);角色 profile(#593);批次發射(`edda wave`,等 #576 與 #599) |
+| 派發 | `edda dispatch --agent <claude|pi|codex> --prompt-file <f> [--session-id] [--cwd] [--budget-usd] [--timeout-sec] [--permission-mode] [--json]`；`edda conduct run <plan> --agent <x> [--cwd] [--dry-run] [--tmux] [--json]`；審查按需派一輪（`edda review --pr`，判決由審查者自己貼，見第 5 步） | 選模型/思考深度/工具(#574);角色 profile(#593);批次發射(`edda wave`,等 #576 與 #599) |
 | 討論提問 | 你 ↔ 控制者對話；控制者 ↔ 其他 Claude session 用跨 session 訊息；對 lane 用 `edda request "<label>" "<msg>"`（門鈴；lane 沒心跳時要 `--force` 排隊）；耐久的寫 issue／PR 留言 | 事件驅動門鈴（#545）；lane 心跳（#569） |
 | 決策 | `edda ask "<domain>"` → `edda decide "k=v" --reason "…"`（agent，unratified）→ `edda ratify <key>`（你） | 簽章身分（#609） |
 | 開單 | `/issue-intake`、`/issue-create`（四問接線審計必填） | 批次進料與確認表（#599）；驗收端 wiring verdict（#594） |

@@ -85,8 +85,7 @@ fi
 
 # The pin regex is built from two validated values: <pr> is digits only and
 # <sha> is exactly 40 lowercase hex characters (REVIEW.md R5), so neither can
-# carry regex metacharacters and both match literally (same reasoning as
-# pr-review-watch.sh verdict_body_lines).
+# carry regex metacharacters and both match literally.
 printf '%s\n' "$stream" | awk -v pr="$PR" -v sha="$SHA" '
   BEGIN { pinre = "^## Code Review: Round [0-9]+( \\(SHADOW\\))? — PR #" pr " @ " sha "$" }
 

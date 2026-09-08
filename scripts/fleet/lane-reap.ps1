@@ -12,10 +12,13 @@
 # design — it cannot unregister a task it never enumerates):
 #   edda-b-*            worker lanes (e.g. edda-b-lane-gh648)
 #   edda-lane-*         worker lanes
-#   edda-review-pr*     PR review rounds (e.g. edda-review-pr123-r1)
+#   edda-review-pr*     PR review rounds (e.g. edda-review-pr123-r1) — the
+#                       shell that registered these was retired in GH-1061;
+#                       the family stays so leftover registrations from it are
+#                       still reapable
 #   edda-dispatch-*     dispatch lanes
-# edda-pr-review-watcher is persistent infrastructure and is NEVER a candidate,
-# even under explicit -TaskName.
+# Names listed as persistent infrastructure are NEVER candidates, even under
+# explicit -TaskName. That list is empty today (see $PersistentTaskNames).
 #
 # A candidate is removed when any of these holds (one reason row per rule):
 #   issue-closed      the associated GitHub issue is CLOSED
@@ -112,7 +115,10 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $script:FleetTaskFamilies = @('edda-b-*', 'edda-lane-*', 'edda-review-pr*', 'edda-dispatch-*')
-$script:PersistentTaskNames = @('edda-pr-review-watcher')
+# Empty since GH-1061: its only entry was the review watcher, whose scheduled
+# task was unregistered with the shell. The guard stays for the next piece of
+# persistent infrastructure that lands inside a reapable family.
+$script:PersistentTaskNames = @()
 $script:ControllerTimeToleranceSec = 2
 
 function Fail([string]$Msg) {
@@ -386,8 +392,9 @@ function Invoke-LaneReap {
   $errorCount = 0
   $removeDecisions = 0
 
-  # Candidates only: known families, never the persistent watcher, never an
-  # off-family task — the narrowing pattern cannot widen this set.
+  # Candidates only: known families, never a name in `$PersistentTaskNames`
+  # (empty today), never an off-family task — the narrowing pattern cannot
+  # widen this set.
   $candidates = @()
   foreach ($t in @(Get-FleetScheduledTasks)) {
     $tn = [string]$t.TaskName

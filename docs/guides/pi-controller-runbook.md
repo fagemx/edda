@@ -6,12 +6,13 @@ step is one command with its expected output; every STOP condition routes to
 `fleet.pi-lanes`, `fleet.lane-launch`, `review.verdict-carrier`,
 `review.independence-policy`, `fleet.all-flash-window-2026-09-05`.
 
-The loop is two scripts plus the guard scripts they call:
+The loop is one script plus the guard scripts it calls:
 
 - `scripts/fleet/next-issue.sh <issue> <machine>/<role> [--dry-run]` — ready
   issue → launched lane
-- `scripts/fleet/next-review.sh <pr> [--shadow] [--operator-granted] [--dry-run]`
-  — open PR → posted review comment
+
+The review half was a second script, retired with the review shell (GH-1061).
+A pi controller does not run review rounds: see below.
 
 ## Pick the next issue
 
@@ -81,26 +82,16 @@ last five lines of the log are the lane's report.
 
 ## Review the PR
 
-```sh
-sh scripts/fleet/next-review.sh <pr> --shadow --dry-run
-```
+**A pi controller does not run the round.** The retired script delegated it,
+and it refused to delegate anything but a SHADOW round anyway, because pi cannot
+reach Anthropic and `fleet.review-engine-model` puts review on Opus via Claude
+Code. It was retired with the review shell (GH-1061).
 
-Expected: the head SHA, the round count, the brief command, the engine
-command, the post command, `== dry-run: nothing launched or posted`, exit 0.
-
-Without `--shadow` the script refuses to delegate until `review-pr.sh`
-carries the pi arm (GH-880, PR #890): its delegation would otherwise call the
-Claude backend, which doneWhen item 7 forbids for both scripts.
-
-```sh
-sh scripts/fleet/next-review.sh <pr> --shadow
-```
-
-Expected: `posted SHADOW round <n>` and a `## Code Review: Round <n> — PR
-#<pr> @ <sha> (SHADOW)` comment on the PR. The shadow round never sets
-`fleet:reviewed`, never sets the Independent Review status, and never merges
-(`review.gh880-shadow`). A fourth round without `--operator-granted` exits 2
-and labels `needs-operator`.
+Stop at `DONE` and hand the PR to an authoritative engine, which runs the
+on-demand round itself — see `docs/guides/operator-runbook.md` step 5. A
+SHADOW round remains calibration evidence, never a verdict
+(`review.gh880-shadow`): it sets no `fleet:reviewed`, no Independent Review
+status, and merges nothing.
 
 Window merge rule (`fleet.all-flash-window-2026-09-05`, operator may veto on
 #888): code-risk PRs are not merged in the window; docs/skills-class PRs may
@@ -111,8 +102,7 @@ verdict on the SHA. Anything else waits for the operator.
 
 - dirty worktree or claim conflict on a lane launch
 - CI red on a reviewed head
-- round cap (three rounds without a delivered PR, or a fourth review round
-  without `--operator-granted`)
+- round cap (three rounds without a delivered PR)
 - a `[判斷]` escalation on a code-risk PR that the controller cannot adjudicate
 - a flash-level controller's `STOP step=<n>` on a lane — brief authoring is
   not a flash function; label `needs-operator`, do not fix the brief (GH-933)

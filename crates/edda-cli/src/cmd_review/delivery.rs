@@ -8,12 +8,12 @@
 //!
 //! It does not post the primary §7 verdict comment. In the architecture the
 //! parsing half (GH-1030 part 1, PR #1077) landed, that comment is read as
-//! already present on GitHub — posted by whatever ran the review, today
-//! `scripts/pr-review-watch.sh`'s `settle_pending`. The issue's own list of
-//! what the follow-up adapter PR converts into calls on this verb —
-//! `post_review_status`, `settle_pending`, `verdict_body_lines` — never
-//! names the shell's `gh pr comment --body-file` verdict post, so that call
-//! stays exactly where it is; this module owns only the writes derived from
+//! already present on GitHub — posted by whatever ran the review, which since
+//! GH-1061 is the reviewing session itself with `gh pr comment`. The issue's
+//! own list of what the follow-up adapter PR converts into calls on this verb
+//! — `post_review_status`, `settle_pending`, `verdict_body_lines` — never
+//! named the retired shell's `gh pr comment --body-file` verdict post, so that
+//! call stayed where it was; this module owns only the writes derived from
 //! a verdict once one exists to read. See the PR body for the fuller
 //! discussion of this divergence from the issue's original "What".
 //!
@@ -27,7 +27,7 @@
 //! marker, via [`super::deliver::Extracted::shadow`], and performs zero
 //! writes when it is the only signal standing on the SHA. It does not
 //! additionally re-derive engine/surface authority from the PR's changed
-//! files the way `pr-review-watch.sh`'s `verdict_engine` / `classify_surface`
+//! files the way the retired review shell's `verdict_engine` / `classify_surface`
 //! / `verdict_surface_ok` do as defense-in-depth against a reviewer that
 //! fails to self-declare — that independent server-side cross-check is a
 //! separate, larger feature (a new `gh` read of the PR's changed files, plus
@@ -38,7 +38,7 @@
 //! Only the `review:*` label is gated on `current head == reviewed sha`
 //! (doneWhen's own moved-head bullet names only the label). The issue's
 //! "Independent Review commit status on the reviewed SHA by the union rule"
-//! carries no head-equality clause either. `pr-review-watch.sh`'s
+//! carries no head-equality clause either. the retired review shell's
 //! `finish_verdict` happens to skip both together, but that is a side effect
 //! of its early-return control flow, not a stated rule — so this module
 //! writes the status regardless of whether the PR has since moved past the
@@ -68,7 +68,7 @@ pub(crate) trait Gh {
     fn add_label(&self, pr: u64, label: &str) -> Result<()>;
     /// Remove one label. Deliver only calls this as a best-effort sibling
     /// cleanup right after a successful `add_label` — mirroring
-    /// `pr-review-watch.sh`'s `gh pr edit --remove-label ... || true` — so a
+    /// the retired review shell's `gh pr edit --remove-label ... || true` — so a
     /// failure here must never turn a delivered label into a failed write.
     fn remove_label(&self, pr: u64, label: &str) -> Result<()>;
     /// The latest `Independent Review` status state on `sha`, if that
@@ -92,7 +92,7 @@ pub(crate) enum Write {
     Failed(String),
     /// No call was made this round, but — unlike `Skipped` — the write WAS
     /// due: R23 (#917) withholds status/label for any run that posts a new
-    /// malformed-comment notice, mirroring `pr-review-watch.sh`'s
+    /// malformed-comment notice, mirroring the retired review shell's
     /// `post_review_status` returning 3 ("status withheld this poll") to
     /// tell its caller to come back. A withheld write must read as
     /// outstanding, never as delivered — see [`Delivery::exit_code`].
@@ -190,10 +190,10 @@ impl Delivery {
     }
 }
 
-/// The malformed-notice text, exact and stable so a notice posted by either
-/// `edda review deliver` or `pr-review-watch.sh` (during the transition
-/// before the follow-up adapter PR) is recognized by the other — no local
-/// marker file, no ledger row, just this string read back from GitHub.
+/// The malformed-notice text, exact and stable: the one-shot property is
+/// carried by the string itself, read back from GitHub — no local marker
+/// file, no ledger row — so a notice any earlier run posted, including one
+/// from the review shell retired in GH-1061, is still recognized as posted.
 fn notice_text(id: &str) -> String {
     format!("review: malformed verdict comment {id}")
 }
@@ -224,7 +224,7 @@ pub(crate) fn deliver(
         }
         // Attempting a not-yet-noticed id withholds status/label for this
         // run regardless of whether the post itself succeeds — mirroring
-        // pr-review-watch.sh, whose `new_notice=1` sits outside the
+        // the retired review shell, whose `new_notice=1` sat outside the
         // if/else on the `gh pr comment` call. A failed post must not be
         // masked by a status write that proceeds as if nothing happened.
         new_notice = true;
@@ -245,7 +245,7 @@ pub(crate) fn deliver(
     if new_notice {
         // R23 (#917): a run that posts a new malformed-comment notice
         // withholds status/label for THIS run regardless of `extracted.lines`
-        // — mirroring pr-review-watch.sh's `post_review_status`, whose
+        // — mirroring the retired review shell's `post_review_status`, whose
         // `new_notice=1` sits outside the if/else on the `gh pr comment`
         // call and whose caller returns 3 ("status withheld this poll") so
         // the next poll retries. A failed notice post already withholds
@@ -310,7 +310,7 @@ pub(crate) fn deliver(
     if let Some(label) = label_for(union) {
         // The sibling review:* label (GH-1081/P1-1, tightened in Round 2
         // P1): the shell this verb replaces removes it right after a
-        // successful add (`pr-review-watch.sh:925-928`) so a later verdict
+        // successful add (its own sibling cleanup) so a later verdict
         // on the same SHA never leaves both labels standing. The sibling
         // condition is now evaluated independently of whether `label` was
         // freshly added or already applied — Round 1's fix only reached the
@@ -598,7 +598,7 @@ mod tests {
         // delivers a lone LGTM (review:lgtm applied). A Changes Requested
         // comment then lands on the SAME sha, so run 2's union flips to
         // Fail (GH-742) and must apply review:changes-requested — and, per
-        // pr-review-watch.sh:925-928, remove the now-stale review:lgtm
+        // the retired shell's sibling cleanup, remove the now-stale review:lgtm
         // sibling so the two labels never stand together.
         let gh = FakeGh::new(SHA);
         let ext1 = extracted(&["LGTM\t0\t0"]);
@@ -811,7 +811,7 @@ mod tests {
         // GH-1081 Round 1 P1-2: a not-yet-noticed malformed id used to take
         // an early return regardless of `extracted.lines`, so a standing
         // LGTM got no status that run, yet exit_code() answered 0
-        // ("delivered"). pr-review-watch.sh's post_review_status returns 3
+        // ("delivered"). the retired review shell's post_review_status returns 3
         // ("status withheld this poll") in exactly this case, which is what
         // makes its caller come back on the next poll instead of treating
         // the SHA as settled.
@@ -889,7 +889,7 @@ mod tests {
     fn a_previously_noticed_malformed_comment_does_not_block_a_later_real_verdict() {
         // Once the one-shot notice for a malformed id already exists on
         // GitHub, a later run with a real, well-formed verdict alongside it
-        // must proceed to status/label — matching pr-review-watch.sh's
+        // must proceed to status/label — matching the retired review shell's
         // "next poll proceeds with the malformed comment permanently
         // excluded".
         let gh = FakeGh::new(SHA);

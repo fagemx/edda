@@ -19,7 +19,7 @@ You orchestrate the full lifecycle of GitHub issues through parallel sub-agents.
 
 There is deliberately no `--skip-review` flag: review can never be skipped, and work
 that fails or lacks review never merges — fixes go through a different `issue-action`
-sub-agent and a fresh house-review round (`sh scripts/review-pr.sh`), never through
+sub-agent and a fresh independent review round, never through
 `pr-review-loop`, which is author self-check and never the Phase 3/4 judge.
 
 ## Before you start (controller session setup)
@@ -114,16 +114,13 @@ never by the reviewer.
 For each PR created in Phase 2, run one house review. The controller may launch all
 reviewers in a SINGLE message:
 
-1. Launch the house review with the real launcher, which creates the detached PR-head
-   worktree, copies the review spec into it, and dispatches the reviewer with a pinned
-   model and `--exclude-tools Edit,Write,NotebookEdit` (decision `fleet.review-backend`):
+1. Launch the independent review round, which dispatches the reviewer with a pinned
+   model and read-only capabilities — a positive tool allowlist, `Read,Grep,Glob`
+   (decision `fleet.review-backend`):
 
    ```bash
-   # Round 1 — the one-argument form (round defaults to 1, no previous SHA):
-   sh scripts/review-pr.sh {pr_number}
+   edda review --pr {pr_number} --agent claude --model claude-opus-5
    ```
-
-   (`--dry-run` only prints what would launch; it does not review anything.)
 
 2. The reviewer reads the brief, runs read-only checks, and posts exactly one verdict
    comment pinned to the full reviewed SHA (decision
@@ -131,22 +128,10 @@ reviewers in a SINGLE message:
    a new round.
 3. **On Changes Requested:** dispatch a fresh fix sub-agent that loads the
    `issue-action` skill and addresses the blocking findings on the PR's branch.
-   The fix sub-agent is never the reviewer. After it pushes, launch the next
-   house-review round on the new full SHA. `review-pr.sh` usage is
-   `review-pr.sh <PR> [round] [prev-sha]` and ROUND defaults to 1, so the two
-   invocations are:
-
-   ```bash
-   # First review of a PR — one argument; round defaults to 1:
-   sh scripts/review-pr.sh {pr_number}
-   # Every later round, after a fix push — pass the next round number and the
-   # previous full SHA (the SHA the last verdict pinned). Round 2 of PR 834:
-   sh scripts/review-pr.sh 834 2 eab0db42b628ce0df44894af31afe183ddebeee4
-   ```
-
-   Repeating the one-argument command does NOT start the next round — it runs
-   Round 1 again. `{prev_full_sha}` is always the full SHA the previous round's
-   verdict pinned; every push invalidates that verdict.
+   The fix sub-agent is never the reviewer. After it pushes, run the next round
+   on the new full SHA — the same command, because `--pr` resolves the PR's
+   current head every time. Every push invalidates the previous verdict, so a
+   round is only ever pinned to the SHA it read.
 
 **Wait for all reviewers to complete.** Report verdicts.
 
@@ -172,8 +157,8 @@ another session's active branch or worktree, and sources — stays untouched (se
 `.claude/CLAUDE.md`). If a PR does not meet the preconditions, do not merge it:
 dispatch a fix sub-agent (a **different** `issue-action` sub-agent — never the
 reviewer; `pr-review-loop` is author self-check, never the Phase 4 judge) for the
-blocking findings, then run a fresh house-review round (`sh scripts/review-pr.sh`) on
-the new full SHA, and report that the PR is blocked until the preconditions hold.
+blocking findings, then run a fresh independent review round on the new full SHA,
+and report that the PR is blocked until the preconditions hold.
 
 Report final status table.
 

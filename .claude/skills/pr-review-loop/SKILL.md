@@ -12,9 +12,9 @@ This skill is the **review-and-fix** half: the same agent that finds P0/P1 issue
 also fixes them. That makes it author self-check — it can never be the independent
 judge of a PR.
 
-The independent judge is **house review**, a different agent that does not fix the
-PR it judges: `scripts/review-pr.sh --dry-run` produces the brief and
-`edda dispatch --agent claude` runs it (decision `fleet.review-backend`); its
+The independent judge is a **separate review round**, run by an agent that does
+not fix the PR it judges: `edda review --pr <N> --agent claude` builds the brief
+and runs it with read-only capabilities (decision `fleet.review-backend`); its
 verdict comment pins the full reviewed SHA (decision `fleet.review-protocol`).
 When a house-review verdict requests changes, the fixes are made by a separate
 sub-agent running `issue-action` — never by the reviewer, and never inside a

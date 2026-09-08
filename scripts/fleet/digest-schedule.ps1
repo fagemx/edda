@@ -95,7 +95,8 @@ if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task'
 # task registers looking successful and every firing dies 0x80070002 BEFORE
 # the wrapper can append its `=== DIGEST EXIT code=N ===` receipt, so the one
 # signal that distinguishes "ran and failed" from "never fired" is destroyed
-# (the #683 shape, `scripts/review-pr.sh` documents it for -File arguments).
+# (the #683 shape, first documented for -File arguments by the review shell
+# retired in GH-1061).
 # GetFullPath rather than Resolve-Path because -DryRun must create nothing,
 # and it resolves against the caller's location, which is what Resolve-Path
 # did here before.

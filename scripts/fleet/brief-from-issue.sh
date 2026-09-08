@@ -167,10 +167,10 @@ esac
 host=$(uname -s)
 case "$host" in
     MINGW*|MSYS*|CYGWIN*)
-        host_fact='Host: MINGW/MSYS. review-pr.sh --dry-run generates -lane.ps1 and no -run.sh.'
+        host_fact='Host: MINGW/MSYS. sh is Git Bash; the .ps1 lane tools run through pwsh.'
         ;;
     *)
-        host_fact='Host: Linux. review-pr.sh --dry-run generates -run.sh and no -lane.ps1.'
+        host_fact='Host: Linux. sh is dash; the .ps1 lane tools do not run here.'
         ;;
 esac
 

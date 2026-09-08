@@ -6,7 +6,7 @@
 # comments come from EDDA_COMPARE_FIXTURE files holding the exact stream
 # `gh pr view <pr> --json comments --jq '.comments[] | "<<<COMMENT>>>", .body'`
 # prints, so no gh, no network, and no state outside the temp dir.
-# Style follows scripts/test-pr-review-watch.sh — no new tooling.
+# Style follows the repo's shell tests — no new tooling.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -159,8 +159,8 @@ expect_has "no-shadow: message" "no SHADOW round pinned to PR 887 @ $SHA" "$out"
 # The ` (SHADOW)` heading suffix is the only marker (REVIEW.md §7); the
 # header field is documentation that accompanies the suffix and never
 # substitutes for it. A plain-heading round carrying the field is therefore
-# an authoritative round — the same shape the watcher (which never reads the
-# field) pins as a verdict, so both readers agree.
+# an authoritative round — the same shape the retired watcher (which never
+# read the field) used to pin as a verdict, so this reader agrees with it.
 F4="$tmp/field-only.txt"
 cat >"$F4" <<'EOF'
 <<<COMMENT>>>

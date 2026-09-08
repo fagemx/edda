@@ -3,11 +3,12 @@
 //! Judging a SHA is `edda review gate` (GH-769). Deciding whether a round is
 //! owed is `edda review due` (GH-763). What has had no product verb until now
 //! is **delivery**: the §7 verdict comment, the `review:*` labels and the
-//! `Independent Review` commit status all live only in
-//! `scripts/pr-review-watch.sh`, which is why that layer is the one that broke
-//! on 2026-09-06/07 — the product could judge but could not publish.
+//! `Independent Review` commit status lived only in the review shell, which is
+//! why that layer is the one that broke on 2026-09-06/07 — the product could
+//! judge but could not publish. That shell was retired in GH-1061; this module
+//! is what replaces its publishing half.
 //!
-//! This module starts where the shell starts: turning §7 verdict **comments**
+//! This module starts where that shell started: turning §7 verdict **comments**
 //! into the verdict facts the union rule already consumes. That direction
 //! matters. Verdicts do not cross machines in the ledger yet (`D8-debt(#671)`:
 //! `review_verdict` is not among the event types the committed mirror imports),
@@ -99,8 +100,8 @@ fn is_heading(line: &str) -> bool {
     is_full_sha(rest)
 }
 
-/// Exactly 40 lowercase hex characters — the same shape `pr-review-watch.sh`'s
-/// `is_full_sha` and REVIEW.md R5 require of a reviewed SHA.
+/// Exactly 40 lowercase hex characters — the shape REVIEW.md R5 requires of a
+/// reviewed SHA.
 fn is_full_sha(value: &str) -> bool {
     value.len() == 40
         && value
@@ -288,9 +289,10 @@ fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
 /// reviewed SHA amount to: the `review:*` label, the `Independent Review`
 /// commit status, and a one-shot notice for any malformed comment.
 ///
-/// Moves the watcher's `verdict_body_lines` awk into the product and answers
-/// with the union rule GH-769 owns; [`delivery::deliver`] performs the
-/// writes that rule implies, over the real `gh`-backed [`delivery::GhCli`].
+/// Carries the retired watcher's `verdict_body_lines` awk logic into the
+/// product and answers with the union rule GH-769 owns; [`delivery::deliver`]
+/// performs the writes that rule implies, over the real `gh`-backed
+/// [`delivery::GhCli`].
 /// An unreadable comment list or an invalid `--sha` never reaches that far:
 /// both leave through exit 2, the same "could not judge" contract
 /// `edda review gate` uses, because nothing was delivered either way.
