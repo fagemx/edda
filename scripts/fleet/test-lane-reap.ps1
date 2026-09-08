@@ -409,7 +409,7 @@ try {
 
   # --- 14. the reaper never deletes: fixtures survive every run -------------
   "=== 14. fixture files survive every run ==="
-  $stillThere = @($wGh772, $wPr123, $wAlpha, $wSolo, $wBeta, $wGh9, $wWatcher, $wBad) |
+  $stillThere = @($wGh772, $wPr123, $wAlpha, $wSolo, $wBeta, $wGh9, $wOffFam, $wBad) |
     Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
   Assert-True ($stillThere.Count -eq 0) "14: every wrapper file still exists after all runs (missing: $($stillThere -join ', '))"
 }
