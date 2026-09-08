@@ -2,6 +2,7 @@
 mod args;
 mod brief;
 mod config;
+mod deliver;
 mod due;
 mod evidence;
 mod gate;
@@ -22,6 +23,7 @@ use crate::agent_kind::{
 use crate::cmd_dispatch::{build_phase, CapabilityOptions};
 use anyhow::{bail, Result};
 pub use args::ReviewArgs;
+pub use deliver::DeliverArgs;
 pub use due::DueArgs;
 use edda_conductor::agent::launcher::{AgentLauncher, PhaseResult};
 use edda_core::{
@@ -52,12 +54,20 @@ pub enum ReviewCmd {
         #[command(flatten)]
         args: GateArgs,
     },
+    /// What the §7 verdict comments on a reviewed SHA amount to (GH-1030)
+    ///
+    /// Reads only for now: the GitHub writes are the next step of GH-1030.
+    Deliver {
+        #[command(flatten)]
+        args: DeliverArgs,
+    },
 }
 
 pub fn run_cmd(cmd: ReviewCmd, cwd: &Path) -> Result<()> {
     match cmd {
         ReviewCmd::Due { args } => due::run(args, cwd),
         ReviewCmd::Gate { args } => gate::run(args, cwd),
+        ReviewCmd::Deliver { args } => deliver::run(args, cwd),
     }
 }
 

@@ -1339,3 +1339,40 @@ switch they believe they threw.
 | 0 | Due: start a round |
 | 1 | Not due, for the printed reason |
 | 2 | Cannot judge — an unreadable ledger or a malformed argument, never a decision |
+
+#### `edda review deliver`
+
+Reads the §7 verdict comments GitHub holds for a pull request and reports what
+they amount to on one reviewed SHA. It is the product's half of the delivery
+path: the extraction the watcher did in awk (`verdict_body_lines`) plus the
+union rule `edda review gate` owns, in one call.
+
+```bash
+edda review deliver --pr 1030
+edda review deliver --pr 1030 --sha "$reviewed" --json
+```
+
+`--pr` names the pull request. `--sha` is the reviewed commit, as a full
+40-character lowercase hex SHA; without it the PR's current head is used. A
+verdict comment counts only when it is pinned to that SHA.
+
+A comment is a verdict when its **first** line is the §7 heading. A heading
+anywhere else in the body is a transcript dump, not a verdict: it contributes
+nothing and is reported as `malformed <comment id>` so the round is not lost
+silently. A round whose heading carries ` (SHADOW)` — in either recorded
+position — is well formed and contributes nothing, because a SHADOW round is
+calibration evidence and never enters the union (REVIEW.md §8).
+
+The verdict word is read in order: `Changes Requested` first, then the
+`Provisional — …` line written for an unqualified LGTM, then plain `LGTM`. A
+`P0=`/`P1=` count that is absent stays absent, and the union rule reads an
+unstated count as non-zero.
+
+Stdout is one line — `success`, `failure` or `error`, the SHA, and the number
+of verdicts standing — followed by one `malformed <id>` line per malformed
+comment. `--json` emits the same as an object with the verdict lines and the
+malformed ids.
+
+This verb **writes nothing**: no comment, no label, no commit status, no
+ledger event. Publishing those is the remaining half of GH-1030.
+
