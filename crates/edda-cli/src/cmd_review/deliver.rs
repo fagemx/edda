@@ -16,7 +16,15 @@
 //! The extracted lines are the tab-separated shape `gate::from_lines` already
 //! parses, so the union rule stays in one place (GH-769) and this module never
 //! re-decides what a verdict means.
+//!
+//! [`extract`] above is the read half (GH-1030 part 1, PR #1077). [`run`]
+//! below is the write half: it feeds `extract`'s output to
+//! [`super::delivery::deliver`], which performs the `review:*` label, the
+//! `Independent Review` commit status, and the malformed-comment notice —
+//! see that module's own doc comment for what it deliberately does not do
+//! (post the primary verdict comment) and why.
 
+use super::delivery;
 use super::gate;
 use super::github::gh;
 use anyhow::{Context, Result};
@@ -53,6 +61,13 @@ pub(crate) struct Extracted {
     pub lines: Vec<String>,
     /// Ids of comments that carry a §7 heading somewhere other than line 1.
     pub malformed: Vec<String>,
+    /// Ids of comments that are well-formed, sha-pinned §7 verdicts, self-
+    /// declared ` (SHADOW)` (REVIEW.md §8, rules.md R22). Distinct from a
+    /// SHA carrying no verdict at all: [`super::delivery`] performs zero
+    /// GitHub writes when this is the only signal standing, rather than
+    /// writing the `error` state [`super::gate::Union::None`] means for an
+    /// unreviewed SHA.
+    pub shadow: Vec<String>,
 }
 
 /// Does this line open a §7 verdict comment?
@@ -109,6 +124,35 @@ fn pinned_to(line: &str, sha: &str) -> bool {
     };
     let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
     rest.strip_prefix(" @ ").is_some_and(|tail| tail == sha)
+}
+
+/// Is this heading a §7 verdict for `sha`, self-declared SHADOW?
+///
+/// Same shape [`pinned_to`] pins, but — unlike it — accepts the ` (SHADOW)`
+/// suffix in either recorded position (REVIEW.md §7/§8, rules.md R22): a
+/// self-declared SHADOW round names its SHA exactly like any other verdict,
+/// only decorated. [`pinned_to`] must keep refusing this shape (a SHADOW
+/// round never enters the union); this is the delivery module's separate
+/// signal for "well-formed, pinned here, but R22 says zero writes" —
+/// distinguishing a SHADOW round from "nothing pinned to this SHA at all",
+/// which [`pinned_to`] alone cannot do since both read as "not pinned".
+fn shadow_pinned_to(line: &str, sha: &str) -> bool {
+    let Some(rest) = line.strip_prefix("## Code Review: Round ") else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let round_shadow = rest.starts_with(" (SHADOW)");
+    let rest = rest.strip_prefix(" (SHADOW)").unwrap_or(rest);
+    let Some(rest) = rest.strip_prefix(" — PR #") else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let Some(tail) = rest.strip_prefix(" @ ") else {
+        return false;
+    };
+    let tail_shadow = tail.ends_with(" (SHADOW)");
+    let tail = tail.strip_suffix(" (SHADOW)").unwrap_or(tail);
+    (round_shadow || tail_shadow) && tail == sha
 }
 
 /// The verdict word and its counts, from the `### Verdict` section.
@@ -174,6 +218,9 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
             continue;
         }
         if !pinned_to(first, sha) {
+            if shadow_pinned_to(first, sha) {
+                out.shadow.push(comment.id.clone());
+            }
             continue;
         }
         let Some(vline) = verdict_line(&normalized) else {
@@ -205,7 +252,7 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
 /// sees it (verified live against this repo, forcing multiple pages with
 /// `per_page=2`), so a comment list longer than one page is never silently
 /// truncated on the merge-gate path.
-fn comments(repo: &Path, pr: u64) -> Result<Vec<Comment>> {
+pub(crate) fn comments(repo: &Path, pr: u64) -> Result<Vec<Comment>> {
     let value = gh(
         repo,
         &[
@@ -237,15 +284,33 @@ fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
         .collect()
 }
 
-/// `edda review deliver --pr <N>` — what the §7 comments on the reviewed SHA
-/// amount to, and what a deliverer would therefore publish.
+/// `edda review deliver --pr <N>` — deliver what the §7 comments on the
+/// reviewed SHA amount to: the `review:*` label, the `Independent Review`
+/// commit status, and a one-shot notice for any malformed comment.
 ///
-/// This is the read half. It moves the watcher's `verdict_body_lines` awk into
-/// the product and answers with the union rule GH-769 owns; the GitHub writes
-/// (comment, `review:*` labels, `Independent Review` status), their idempotency
-/// and their exit-code contract are the next step of GH-1030 and are not
-/// performed here. Nothing in this path writes to GitHub or to the ledger.
+/// Moves the watcher's `verdict_body_lines` awk into the product and answers
+/// with the union rule GH-769 owns; [`delivery::deliver`] performs the
+/// writes that rule implies, over the real `gh`-backed [`delivery::GhCli`].
+/// An unreadable comment list or an invalid `--sha` never reaches that far:
+/// both leave through exit 2, the same "could not judge" contract
+/// `edda review gate` uses, because nothing was delivered either way.
 pub fn run(args: DeliverArgs, cwd: &Path) -> Result<()> {
+    match deliver_inner(&args, cwd) {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("edda review deliver: {error:#}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The read, decide, and write sequence; returns the exit code `run` should
+/// use on success (0 delivered, 1 partially delivered, 2 failed, 3 a due
+/// status/label withheld under R23/#917 — never returned as an `Err`, since
+/// something either succeeded or was deliberately withheld this round; see
+/// [`delivery::Delivery::exit_code`]).
+fn deliver_inner(args: &DeliverArgs, cwd: &Path) -> Result<i32> {
     let sha = match &args.sha {
         Some(sha) => sha.clone(),
         None => super::github::resolve_pr(cwd, args.pr)?.head,
@@ -254,13 +319,26 @@ pub fn run(args: DeliverArgs, cwd: &Path) -> Result<()> {
         is_full_sha(&sha),
         "--sha must be a full 40-character lowercase hex commit"
     );
-    let extracted = extract(&sha, &comments(cwd, args.pr)?);
+    let existing_comments = comments(cwd, args.pr)?;
+    let extracted = extract(&sha, &existing_comments);
     let union = gate::union(&gate::from_lines(&extracted.lines.join("\n")));
     let state = match union {
         gate::Union::Pass => "success",
         gate::Union::Fail => "failure",
         gate::Union::None => "error",
     };
+
+    let gh_client = delivery::GhCli { repo: cwd };
+    let result = delivery::deliver(
+        &gh_client,
+        args.pr,
+        &sha,
+        &existing_comments,
+        &extracted,
+        union,
+    );
+    let exit_code = result.exit_code();
+
     if args.json {
         println!(
             "{}",
@@ -270,6 +348,20 @@ pub fn run(args: DeliverArgs, cwd: &Path) -> Result<()> {
                 "status": state,
                 "verdicts": extracted.lines,
                 "malformed": extracted.malformed,
+                "shadow": extracted.shadow,
+                "notices": result.notices.iter().map(|(id, w)| serde_json::json!({
+                    "comment_id": id, "outcome": w.tag(), "reason": w.reason(),
+                })).collect::<Vec<_>>(),
+                "status_write": result.status.as_ref().map(|w| serde_json::json!({
+                    "outcome": w.tag(), "reason": w.reason(),
+                })),
+                "label": result.label.as_ref().map(|(name, w)| serde_json::json!({
+                    "name": name, "outcome": w.tag(), "reason": w.reason(),
+                })),
+                "label_removed": result.label_removed.as_ref().map(|(name, w)| serde_json::json!({
+                    "name": name, "outcome": w.tag(), "reason": w.reason(),
+                })),
+                "exit_code": exit_code,
             })
         );
     } else {
@@ -277,8 +369,48 @@ pub fn run(args: DeliverArgs, cwd: &Path) -> Result<()> {
         for id in &extracted.malformed {
             println!("malformed {id}");
         }
+        for (id, outcome) in &result.notices {
+            println!(
+                "notice {id} {}{}",
+                outcome.tag(),
+                outcome
+                    .reason()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some(outcome) = &result.status {
+            println!(
+                "status {state} {}{}",
+                outcome.tag(),
+                outcome
+                    .reason()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some((name, outcome)) = &result.label {
+            println!(
+                "label {name} {}{}",
+                outcome.tag(),
+                outcome
+                    .reason()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some((name, outcome)) = &result.label_removed {
+            println!(
+                "label_removed {name} {}{}",
+                outcome.tag(),
+                outcome
+                    .reason()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
     }
-    Ok(())
+    Ok(exit_code)
 }
 
 #[cfg(test)]
@@ -346,7 +478,23 @@ mod tests {
                 got.malformed.is_empty(),
                 "SHADOW reported malformed: {heading}"
             );
+            // Distinct from "nothing pinned here at all": the delivery
+            // module needs this to tell "SHADOW is the only signal" apart
+            // from "no verdict exists" (R22 — zero writes vs. the `error`
+            // status an unreviewed SHA gets).
+            assert_eq!(got.shadow, vec!["1"], "SHADOW not surfaced: {heading}");
         }
+    }
+
+    #[test]
+    fn a_shadow_round_for_another_sha_is_not_this_shas_shadow() {
+        let body = format!(
+            "## Code Review: Round 1 (SHADOW) — PR #1030 @ {OTHER}\n\n### Verdict\n\nLGTM (P0=0, P1=0)\n"
+        );
+        let got = extract(SHA, &[comment("1", &body)]);
+        assert!(got.lines.is_empty());
+        assert!(got.malformed.is_empty());
+        assert!(got.shadow.is_empty());
     }
 
     #[test]

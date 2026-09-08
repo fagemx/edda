@@ -3,6 +3,7 @@ mod args;
 mod brief;
 mod config;
 mod deliver;
+mod delivery;
 mod due;
 mod evidence;
 mod gate;
@@ -54,9 +55,12 @@ pub enum ReviewCmd {
         #[command(flatten)]
         args: GateArgs,
     },
-    /// What the §7 verdict comments on a reviewed SHA amount to (GH-1030)
+    /// Deliver the §7 verdict comments on a reviewed SHA to GitHub (GH-1030)
     ///
-    /// Reads only for now: the GitHub writes are the next step of GH-1030.
+    /// Writes the `review:*` label and the `Independent Review` commit
+    /// status by the union rule (`edda review gate`, GH-769); a malformed
+    /// verdict comment gets a one-shot notice instead. Exit: 0 delivered,
+    /// 1 partially delivered, 2 failed or cannot judge.
     Deliver {
         #[command(flatten)]
         args: DeliverArgs,
