@@ -218,4 +218,29 @@ case $err in
     *) fail "case 4: expected a malformed-comment refusal, got: $err" ;;
 esac
 
+# ── case 5: exit code is not the gate, but it is not silent either ─────
+#
+# `edda review deliver` exits by delivery outcome (0/1/3), not by the union
+# (Round 1 review, P1-2 — the exit code was previously discarded with no
+# signal at all). Here deliver exits 1 (partially delivered) while the union
+# itself still reads `success`: the merge must still proceed — the union
+# `.status` field alone decides the refusal — but a warning naming the
+# nonzero exit must land on stderr so the operator can see the write did not
+# fully land.
+
+STUB_COMMENTS=$work/fixtures/lgtm-only.json
+STUB_DELIVER=$work/fixtures/deliver-success.json
+STUB_DELIVER_EXIT=1
+export STUB_COMMENTS STUB_DELIVER STUB_DELIVER_EXIT
+run_case
+[ "$code" -eq 0 ] || fail "case 5: a nonzero deliver exit with a union pass must not block the merge (exit $code): $err"
+[ "$out" = "review accepted: PR #$PR @ $HEAD_SHA" ] \
+    || fail "case 5: accept output changed: $out"
+grep -qF "pr checks $PR" "$GH_CALLS" \
+    || fail "case 5: --required checks were skipped: $(cat "$GH_CALLS")"
+case $err in
+    *warning*) : ;;
+    *) fail "case 5: expected a warning on stderr naming the failed write, got: $err" ;;
+esac
+
 echo "PASS scripts/test-merge-reviewed-pr.sh ($case_no cases)"
