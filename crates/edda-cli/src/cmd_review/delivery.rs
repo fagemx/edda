@@ -135,6 +135,15 @@ pub(crate) struct Delivery {
     /// `(label, outcome)`; `None` when the union is `Union::None` (no label
     /// is due either way).
     pub label: Option<(String, Write)>,
+    /// `(sibling_label, outcome)` for the best-effort cleanup that follows a
+    /// due `label` (GH-1081 Round 2 P1): removing the *other* `review:*`
+    /// label so the two never stand together on one SHA (ratified
+    /// `review.same-sha-multiple-verdicts`). `None` when no sibling stood,
+    /// or when `label` itself was never due/attempted this run. Unlike the
+    /// Round 1 shape this replaces, a failed removal is recorded here as
+    /// `Write::Failed` — never swallowed via `let _ =` — so it reaches
+    /// stdout/JSON and `exit_code()` the same as any other write.
+    pub label_removed: Option<(String, Write)>,
 }
 
 impl Delivery {
@@ -157,6 +166,7 @@ impl Delivery {
             .map(|(_, w)| w)
             .chain(self.status.iter())
             .chain(self.label.iter().map(|(_, w)| w))
+            .chain(self.label_removed.iter().map(|(_, w)| w))
             .collect();
         let attempted = outcomes
             .iter()
@@ -253,7 +263,20 @@ pub(crate) fn deliver(
             const REASON: &str = "withheld: new malformed notice posted this run (R23/#917)";
             out.status = Some(Write::Withheld(REASON));
             if let Some(label) = label_for(union) {
-                out.label = Some((label.to_owned(), Write::Withheld(REASON)));
+                // GH-1081 Round 2 P2: the label is only actually due when
+                // the PR's current head still matches the reviewed SHA —
+                // exactly the gate the main branch below applies
+                // (`Skipped("head moved")`). Reporting `Withheld` here
+                // without that check told a moved head a label was held
+                // back that was never due this run. A head-read failure
+                // stays conservative (`Withheld`, as before this fix) since
+                // it cannot positively confirm the head has moved.
+                let outcome = match gh.head(pr) {
+                    Ok(current) if current == sha => Write::Withheld(REASON),
+                    Ok(_moved) => Write::Skipped("head moved"),
+                    Err(_) => Write::Withheld(REASON),
+                };
+                out.label = Some((label.to_owned(), outcome));
             }
         }
         return out;
@@ -285,12 +308,18 @@ pub(crate) fn deliver(
     });
 
     if let Some(label) = label_for(union) {
-        // The sibling review:* label (GH-1081/P1-1): the shell this verb
-        // replaces removes it right after a successful add
-        // (`pr-review-watch.sh:925-928`) so a later verdict on the same SHA
-        // never leaves both labels standing. Only a freshly applied label
-        // triggers the removal — an "already applied" rerun makes zero new
-        // calls (GH-1030 doneWhen: idempotent rerun, zero new writes).
+        // The sibling review:* label (GH-1081/P1-1, tightened in Round 2
+        // P1): the shell this verb replaces removes it right after a
+        // successful add (`pr-review-watch.sh:925-928`) so a later verdict
+        // on the same SHA never leaves both labels standing. The sibling
+        // condition is now evaluated independently of whether `label` was
+        // freshly added or already applied — Round 1's fix only reached the
+        // removal from the fresh-add arm, so a single transient
+        // `remove_label` failure (or any split state left by an older
+        // writer) could never self-heal: every later rerun took the
+        // `Skipped("already applied")` arm and never looked at the sibling
+        // again. A clean state (desired label present, sibling absent)
+        // still makes zero new calls either way.
         let sibling = if label == LABEL_LGTM {
             LABEL_CHANGES
         } else {
@@ -298,21 +327,37 @@ pub(crate) fn deliver(
         };
         let outcome = match gh.head(pr) {
             Ok(current) if current == sha => match gh.labels(pr) {
-                Ok(existing) if existing.iter().any(|l| l == label) => {
-                    Write::Skipped("already applied")
-                }
-                Ok(existing) => match gh.add_label(pr, label) {
-                    Ok(()) => {
-                        if existing.iter().any(|l| l == sibling) {
-                            // Best-effort, like the shell's `|| true`: a
-                            // failed removal must not turn a delivered
-                            // label into a failed write.
-                            let _ = gh.remove_label(pr, sibling);
+                Ok(existing) => {
+                    let sibling_stands = existing.iter().any(|l| l == sibling);
+                    let label_outcome = if existing.iter().any(|l| l == label) {
+                        Write::Skipped("already applied")
+                    } else {
+                        match gh.add_label(pr, label) {
+                            Ok(()) => Write::Done,
+                            Err(error) => Write::Failed(error.to_string()),
                         }
-                        Write::Done
+                    };
+                    // Only attempt the removal when the desired label
+                    // itself did not just fail — a failed add changed
+                    // nothing about the PR's label state, so there is
+                    // nothing new to clean up on top of an already-failed
+                    // round.
+                    if sibling_stands && !matches!(label_outcome, Write::Failed(_)) {
+                        // GH-1081 Round 2 P1: no longer `let _ =` — a
+                        // failed removal is recorded as `Write::Failed` so
+                        // it surfaces on stdout/JSON and contributes to
+                        // `exit_code()`, instead of a delivered label
+                        // silently leaving both `review:*` labels standing.
+                        out.label_removed = Some((
+                            sibling.to_owned(),
+                            match gh.remove_label(pr, sibling) {
+                                Ok(()) => Write::Done,
+                                Err(error) => Write::Failed(error.to_string()),
+                            },
+                        ));
                     }
-                    Err(error) => Write::Failed(error.to_string()),
-                },
+                    label_outcome
+                }
                 Err(error) => Write::Failed(format!("read labels: {error}")),
             },
             Ok(_moved) => Write::Skipped("head moved"),
@@ -436,6 +481,7 @@ mod tests {
         fail_add_label: bool,
         fail_post_status: bool,
         fail_post_comment: bool,
+        fail_remove_label: bool,
 
         label_calls: RefCell<Vec<(u64, String)>>,
         status_calls: RefCell<Vec<(String, String, String)>>,
@@ -452,6 +498,7 @@ mod tests {
                 fail_add_label: false,
                 fail_post_status: false,
                 fail_post_comment: false,
+                fail_remove_label: false,
                 label_calls: RefCell::new(Vec::new()),
                 status_calls: RefCell::new(Vec::new()),
                 comment_calls: RefCell::new(Vec::new()),
@@ -477,6 +524,7 @@ mod tests {
             self.remove_label_calls
                 .borrow_mut()
                 .push((pr, label.to_owned()));
+            anyhow::ensure!(!self.fail_remove_label, "simulated remove_label failure");
             self.labels.borrow_mut().retain(|l| l != label);
             Ok(())
         }
@@ -575,22 +623,98 @@ mod tests {
     }
 
     #[test]
-    fn reapplying_the_same_label_makes_zero_new_remove_calls() {
-        // A rerun where the target label is already applied must not touch
-        // the sibling either — it takes the "already applied" Skipped path
-        // entirely, never reaching add_label, so there is nothing to clean
-        // up after (GH-1030 doneWhen: idempotent rerun, zero new writes).
+    fn reapplying_the_same_label_in_a_clean_state_makes_zero_new_writes() {
+        // Clean-state rerun (GH-1081 Round 2 P1 fixture c): the target label
+        // is already applied and the sibling is absent — idempotency must
+        // still hold, exactly like before the Round 2 fix, just now also
+        // covering the new `label_removed` field (GH-1030 doneWhen:
+        // idempotent rerun, zero new writes).
         let gh = FakeGh::new(SHA);
         let ext = extracted(&["LGTM\t0\t0"]);
         let d1 = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
         assert_eq!(d1.label, Some((LABEL_LGTM.to_owned(), Write::Done)));
+        assert_eq!(d1.label_removed, None);
 
         let d2 = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
         assert_eq!(
             d2.label,
             Some((LABEL_LGTM.to_owned(), Write::Skipped("already applied")))
         );
+        assert_eq!(d2.label_removed, None);
         assert!(gh.remove_label_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_rerun_with_the_desired_label_applied_and_the_sibling_still_standing_removes_it_gh1081_round2_p1(
+    ) {
+        // GH-1081 Round 2 P1 fixture (b): Round 1's fix only reached the
+        // sibling from the fresh-add arm, so a rerun where the desired
+        // label was already applied (e.g. an earlier removal attempt
+        // failed, or some other writer left both labels standing) could
+        // never retry the cleanup — `Skipped("already applied")` at :302
+        // returned before the sibling was even looked at. The condition
+        // must now be evaluated independently of freshness.
+        let gh = FakeGh::new(SHA);
+        gh.labels.borrow_mut().push(LABEL_LGTM.to_owned());
+        gh.labels.borrow_mut().push(LABEL_CHANGES.to_owned());
+        let ext = extracted(&["LGTM\t0\t0"]);
+
+        let d = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
+        assert_eq!(
+            d.label,
+            Some((LABEL_LGTM.to_owned(), Write::Skipped("already applied"))),
+            "the desired label was already standing — no add_label call"
+        );
+        assert!(gh.label_calls.borrow().is_empty());
+        assert_eq!(
+            d.label_removed,
+            Some((LABEL_CHANGES.to_owned(), Write::Done)),
+            "the still-standing sibling must be removed even on the already-applied path"
+        );
+        assert_eq!(
+            gh.remove_label_calls.borrow().as_slice(),
+            [(1, LABEL_CHANGES.to_owned())]
+        );
+        assert_eq!(gh.labels.borrow().as_slice(), [LABEL_LGTM.to_owned()]);
+        assert_eq!(d.exit_code(), 0);
+    }
+
+    #[test]
+    fn a_failed_sibling_removal_is_recorded_and_makes_the_exit_code_non_zero_gh1081_round2_p1() {
+        // GH-1081 Round 2 P1 fixture (a): Round 1 discarded the removal's
+        // Result via `let _ =` — a failed `gh pr edit --remove-label` still
+        // reported the label `Write::Done` and exit 0, with nothing on
+        // stdout/JSON to say the sibling never came off. The removal must
+        // now be recorded as its own `Write::Failed` and count toward
+        // `exit_code()` like any other attempted write.
+        let gh = FakeGh {
+            fail_remove_label: true,
+            ..FakeGh::new(SHA)
+        };
+        gh.labels.borrow_mut().push(LABEL_CHANGES.to_owned());
+        let ext = extracted(&["LGTM\t0\t0"]);
+
+        let d = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
+        assert_eq!(
+            d.label,
+            Some((LABEL_LGTM.to_owned(), Write::Done)),
+            "the desired label itself was freshly, successfully applied"
+        );
+        assert!(
+            matches!(&d.label_removed, Some((sib, Write::Failed(_))) if sib == LABEL_CHANGES),
+            "the failed removal must be recorded, not swallowed: {:?}",
+            d.label_removed
+        );
+        assert_eq!(
+            gh.labels.borrow().as_slice(),
+            [LABEL_CHANGES.to_owned(), LABEL_LGTM.to_owned()],
+            "a failed removal must not be reflected as removed"
+        );
+        assert_ne!(
+            d.exit_code(),
+            0,
+            "a failed write must never read as fully delivered"
+        );
     }
 
     #[test]
@@ -727,6 +851,38 @@ mod tests {
             3,
             "withheld is its own outcome, distinct from partial (1) or full (2) failure"
         );
+    }
+
+    #[test]
+    fn a_new_malformed_notice_on_a_moved_head_does_not_report_the_label_withheld_gh1081_round2_p2()
+    {
+        // GH-1081 Round 2 P2: the main branch gates the label on
+        // `gh.head(pr) == sha`, answering `Skipped("head moved")` rather
+        // than attempting anything. The withhold branch (a new malformed
+        // notice posted this run) used to report the label `Withheld`
+        // unconditionally, telling a moved head a label was held back that
+        // was never due this run at all.
+        let gh = FakeGh::new("ffffffffffffffffffffffffffffffffffffffff"); // current head != reviewed sha
+        let ext = Extracted {
+            lines: vec!["LGTM\t0\t0".to_owned()],
+            malformed: vec!["42".to_owned()],
+            shadow: vec![],
+        };
+        let d = deliver(&gh, 7, SHA, &[], &ext, union_of(&ext));
+        assert_eq!(d.notices, vec![("42".to_owned(), Write::Done)]);
+        assert!(
+            matches!(d.status, Some(Write::Withheld(_))),
+            "status is unconditional on head — still withheld: {:?}",
+            d.status
+        );
+        assert_eq!(
+            d.label,
+            Some((LABEL_LGTM.to_owned(), Write::Skipped("head moved"))),
+            "the label was never due this run on a moved head — not Withheld: {:?}",
+            d.label
+        );
+        assert!(gh.label_calls.borrow().is_empty());
+        assert!(gh.remove_label_calls.borrow().is_empty());
     }
 
     #[test]

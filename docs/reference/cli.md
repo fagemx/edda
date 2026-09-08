@@ -1383,9 +1383,15 @@ The `Independent Review` status is written for the union's state —
 of whether the PR's current head has since moved past the reviewed SHA. The
 `review:*` label is different: it is applied **only** while the current head
 still equals the reviewed SHA. A moved head still gets the status; it never
-gets the label. Applying a label removes its sibling when present — a later
-Changes Requested on the same SHA removes a standing `review:lgtm`, and vice
-versa — so the two never stand together.
+gets the label — and a withheld run (a new malformed notice) reports the
+label the same way, `skipped (head moved)` rather than `withheld`, when the
+head has moved. Whenever the desired label stands (freshly applied, or
+already applied from an earlier run) and its sibling is still standing too,
+the sibling is removed — a later Changes Requested on the same SHA removes a
+standing `review:lgtm`, and vice versa — so the two never stand together;
+this cleanup retries on every run until it succeeds, and a failed removal is
+its own reported write (`label_removed`), not swallowed into the label's own
+outcome.
 
 Every write is idempotent by construction: deliver reads the label already on
 the PR, the latest `Independent Review` state already posted for the SHA, and
@@ -1394,10 +1400,10 @@ for an already-delivered verdict performs zero new GitHub calls.
 
 Stdout is one line — the union state, the SHA, and the number of verdicts
 standing — followed by one `malformed <id>` line per malformed comment, one
-`notice <id> <outcome>` line per notice attempted, and a `status`/`label`
-line for each of those writes. `--json` emits the same as an object, with an
-`outcome` of `done`, `skipped`, `withheld`, or `failed` (with a `reason`) for
-each write.
+`notice <id> <outcome>` line per notice attempted, and a `status`/`label`/
+`label_removed` line for each of those writes. `--json` emits the same as an
+object, with an `outcome` of `done`, `skipped`, `withheld`, or `failed` (with
+a `reason`) for each write.
 
 | Exit | Meaning |
 |---|---|

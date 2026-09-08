@@ -358,6 +358,9 @@ fn deliver_inner(args: &DeliverArgs, cwd: &Path) -> Result<i32> {
                 "label": result.label.as_ref().map(|(name, w)| serde_json::json!({
                     "name": name, "outcome": w.tag(), "reason": w.reason(),
                 })),
+                "label_removed": result.label_removed.as_ref().map(|(name, w)| serde_json::json!({
+                    "name": name, "outcome": w.tag(), "reason": w.reason(),
+                })),
                 "exit_code": exit_code,
             })
         );
@@ -389,6 +392,16 @@ fn deliver_inner(args: &DeliverArgs, cwd: &Path) -> Result<i32> {
         if let Some((name, outcome)) = &result.label {
             println!(
                 "label {name} {}{}",
+                outcome.tag(),
+                outcome
+                    .reason()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some((name, outcome)) = &result.label_removed {
+            println!(
+                "label_removed {name} {}{}",
                 outcome.tag(),
                 outcome
                     .reason()
