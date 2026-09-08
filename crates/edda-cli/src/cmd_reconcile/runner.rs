@@ -9,7 +9,7 @@ use edda_ledger::{Ledger, TaskLease};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::plan::WORKSPACE_LOCK_WAIT_BUDGET;
+use super::plan::workspace_lock_wait_budget;
 use super::ReconcileConfig;
 
 #[cfg(test)]
@@ -21,14 +21,30 @@ pub(super) static DOORBELL_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 thread_local! {
     pub(super) static FAIL_NEXT_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static FAIL_NEXT_REQUEUED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_NEXT_LEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_TASK_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Runs once inside this thread's worktree preparation — the phase that
+    /// holds no workspace lock. It stands in for a slow `git worktree add`
+    /// without depending on how fast the host runs git, and lets a test do
+    /// whatever a peer reconciler could do in that unlocked window.
+    pub(super) static WORKTREE_PREP_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_worktree_prep_hook() {
+    // Taken before it runs, so the hook may touch this slot without reentering
+    // a live borrow.
+    if let Some(hook) = WORKTREE_PREP_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
 }
 
 pub(super) fn acquire_workspace_lock(
     paths: &edda_ledger::EddaPaths,
 ) -> anyhow::Result<WorkspaceLock> {
-    let deadline = std::time::Instant::now() + WORKSPACE_LOCK_WAIT_BUDGET;
+    let deadline = std::time::Instant::now() + workspace_lock_wait_budget();
     loop {
         match WorkspaceLock::acquire(paths) {
             Ok(lock) => return Ok(lock),
@@ -73,6 +89,12 @@ pub(super) fn append_started(
 }
 
 pub(super) fn append_requeued(ledger: &Ledger, task_id: u64, attempt: u32) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if FAIL_TASK_ID.with(|target| target.get().is_none_or(|target| target == task_id))
+        && FAIL_NEXT_REQUEUED.with(|flag| flag.replace(false))
+    {
+        anyhow::bail!("injected task.requeued append failure");
+    }
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
     ledger.append_event(&new_task_requeued_event(
@@ -94,12 +116,17 @@ pub(super) fn append_failed(ledger: &Ledger, task_id: u64, reason: &str) -> anyh
     )?)
 }
 
+/// Take the lease for `attempt`, returning the owner written with it. The owner
+/// is unique per call rather than derived from the task and attempt (GH-1047):
+/// it is what tells a claim apart from a peer's claim on the same attempt —
+/// including a peer in this process — so the holder can re-check at write time
+/// that a claim taken under an earlier lock hold is still its own.
 pub(super) fn replace_lease(
     ledger: &Ledger,
     task_id: u64,
     attempt: u32,
     ttl_s: u64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     #[cfg(test)]
     if FAIL_TASK_ID.with(|target| target.get().is_none_or(|target| target == task_id))
         && FAIL_NEXT_LEASE.with(|flag| flag.replace(false))
@@ -109,13 +136,19 @@ pub(super) fn replace_lease(
     let heartbeat_at = clock_now();
     let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(ttl_s as i64))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let owner = format!(
+        "reconcile-{}-{}",
+        std::process::id(),
+        ulid::Ulid::new().to_string().to_lowercase()
+    );
     ledger.upsert_task_lease(&TaskLease {
         task_id,
         attempt,
-        owner: format!("reconcile-{}-{task_id}-{attempt}", std::process::id()),
+        owner: owner.clone(),
         expires_at,
         heartbeat_at,
-    })
+    })?;
+    Ok(owner)
 }
 
 pub(super) fn clock_now() -> String {
@@ -157,6 +190,8 @@ pub(super) fn ensure_attempt_worktree(
     attempt: u32,
     allow_existing_resume_state: bool,
 ) -> anyhow::Result<PathBuf> {
+    #[cfg(test)]
+    run_worktree_prep_hook();
     let branch = attempt_branch(task.task_id, attempt);
     let worktree = attempt_worktree_path(repo_root, task.task_id, attempt)?;
     git(repo_root, ["rev-parse", "--is-inside-work-tree"])

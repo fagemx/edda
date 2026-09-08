@@ -399,3 +399,171 @@ pub(super) fn middle_persistence_fault_returns_first_and_later_launchable_plans(
     }
     Ok(())
 }
+
+fn event_kinds(ledger: &Ledger) -> anyhow::Result<Vec<String>> {
+    Ok(ledger
+        .task_events()?
+        .into_iter()
+        .map(|event| event.event_type)
+        .collect())
+}
+
+#[test]
+pub(super) fn a_claim_taken_over_while_unlocked_never_commits_its_dispatch() -> anyhow::Result<()> {
+    // Preparation runs with no lock held and no bound, so the claim that
+    // authorises the dispatch can stop being ours before phase 3 writes on it.
+    // Committing a taken-over claim would put two `task.started` events on one
+    // attempt — exactly the serialization the lock hold used to provide
+    // (GH-1047). An `expired` claim nobody took is a different case: it is
+    // still uncontended, so refusing it would only lose a safe dispatch to a
+    // slow `git worktree add`, which is the failure this issue is about.
+    for case in ["taken-over", "released", "expired"] {
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        init_git(&repo)?;
+        edda_ledger::Ledger::ensure_initialized(&repo)?;
+        let ledger = edda_ledger::Ledger::open(&repo)?;
+        create_task(&ledger, 1, &["src/contended.rs".into()])?;
+        let peer_repo = repo.clone();
+        WORKTREE_PREP_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let peer = edda_ledger::Ledger::open(&peer_repo).expect("peer ledger");
+                let mut claim = peer.task_lease(1).expect("claim read").expect("claim");
+                match case {
+                    // A peer re-planned the task and claimed it for itself.
+                    "taken-over" => claim.owner = "peer-reconciler".into(),
+                    // A finished runner deleted the lease out from under us.
+                    "released" => {
+                        peer.delete_task_lease(1, claim.attempt).expect("release");
+                        return;
+                    }
+                    // Preparation outran `--lease-ttl-s`, but nobody took it.
+                    _ => claim.expires_at = "2026-08-16T00:00:00Z".into(),
+                }
+                peer.upsert_task_lease(&claim).expect("peer write");
+            }));
+        });
+
+        let outcome = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())?;
+
+        let started = ledger
+            .task_events()?
+            .iter()
+            .filter(|event| event.event_type == "task.started")
+            .count();
+        if case == "expired" {
+            assert!(outcome.errors.is_empty(), "{case}");
+            assert_eq!(outcome.plans.len(), 1, "{case}");
+            assert_eq!(started, 1, "{case}");
+            // Committed with a lease measured from the dispatch, not the plan.
+            let dispatched = ledger.task_lease(1)?.expect("renewed claim");
+            assert_eq!(dispatched.attempt, 1, "{case}");
+            assert!(dispatched.expires_at > clock_now(), "{case}");
+            continue;
+        }
+        assert!(outcome.plans.is_empty(), "{case}");
+        assert_eq!(outcome.errors.len(), 1, "{case}");
+        assert!(
+            outcome.errors[0].contains("lost its claim on attempt 1"),
+            "{case}: {}",
+            outcome.errors[0]
+        );
+        assert_eq!(started, 0, "{case}");
+        // A claim that is no longer ours is not ours to delete either.
+        assert_eq!(
+            ledger.task_lease(1)?.map(|lease| lease.owner),
+            (case == "taken-over").then(|| "peer-reconciler".to_string()),
+            "{case}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+pub(super) fn a_retiring_attempt_is_claimed_before_the_batch_is_prepared() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    init_git(&repo)?;
+    edda_ledger::Ledger::ensure_initialized(&repo)?;
+    let ledger = edda_ledger::Ledger::open(&repo)?;
+    create_task(&ledger, 1, &["src/retired.rs".into()])?;
+    create_task(&ledger, 2, &["src/fresh.rs".into()])?;
+    append_started(&ledger, 1, 1, 300)?;
+    ledger.upsert_task_lease(&lease(1, 1, "2026-08-16T00:00:00Z"))?;
+    // A retirement is claimed like every other planned action: preparation now
+    // sits between reading the rail and appending `task.failed`, so a peer that
+    // read the rail in that window would otherwise append a second one. Only
+    // the claims exist while preparation runs, which is where this reads them.
+    let observed: std::sync::Arc<std::sync::Mutex<Option<TaskLease>>> = Default::default();
+    let seen = observed.clone();
+    let peer_repo = repo.clone();
+    WORKTREE_PREP_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let peer = edda_ledger::Ledger::open(&peer_repo).expect("peer ledger");
+            *seen.lock().expect("observed claim") = peer.task_lease(1).expect("claim read");
+        }));
+    });
+
+    let outcome = persist_reconciliation(
+        &repo,
+        &ReconcileConfig {
+            max_attempts: 1,
+            ..ReconcileConfig::test_defaults()
+        },
+    )?;
+
+    let claim = observed
+        .lock()
+        .expect("observed claim")
+        .clone()
+        .expect("the retiring task is claimed while the batch is prepared");
+    assert_eq!(claim.attempt, 1);
+    assert!(claim.expires_at > clock_now());
+    assert!(outcome.errors.is_empty());
+    assert_eq!(
+        outcome
+            .plans
+            .iter()
+            .map(|plan| plan.task.task_id)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert!(ledger.task_lease(1)?.is_none());
+    assert_eq!(
+        ledger
+            .task_views()?
+            .iter()
+            .find(|view| view.task_id == 1)
+            .expect("retired task")
+            .status,
+        TaskStatus::Failed
+    );
+    Ok(())
+}
+
+#[test]
+pub(super) fn a_failed_requeue_append_releases_the_claim_it_reserved() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    init_git(&repo)?;
+    edda_ledger::Ledger::ensure_initialized(&repo)?;
+    let ledger = edda_ledger::Ledger::open(&repo)?;
+    create_task(&ledger, 1, &["src/retry.rs".into()])?;
+    append_started(&ledger, 1, 1, 300)?;
+    append_failed(&ledger, 1, "crash")?;
+    let rail_before = event_kinds(&ledger)?;
+    FAIL_NEXT_REQUEUED.with(|flag| flag.set(true));
+
+    let outcome = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())?;
+
+    assert!(outcome.plans.is_empty());
+    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(event_kinds(&ledger)?, rail_before);
+    // The claim named the replacement attempt 2. Left behind, it would hide the
+    // task from every reconciler until the lease expired.
+    assert!(ledger.task_lease(1)?.is_none());
+    Ok(())
+}
