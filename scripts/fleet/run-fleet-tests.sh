@@ -87,8 +87,8 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
             # Green on a Windows workstation, red on ubuntu (`dry-run output
             # misses the launch command`). Green in exactly one place, the
             # machine where it has always been hand-run. Its windows-latest
-            # failure was case 7, which drove next-review.sh and went with the
-            # review shell (GH-1061); the ubuntu one is case 1 and stands.
+            # failure was case 7, which drove the review shell's queue helper
+            # and went with it (GH-1061); the ubuntu one is case 1 and stands.
             q_issue='#964'
             q_why='red on ubuntu'
             ;;

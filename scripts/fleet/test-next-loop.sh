@@ -3,8 +3,8 @@
 # Stubs gh and edda (and pwsh, defensively); jq, git and sh stay real.
 # Writes only under its temp dir and makes no git side effects.
 #
-# It covered next-review.sh too until GH-1061 retired the review shell; the
-# cases that drove that script went with it, and the fixtures only they used
+# It covered the review shell's queue helper too until GH-1061 retired that
+# shell; the cases driving it went with it, and the fixtures only they used
 # (the PR envelope, the round-count comment lists, the verdict envelopes) went
 # with those.
 set -eu

@@ -10,8 +10,9 @@
 //! - **Window.** If the base advanced over a file the PR changed, the reviewed
 //!   tree is no longer the tree that would merge.
 //!
-//! `scripts/pr-review-watch.sh` carried both in shell, marked `D8-debt(#769)`.
-//! This module is where that debt is paid: one rule, one implementation.
+//! The review shell carried both, marked `D8-debt(#769)`, until GH-1061
+//! retired it. This module is where that debt is paid: one rule, one
+//! implementation.
 //!
 //! ## Two sources, one rule
 //!

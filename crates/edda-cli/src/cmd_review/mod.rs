@@ -37,8 +37,8 @@ use tokio_util::sync::CancellationToken;
 /// Verbs under `edda review`.
 ///
 /// `edda review` itself stays a bare command with flags: `--pr`, `--spec` and
-/// the rest are what `scripts/review-pr.sh` and `pr-review-watch.sh` invoke
-/// today, and a subcommand layer must not move them.
+/// the rest are how an on-demand round is launched, and a subcommand layer
+/// must not move them.
 #[derive(clap::Subcommand)]
 pub enum ReviewCmd {
     /// Is this PR worth reviewing again? The trigger policy (GH-763)

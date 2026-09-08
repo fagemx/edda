@@ -1,8 +1,8 @@
 //! Contract test for `edda review gate`'s three exit codes (GH-769).
 //!
-//! The exit code *is* the interface: `scripts/pr-review-watch.sh` maps 0/1/2
-//! onto the `Independent Review` commit status (`success`/`failure`/`error`)
-//! and decides nothing itself. The in-crate tests stop at `union()` and the
+//! The exit code *is* the interface: a caller maps 0/1/2 onto the
+//! `Independent Review` commit status (`success`/`failure`/`error`) and decides
+//! nothing itself. The in-crate tests stop at `union()` and the
 //! `Result` level, while `run` calls `std::process::exit` directly, so only a
 //! spawned binary can assert the codes that mapping reads.
 

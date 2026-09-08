@@ -147,7 +147,7 @@
    `Independent Review` 必要 status 已於同日從 ruleset 移除，合併閘只剩 `CI Gate`。
    **輪詢器連同整套審查殼已退役**（GH-1061，`review.shell-branch`）：它對每一張 open PR
    無差別自動派 lane，連只改一個 markdown 檔的 docs PR 也照收全額快照稅，這正是樸實流程要
-   拿掉的東西。腳本已從 repo 刪除，排程任務 `edda-pr-review-watcher` 已從本機解除註冊；
+   拿掉的東西。腳本已從 repo 刪除，它註冊的隱藏排程任務已從本機解除註冊；
    沒有回復路徑，也不需要——獨立輪次改成按需派，見第 5 步。
 
    要一份**獨立**判決時（實作者與控制者以外的第三方），用第 5 步的 lane 機制**按需刻意派一條**，

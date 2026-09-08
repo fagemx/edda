@@ -11,8 +11,8 @@ The loop is one script plus the guard scripts it calls:
 - `scripts/fleet/next-issue.sh <issue> <machine>/<role> [--dry-run]` — ready
   issue → launched lane
 
-The review half was `scripts/fleet/next-review.sh`, retired with the review
-shell (GH-1061). A pi controller does not run review rounds: see below.
+The review half was a second script, retired with the review shell (GH-1061).
+A pi controller does not run review rounds: see below.
 
 ## Pick the next issue
 
@@ -82,8 +82,8 @@ last five lines of the log are the lane's report.
 
 ## Review the PR
 
-**A pi controller does not run the round.** `next-review.sh` delegated it, and
-it refused to delegate anything but a SHADOW round anyway, because pi cannot
+**A pi controller does not run the round.** The retired script delegated it,
+and it refused to delegate anything but a SHADOW round anyway, because pi cannot
 reach Anthropic and `fleet.review-engine-model` puts review on Opus via Claude
 Code. It was retired with the review shell (GH-1061).
 
