@@ -140,10 +140,24 @@ pub(crate) fn union(standing: &[Standing]) -> Union {
 /// so the second diff is empty and the window reads *clear* for exactly the
 /// case the rule exists to catch. `--literal-pathspecs` closes the other half:
 /// a filename containing `*` or `[` is a filename here, never a glob.
+///
+/// Both diffs also pass `--no-renames`: rename detection reports a renamed
+/// file as only its *destination* path, so if the base moved the same file
+/// under its *old* name — or the subject renamed a file the base then edited
+/// under the old name — the name that would have matched never enters the
+/// pathspec set and the window reads clear. `--no-renames` turns a rename
+/// into a delete of the old path plus an add of the new one, so both names
+/// enter, matching whichever side the base actually touched.
 fn window_moved(repo: &Path, sha: &str, base: &str) -> Result<bool> {
     let changed = git(
         repo,
-        &["diff", "--name-only", "-z", &format!("{base}...{sha}")],
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            &format!("{base}...{sha}"),
+        ],
     )?;
     let files: Vec<&str> = changed
         .split('\0')
@@ -158,6 +172,7 @@ fn window_moved(repo: &Path, sha: &str, base: &str) -> Result<bool> {
         "--literal-pathspecs",
         "diff",
         "--name-only",
+        "--no-renames",
         range.as_str(),
         "--",
     ];
@@ -461,6 +476,28 @@ mod tests {
         assert!(
             window_moved(&root, &sha, "main").unwrap(),
             "a quoted path must not read as an untouched file"
+        );
+    }
+
+    #[test]
+    fn a_rename_the_base_then_edits_under_the_old_name_is_still_seen() {
+        // `git diff --name-only` applies rename detection: the subject's
+        // rename of a.txt to b.txt comes back as only "b.txt". If the
+        // second diff's pathspec set is built from that output, the base's
+        // edit under the *old* name ("a.txt") matches nothing and the
+        // window falsely reads clear — the same fail-open direction as the
+        // quoted-path bug above, but from treating a rename as an ordinary
+        // single-path change instead of a delete-plus-add.
+        let (_temp, root) = testrepo::init();
+        testrepo::run(&root, &["checkout", "-q", "-b", "subject"]);
+        testrepo::run(&root, &["mv", "a.txt", "b.txt"]);
+        testrepo::run(&root, &["commit", "-q", "-m", "rename a.txt to b.txt"]);
+        let sha = testrepo::run(&root, &["rev-parse", "HEAD"]);
+        testrepo::run(&root, &["checkout", "-q", "main"]);
+        testrepo::commit_file(&root, "a.txt", "base edit\n", "base advance");
+        assert!(
+            window_moved(&root, &sha, "main").unwrap(),
+            "the base's edit under the pre-rename name must not read as clear"
         );
     }
 
