@@ -104,7 +104,7 @@ in-progress N · blocked N · needs-operator N · cost today $X · wake <time> �
 
 ## 8. 分步
 
-1. **v0，本週，只在 4090。** 巡邏殼複製自 `scripts/pr-review-watch.sh`；腦是 `fleet-orchestrate` 加本稿 §3；只做派工、回收、解撞車三件；`docs/fleet/rules.md` 以 2026-09-02 的裁示種好。單：GH-MANAGER-V0。
+1. **v0，本週，只在 4090。** 巡邏殼複製自當時的審查巡邏器（該殼已於 GH-1061 退役）；腦是 `fleet-orchestrate` 加本稿 §3；只做派工、回收、解撞車三件；`docs/fleet/rules.md` 以 2026-09-02 的裁示種好。單：GH-MANAGER-V0。
 2. 第二台也跑管理者；角色名全面切換。
 3. 帳本跨機（#671）；規則從 rules.md 搬回帳本。
 4. 放權：升 ready、記決策、關單。條件是日誌證明連續三天沒有錯誤決定。

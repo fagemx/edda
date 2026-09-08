@@ -1254,10 +1254,9 @@ Two rules decide it, and this verb is their only implementation (REVIEW.md §8):
 Verdicts come from the ledger's `review_verdict` events for that SHA;
 `unreviewed` events are not verdicts and are skipped. `--verdicts <path|->`
 reads them from the caller instead, one `verdict<TAB>p0<TAB>p1` record per
-line — the shape `scripts/pr-review-watch.sh` derives from §7 comments while
-the ledger does not yet carry verdicts across machines. The SHA must be a full
-lowercase 40-hex value — the same shape `pr-review-watch.sh`'s `is_full_sha`
-and REVIEW.md R5 require.
+line — the shape a caller derives from §7 comments while the ledger does not
+yet carry verdicts across machines. The SHA must be a full lowercase 40-hex
+value, the shape REVIEW.md R5 requires.
 
 Stdout is one line — `PASS <sha> verdicts=<n>`, `FAIL <sha> <reason>` or
 `NONE <sha>`. `--json` adds each verdict's `reviewer_model`, `round` and

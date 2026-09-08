@@ -147,15 +147,12 @@ python scripts/crates_release_plan.py --version <VERSION> \
   --package-dir target/package --expected-sha <FULL_SHA>
 ```
 
-Open the prep PR, run the independent review lane (REVIEW.md round), post the
-SHA-pinned verdict, then compute and post the `Independent Review` commit
-status from the §7 verdicts with the watcher helpers:
+Open the prep PR, run the independent review round (REVIEW.md), post the
+SHA-pinned §7 verdict, then settle the label and the `Independent Review`
+commit status from those verdicts by the union rule:
 
 ```bash
-sh scripts/pr-review-watch.sh collect-verdicts <PR> <FULL_SHA> |
-  sh scripts/pr-review-watch.sh gate-state            # success | failure | error
-gh api "repos/$REPO/statuses/<FULL_SHA>" -f state=<state> \
-  -f context="Independent Review" -f description="LGTM P0=0 P1=0"
+edda review deliver --pr <PR> --sha <FULL_SHA>
 ```
 
 Merge, then wait for the `main` push CI to go green — that run is the
