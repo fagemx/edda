@@ -392,8 +392,9 @@ function Invoke-LaneReap {
   $errorCount = 0
   $removeDecisions = 0
 
-  # Candidates only: known families, never the persistent watcher, never an
-  # off-family task — the narrowing pattern cannot widen this set.
+  # Candidates only: known families, never a name in `$PersistentTaskNames`
+  # (empty today), never an off-family task — the narrowing pattern cannot
+  # widen this set.
   $candidates = @()
   foreach ($t in @(Get-FleetScheduledTasks)) {
     $tn = [string]$t.TaskName

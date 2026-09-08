@@ -115,7 +115,7 @@ For each PR created in Phase 2, run one house review. The controller may launch 
 reviewers in a SINGLE message:
 
 1. Launch the independent review round, which dispatches the reviewer with a pinned
-   model and read-only capabilities — `--exclude-tools Edit,Write,NotebookEdit`
+   model and read-only capabilities — a positive tool allowlist, `Read,Grep,Glob`
    (decision `fleet.review-backend`):
 
    ```bash

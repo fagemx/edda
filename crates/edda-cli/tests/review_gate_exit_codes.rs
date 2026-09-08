@@ -133,7 +133,7 @@ fn no_verdict_at_all_exits_2_rather_than_judging() {
 #[test]
 fn a_value_that_is_not_a_full_sha_cannot_be_judged() {
     let env = TestEnv::new();
-    // The watcher reads exit 2 as `error`, which is the honest answer to a
+    // A caller reads exit 2 as `error`, which is the honest answer to a
     // subject the gate cannot even name.
     let (code, _stdout, stderr) = env.gate(&["deadbeef", "--verdicts", "-"], "LGTM\t0\t0\n");
     assert_eq!(code, 2);
@@ -175,7 +175,7 @@ fn an_unreadable_subject_cannot_judge_rather_than_condemn() {
     let env = TestEnv::new();
     // No ledger source can answer here, and `--base` names a ref that does
     // not exist. An internal failure must leave through 2 ("cannot judge"),
-    // never 1 — the watcher publishes 1 as a definitive `failure`.
+    // never 1 — a caller reads 1 as a definitive `failure`.
     let (code, stdout, stderr) = env.gate(
         &[SHA, "--verdicts", "-", "--base", "refs/heads/no-such-ref"],
         "LGTM\t0\t0\n",
@@ -187,9 +187,9 @@ fn an_unreadable_subject_cannot_judge_rather_than_condemn() {
 #[test]
 fn an_uppercase_sha_is_a_malformed_argument_not_a_missing_verdict() {
     let env = TestEnv::new();
-    // The watcher and REVIEW.md R5 both pin `^[0-9a-f]{40}$`. An uppercase
-    // value used to pass the guard and then be reported as "no verdict",
-    // which is the wrong diagnosis.
+    // `is_full_sha` in `deliver.rs` and REVIEW.md R5 both pin
+    // `^[0-9a-f]{40}$`. An uppercase value used to pass the guard and then be
+    // reported as "no verdict", which is the wrong diagnosis.
     let (code, _stdout, stderr) = env.gate(
         &[&SHA.to_ascii_uppercase(), "--verdicts", "-"],
         "LGTM\t0\t0\n",

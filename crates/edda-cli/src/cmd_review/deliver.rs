@@ -289,9 +289,10 @@ fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
 /// reviewed SHA amount to: the `review:*` label, the `Independent Review`
 /// commit status, and a one-shot notice for any malformed comment.
 ///
-/// Moves the watcher's `verdict_body_lines` awk into the product and answers
-/// with the union rule GH-769 owns; [`delivery::deliver`] performs the
-/// writes that rule implies, over the real `gh`-backed [`delivery::GhCli`].
+/// Carries the retired watcher's `verdict_body_lines` awk logic into the
+/// product and answers with the union rule GH-769 owns; [`delivery::deliver`]
+/// performs the writes that rule implies, over the real `gh`-backed
+/// [`delivery::GhCli`].
 /// An unreadable comment list or an invalid `--sha` never reaches that far:
 /// both leave through exit 2, the same "could not judge" contract
 /// `edda review gate` uses, because nothing was delivered either way.

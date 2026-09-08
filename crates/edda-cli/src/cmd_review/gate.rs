@@ -20,8 +20,8 @@
 //! them:
 //!
 //! - the ledger's `review_verdict` events (default), and
-//! - `--verdicts` (a file, or `-` for stdin) in the tab-separated shape the
-//!   watcher already derives from §7 verdict comments.
+//! - `--verdicts` (a file, or `-` for stdin) in the tab-separated shape a
+//!   caller derives from §7 verdict comments.
 //!
 //! The second exists because the verdict *source* is a different debt from the
 //! union *rule*. `D8-debt(#671)` — reading verdicts out of PR comments — stands
@@ -204,7 +204,8 @@ fn from_ledger(repo: &Path, sha: &str) -> Result<Vec<Standing>> {
     Ok(standing)
 }
 
-/// Verdicts supplied by the caller, in the watcher's tab-separated shape.
+/// Verdicts supplied by the caller, in the tab-separated shape a caller
+/// derives from §7 verdict comments.
 pub(crate) fn from_lines(text: &str) -> Vec<Standing> {
     text.lines()
         .map(|line| line.trim_end_matches('\r'))
@@ -269,8 +270,8 @@ fn report(sha: &str, standing: &[Standing], outcome: Union, reason: Option<&str>
 ///
 /// Every internal failure — an unreadable ledger, an undeserializable
 /// `review_verdict`, an unresolvable `--base` — leaves through exit **2**, not
-/// through the caller's error path. `main` exits 1 on an `Err`, and the
-/// watcher reads 1 as `failure`: a definitive "this SHA did not pass". Not
+/// through the caller's error path. `main` exits 1 on an `Err`, and a caller
+/// reads 1 as `failure`: a definitive "this SHA did not pass". Not
 /// being able to judge is not a judgement, so this verb never returns its
 /// errors upward.
 pub fn run(args: GateArgs, cwd: &Path) -> Result<()> {
@@ -284,7 +285,7 @@ pub fn run(args: GateArgs, cwd: &Path) -> Result<()> {
 }
 
 fn judge(args: GateArgs, cwd: &Path) -> Result<()> {
-    // Lowercase only, matching `is_full_sha` in the watcher and REVIEW.md R5.
+    // Lowercase only, matching `is_full_sha` in `deliver.rs` and REVIEW.md R5.
     // An uppercase SHA would otherwise pass the guard, match no ledger event,
     // and be reported as "no verdict" — the wrong diagnosis for a malformed
     // argument.

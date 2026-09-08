@@ -20,7 +20,7 @@
 #   6  dead controller (PID has no process) -> reason controller-gone, -Apply unregisters
 #   7  PID reuse (PID live, creation time mismatch) -> controller-gone, unregisters
 #   8  gh read failure        -> error row, task PRESERVED, nonzero exit even under -Apply
-#   9  persistent watcher + off-family task (both with closed-issue metadata!)
+#   9  two off-family tasks (both with closed-issue metadata!)
 #                             -> zero candidates, zero rows, never unregistered
 #  10  legacy family task, no evidence -> retained/unknown, exit 0
 #  11  -TaskName narrowing    -> only the narrowed task is a candidate
