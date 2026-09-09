@@ -51,6 +51,9 @@ fn args(key: Option<&str>) -> RatifyArgs {
         evidence: None,
         by_rule: None,
         dry_run: false,
+        keys: Vec::new(),
+        since: None,
+        yes: false,
         session: None,
     }
 }
@@ -148,7 +151,13 @@ fn ratify_records_a_separate_event_never_a_mutation() {
 
 // ── rule form (GH-761) ──────────────────────────────────────────────
 
-/// The four cases named in GH-761's doneWhen, on one fixture ledger.
+/// The four cases named in GH-761's original doneWhen, on one fixture
+/// ledger. Case 3 used to be "a later decision's reason names it" — that
+/// was the GH-1066 bug itself (see `mention_alone_does_not_hold_it_through_the_cli`
+/// below for the proof it no longer holds), so this fixture now demonstrates
+/// the domain guard that replaced it: `review.auto-merge` is ratified
+/// *before* the sweep runs, so it is already binding when the sweep judges
+/// `review.old-gate`.
 fn four_case_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
     let (tmp, ledger) = setup_workspace();
     // 1. cited → ratified
@@ -161,15 +170,23 @@ fn four_case_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
         "pricing",
         &["operator:2026-09-03"],
     );
-    // 3. superseded → held (a later decision's reason names it)
+    // 3. domain guard (GH-1066) → held: a later, binding ruling in the same
+    // domain overtook it in substance, even though nothing names it.
     decide(
         &ledger,
-        "review.engine",
-        "opus",
+        "review.old-gate",
+        "manual",
         "per #900",
         &["issue:#900"],
     );
-    decide(&ledger, "review.pool", "two", "replaces review.engine", &[]);
+    decide(
+        &ledger,
+        "review.auto-merge",
+        "mechanical",
+        "the gate is now automatic",
+        &["operator:2026-09-03"],
+    );
+    run(&tmp, &args(Some("review.auto-merge"))).unwrap();
     // 4. no citation → held
     decide(&ledger, "cache.ttl", "60s", "seems about right", &[]);
     (tmp, ledger)
@@ -183,6 +200,9 @@ fn rule_args(dry_run: bool) -> RatifyArgs {
         evidence: None,
         by_rule: Some(RULE_CITED_AUTHORITY.to_string()),
         dry_run,
+        keys: Vec::new(),
+        since: None,
+        yes: false,
         session: None,
     }
 }
@@ -194,7 +214,10 @@ fn rule_ratifies_only_the_cited_unheld_decision() {
 
     assert!(is_binding(&ledger, "db.engine"), "cited → ratified");
     assert!(!is_binding(&ledger, "product.tier"), "product.* → held");
-    assert!(!is_binding(&ledger, "review.engine"), "superseded → held");
+    assert!(
+        !is_binding(&ledger, "review.old-gate"),
+        "domain guard → held"
+    );
     assert!(!is_binding(&ledger, "cache.ttl"), "no citation → held");
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -202,8 +225,13 @@ fn rule_ratifies_only_the_cited_unheld_decision() {
 #[test]
 fn dry_run_writes_nothing() {
     let (tmp, ledger) = four_case_ledger();
+    let before = ratify_events(&ledger).len();
     run(&tmp, &rule_args(true)).unwrap();
-    assert!(ratify_events(&ledger).is_empty());
+    assert_eq!(
+        ratify_events(&ledger).len(),
+        before,
+        "dry run must write nothing new"
+    );
     assert!(!is_binding(&ledger, "db.engine"));
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -216,17 +244,20 @@ fn rule_ratifications_are_distinguishable_from_operator_ones() {
     run(&tmp, &rule_args(false)).unwrap();
 
     let events = ratify_events(&ledger);
-    assert_eq!(events.len(), 1);
+    let db_engine = events
+        .iter()
+        .find(|e| e.payload["key"] == "db.engine")
+        .expect("the rule ratifies db.engine");
     assert_eq!(
-        events[0].payload["ratified_by"],
+        db_engine.payload["ratified_by"],
         format!("rule:{RULE_CITED_AUTHORITY}")
     );
     assert!(
-        events[0].payload["note"]
+        db_engine.payload["note"]
             .as_str()
             .is_some_and(|n| n.contains("issue:#742")),
         "the matched citation rides along: {:?}",
-        events[0].payload["note"]
+        db_engine.payload["note"]
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -234,9 +265,16 @@ fn rule_ratifications_are_distinguishable_from_operator_ones() {
 #[test]
 fn a_second_sweep_is_a_no_op() {
     let (tmp, ledger) = four_case_ledger();
+    let before = ratify_events(&ledger).len();
     run(&tmp, &rule_args(false)).unwrap();
+    let after_first = ratify_events(&ledger).len();
+    assert_eq!(after_first, before + 1, "sweep ratifies exactly db.engine");
     run(&tmp, &rule_args(false)).unwrap();
-    assert_eq!(ratify_events(&ledger).len(), 1);
+    assert_eq!(
+        ratify_events(&ledger).len(),
+        after_first,
+        "second sweep must not append"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -277,6 +315,305 @@ fn sweeping_an_empty_ledger_is_not_an_error() {
     let (tmp, _ledger) = setup_workspace();
     run(&tmp, &rule_args(true)).unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn mention_alone_does_not_hold_it_through_the_cli() {
+    // GH-1066, end to end through `run`: `review.pool` mentions
+    // `review.engine` in passing while explaining itself. Before this fix
+    // that alone held `review.engine` — the exact bug the issue reports at
+    // scale (the operator's plain-flow rulings held, the mentions ratified).
+    let (tmp, ledger) = setup_workspace();
+    decide(
+        &ledger,
+        "review.engine",
+        "opus",
+        "per #900",
+        &["issue:#900"],
+    );
+    decide(&ledger, "review.pool", "two", "replaces review.engine", &[]);
+    run(&tmp, &rule_args(false)).unwrap();
+    assert!(
+        is_binding(&ledger, "review.engine"),
+        "a mention must not hold a validly cited decision"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── GH-1066 acceptance scenario ──────────────────────────────────────
+//
+// Reconstructs the shape of the real 2026-09-07 `--by-rule cited-authority
+// --dry-run` sweep the issue reports (176 rows, 97 ratify / 79 hold): five
+// real, plain-flow rulings the old rule held only because a later decision
+// happened to name them while building on them, and four real 2026-08
+// rail-closeout entries (`d-013`..`d-034`) that a blind sweep would have
+// re-ratified because nothing named them, even though a later, binding
+// ruling (`review.auto-merge`) had already overtaken the whole merge-
+// authority area in substance. Keys, relative order, and citations are
+// drawn from the real ledger (verified read-only against this project's own
+// `.edda` while diagnosing GH-1066, before any code changed); reasons are
+// paraphrased, not quoted verbatim.
+//
+// One thing this fixture does *not* claim: that the four `d-NNN.*` keys
+// share a domain with `review.auto-merge`, or with each other. Each `d-NNN`
+// key is its own historical identifier — a `d-032` decision and a `d-034`
+// decision are never in the same domain by construction, the same way
+// `d-032` is never in the same domain as `review.*`. The domain guard
+// (proven separately above, and via `four_case_ledger`'s case 3) cannot
+// mechanically connect them without inferring a relationship the ledger
+// never recorded, which is the exact kind of inference GH-1066 removes. The
+// `--since` date guard is what actually keeps this specific 2026-08 batch
+// out of an unscoped sweep — proven below — and is the mechanism the issue
+// titles "No domain OR date guard" (bullet 2): either guard protecting a
+// given row is sufficient; this batch is protected by the date guard.
+fn gh1066_snapshot_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
+    let (tmp, ledger) = setup_workspace();
+
+    // 2026-08-14/15: a PR-rail closeout batch. Each key is its own
+    // historical `d-NNN` identifier, never revisited under that exact key
+    // except d-033 (below) — so each is alone in its own domain.
+    decide(
+        &ledger,
+        "d-013.final_gate",
+        "task22",
+        "verifier gate per task #22",
+        &[],
+    );
+    decide(
+        &ledger,
+        "d-032.fresh_premerge_gate",
+        "pass",
+        "integration rerun per PRs #459/#460/#461",
+        &[],
+    );
+    decide(
+        &ledger,
+        "d-033.merge_authority",
+        "required",
+        "no merge without explicit delegation, per PR #459",
+        &[],
+    );
+    decide(
+        &ledger,
+        "d-034.merge_authority",
+        "granted",
+        "operator authorized the merge order per PR #459",
+        &[],
+    );
+
+    // 2026-09-02/03: fleet.lane-launch, then the ruling that supersedes the
+    // whole 2026-08 merge-authority regime in substance, never by name.
+    decide(
+        &ledger,
+        "fleet.lane-launch",
+        "profile-a",
+        "per the lane launcher design",
+        &[],
+    );
+    decide(
+        &ledger,
+        "review.auto-merge",
+        "gate-green-merges-by-machine",
+        "Tim: merge authority moves to the gate",
+        &["operator:2026-09-03"],
+    );
+    run(&tmp, &args(Some("review.auto-merge"))).unwrap();
+
+    // 2026-09-06/07: the operator's plain-flow rulings, each cited by date,
+    // and a later decision that only *builds on* them by mentioning them.
+    decide(
+        &ledger,
+        "review.readonly-proof",
+        "watcher-only",
+        "Tim 2026-09-06",
+        &["operator:2026-09-06"],
+    );
+    decide(
+        &ledger,
+        "review.merge-gate",
+        "single-aggregate",
+        "Tim 2026-09-07",
+        &["operator:2026-09-07"],
+    );
+    decide(
+        &ledger,
+        "review.default-path",
+        "watch-first",
+        "Tim 2026-09-07",
+        &["operator:2026-09-07"],
+    );
+    decide(
+        &ledger,
+        "review.watcher",
+        "poll-interval",
+        "Tim 2026-09-07",
+        &["operator:2026-09-07"],
+    );
+    decide(
+        &ledger,
+        "review.shell-branch",
+        "controller-owned",
+        "builds on review.default-path and review.watcher",
+        &[],
+    );
+
+    // The real stopgap the operator recorded once GH-1066 was diagnosed: a
+    // same-key redecision of d-033, so the engine can see it without a fix.
+    decide(
+        &ledger,
+        "d-033.merge_authority",
+        "superseded-by-review.auto-merge",
+        "housekeeping under review.auto-merge and review.merge-gate",
+        &[],
+    );
+
+    (tmp, ledger)
+}
+
+#[test]
+fn gh1066_plain_flow_rulings_ratify_despite_being_named_by_a_later_decision() {
+    let (tmp, ledger) = gh1066_snapshot_ledger();
+    let branch = ledger.head_branch().unwrap();
+    let (candidates, binding) = collect(&ledger, &branch).unwrap();
+    let verdicts = evaluate(&candidates, &binding);
+
+    for key in [
+        "review.readonly-proof",
+        "review.merge-gate",
+        "review.default-path",
+        "review.watcher",
+    ] {
+        let v = verdicts.iter().find(|v| v.key == key).unwrap();
+        assert!(v.is_ratify(), "{key}: {v:?}");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn gh1066_same_key_stopgap_holds_the_original_d033_row() {
+    let (tmp, ledger) = gh1066_snapshot_ledger();
+    let branch = ledger.head_branch().unwrap();
+    let (candidates, binding) = collect(&ledger, &branch).unwrap();
+    let verdicts = evaluate(&candidates, &binding);
+
+    let d033: Vec<_> = verdicts
+        .iter()
+        .filter(|v| v.key == "d-033.merge_authority")
+        .collect();
+    assert_eq!(d033.len(), 2, "two rows share this key: {d033:?}");
+    let held = d033.iter().find(|v| !v.is_ratify()).unwrap();
+    assert!(
+        held.columns().1.starts_with("superseded-by-same-key"),
+        "{held:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn gh1066_since_bound_keeps_the_rail_closeout_batch_out_of_the_sweep() {
+    // The date guard (GH-1066): without a same-key or same-domain signal
+    // available, `--since` is what an operator who knows this batch is
+    // legacy actually uses to keep it out of an unscoped sweep.
+    let (tmp, ledger) = gh1066_snapshot_ledger();
+    let mut a = rule_args(false);
+    a.since = Some("2026-08-20".to_string());
+    run(&tmp, &a).unwrap();
+
+    for key in [
+        "d-013.final_gate",
+        "d-032.fresh_premerge_gate",
+        "d-034.merge_authority",
+    ] {
+        assert!(
+            !is_binding(&ledger, key),
+            "{key} must stay out of a --since-bound sweep"
+        );
+    }
+    assert!(is_binding(&ledger, "review.default-path"));
+    assert!(is_binding(&ledger, "review.watcher"));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn gh1066_without_since_the_rail_closeout_batch_would_have_ratified() {
+    // The negative control for the test above: proves --since is load-
+    // bearing here, not incidental — without it, these PR/task-number
+    // "citations" (real quirk, out of GH-1066's scope) let d-034 through.
+    let (tmp, ledger) = gh1066_snapshot_ledger();
+    run(&tmp, &rule_args(false)).unwrap();
+    assert!(is_binding(&ledger, "d-034.merge_authority"));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── sweep bounding and the unbounded-sweep threshold (GH-1066) ─────────
+
+#[test]
+fn unbounded_sweep_refuses_past_the_threshold_without_yes() {
+    let (tmp, ledger) = setup_workspace();
+    for i in 0..=RATIFY_THRESHOLD {
+        decide(
+            &ledger,
+            &format!("k.item{i}"),
+            "v",
+            &format!("per #{i}"),
+            &[],
+        );
+    }
+    run(&tmp, &rule_args(false)).unwrap();
+    assert!(
+        ratify_events(&ledger).is_empty(),
+        "must refuse and write nothing past the threshold"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn unbounded_sweep_proceeds_past_the_threshold_with_yes() {
+    let (tmp, ledger) = setup_workspace();
+    for i in 0..=RATIFY_THRESHOLD {
+        decide(
+            &ledger,
+            &format!("k.item{i}"),
+            "v",
+            &format!("per #{i}"),
+            &[],
+        );
+    }
+    let mut a = rule_args(false);
+    a.yes = true;
+    run(&tmp, &a).unwrap();
+    assert_eq!(ratify_events(&ledger).len(), RATIFY_THRESHOLD + 1);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn key_bound_sweep_ignores_the_threshold() {
+    let (tmp, ledger) = setup_workspace();
+    for i in 0..=RATIFY_THRESHOLD {
+        decide(
+            &ledger,
+            &format!("k.item{i}"),
+            "v",
+            &format!("per #{i}"),
+            &[],
+        );
+    }
+    let mut a = rule_args(false);
+    a.keys = vec!["k.item0".to_string()];
+    run(&tmp, &a).unwrap();
+    assert_eq!(ratify_events(&ledger).len(), 1);
+    assert!(is_binding(&ledger, "k.item0"));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn well_formed_since_passes_through_unchanged() {
+    // `usage_exit` on the malformed path calls `std::process::exit(2)`
+    // directly (documented in `ratify_exit_codes.rs`) — not a panic, so it
+    // cannot be exercised from an in-process unit test without aborting the
+    // whole test binary. `ratify_exit_codes.rs::malformed_since_exits_2`
+    // covers that path through a spawned binary instead.
+    assert_eq!(validate_since("2026-08-20"), "2026-08-20");
 }
 
 // ── through `edda decide` — these mutate process env, so they take the
@@ -353,6 +690,9 @@ fn ratify_records_separate_event_and_makes_decision_binding() {
             evidence: None,
             by_rule: None,
             dry_run: false,
+            keys: Vec::new(),
+            since: None,
+            yes: false,
             session: None,
         },
     )
@@ -395,6 +735,9 @@ fn ratify_unknown_key_errors() {
             evidence: None,
             by_rule: None,
             dry_run: false,
+            keys: Vec::new(),
+            since: None,
+            yes: false,
             session: None,
         },
     )

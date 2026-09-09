@@ -38,6 +38,11 @@ pub struct Candidate {
     pub ratified: bool,
     /// Ledger insertion order. Only ever compared, never displayed.
     pub order: i64,
+    /// Ledger timestamp (RFC3339), for `--since` bounding (GH-1066). Empty
+    /// when unknown. `evaluate` never reads this field — `--since` filters
+    /// the caller's output (`mod.rs::sweep`), not a verdict here, so an
+    /// empty date never changes what this pure function decides.
+    pub date: String,
 }
 
 /// What the rule decided, and why. The why is not decoration: it is the
@@ -109,28 +114,99 @@ fn verdict_for(c: &Candidate, all: &[Candidate], binding_keys: &BTreeSet<String>
             why: format!("held domain '{prefix}' — operator ratifies these"),
         };
     }
-    if let Some(later) = superseding(c, all) {
+    // Supersession is explicit, never inferred from a mention (GH-1066): a
+    // decision that merely comes up while explaining something else has not
+    // overtaken it. Only two things count as "superseded" now, checked in
+    // this order because same-key is unambiguous and free, and an explicit
+    // marker is still cheaper to trust than reading the domain guard below.
+    if same_key_superseded(c, all) {
         return Outcome::Hold {
-            why: format!("superseded — a later decision '{later}' names it"),
+            why: format!(
+                "superseded-by-same-key — a later decision recorded under '{}' replaces it",
+                c.key
+            ),
+        };
+    }
+    if let Some(newer) = all
+        .iter()
+        .filter(|o| o.order > c.order)
+        .find(|o| names_explicit_supersession(&o.reason, &c.key))
+    {
+        return Outcome::Hold {
+            why: format!("superseded-explicit — '{}' marks it superseded", newer.key),
+        };
+    }
+    // Domain guard (GH-1066): a valid citation is not immunity. A newer,
+    // *binding* ruling in the same governance domain can have overtaken this
+    // one in substance even though it never names it — decision.auto-ratify's
+    // "contradicts no binding decision" clause, approximated the only way
+    // that does not require reading prose.
+    if let Some(later) = domain_superseded_by(c, all) {
+        return Outcome::Hold {
+            why: format!(
+                "older-than-binding-in-domain — '{later}' is binding and newer in domain '{}'",
+                domain_of(&c.key)
+            ),
         };
     }
     match citation(c, binding_keys) {
         Some(citation) => Outcome::Ratify { citation },
         None => Outcome::Hold {
-            why: "no citation — add --cite operator:<when> | issue:#<n> | decision:<key>"
+            why: "no-citation — add --cite operator:<when> | issue:#<n> | decision:<key>"
                 .to_string(),
         },
     }
 }
 
-/// The key of a later decision whose reason names `c`, if any. This is the
-/// soft supersede the ledger's own `supersedes` edge does not catch: a new
-/// decision that explains itself by pointing at an older one has already
-/// overtaken it, whatever its key.
-fn superseding(c: &Candidate, all: &[Candidate]) -> Option<String> {
+/// True when a later decision was recorded under the identical key — the
+/// most explicit supersession there is: nothing needs inferring when the
+/// ledger already carries a newer value for the same key.
+fn same_key_superseded(c: &Candidate, all: &[Candidate]) -> bool {
+    all.iter().any(|o| o.key == c.key && o.order > c.order)
+}
+
+/// Marker tokens this rule reads as an *explicit* supersession claim in a
+/// decision's own reason — never inferred from a mention anywhere in the
+/// prose, only from the target key appearing immediately after one of these
+/// tokens. `supersedes:` is the canonical form this rule writes going
+/// forward (GH-1066 doneWhen); `SUPERSEDES` (bare, all-caps) and `顯式取代`
+/// are phrasings already on the ledger before this rule existed — recognised
+/// so existing decisions need no migration, and never rewritten.
+const SUPERSEDES_MARKERS: [&str; 3] = ["supersedes:", "SUPERSEDES", "顯式取代"];
+
+/// True when `reason` explicitly names `target_key` as superseded: one of
+/// `SUPERSEDES_MARKERS`, immediately followed (after optional separator
+/// whitespace or a colon) by `target_key` at a word boundary. `target_key`
+/// appearing anywhere else in the sentence does not count — that is the
+/// exact shape of the GH-1066 bug this replaces.
+fn names_explicit_supersession(reason: &str, target_key: &str) -> bool {
+    SUPERSEDES_MARKERS.iter().any(|marker| {
+        reason.find(marker).is_some_and(|idx| {
+            let after = reason[idx + marker.len()..].trim_start_matches([' ', ':', '\t', '　']);
+            after.strip_prefix(target_key).is_some_and(|rest| {
+                rest.chars()
+                    .next()
+                    .is_none_or(|ch| !(ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.')))
+            })
+        })
+    })
+}
+
+/// The domain segment of a key: everything before the first `.` — the same
+/// split the ledger uses to populate `decisions.domain`.
+fn domain_of(key: &str) -> &str {
+    key.split('.').next().unwrap_or(key)
+}
+
+/// The key of a later, **binding** decision in the same domain, if any
+/// (GH-1066 domain guard). Only a ratified sibling counts: an unratified
+/// newer decision in the same domain has no more authority than `c` itself
+/// yet, so it cannot be what overtook it.
+fn domain_superseded_by(c: &Candidate, all: &[Candidate]) -> Option<String> {
+    let domain = domain_of(&c.key);
     all.iter()
-        .filter(|o| o.order > c.order && o.key != c.key)
-        .find(|o| o.reason.contains(&c.key))
+        .filter(|o| o.ratified && o.order > c.order && o.key != c.key)
+        .find(|o| domain_of(&o.key) == domain)
         .map(|o| o.key.clone())
 }
 
@@ -206,6 +282,7 @@ mod tests {
             cites: Vec::new(),
             ratified: false,
             order,
+            date: String::new(),
         }
     }
 
@@ -239,14 +316,19 @@ mod tests {
     }
 
     #[test]
-    fn decision_named_by_a_later_reason_is_held() {
+    fn mention_alone_no_longer_holds_it() {
+        // GH-1066: this is the exact shape of the bug. `review.pool`'s
+        // reason names `review.engine` in passing (it builds on it, it does
+        // not replace it), so a later decision *mentioning* an earlier key
+        // must not hold it — only a same-key redecision or an explicit
+        // marker does. `review.engine` has a real citation and nothing
+        // superseded it, so it ratifies.
         let mut old = cand("review.engine", "cited in issue #900", 1);
         old.cites = vec!["issue:#900".to_string()];
         let newer = cand("review.pool", "replaces review.engine after the window", 2);
         let v = evaluate(&[old, newer], &none());
-        let held = v.iter().find(|x| x.key == "review.engine").unwrap();
-        assert!(!held.is_ratify());
-        assert!(held.columns().1.contains("superseded"), "{held:?}");
+        let engine = v.iter().find(|x| x.key == "review.engine").unwrap();
+        assert!(engine.is_ratify(), "{engine:?}");
     }
 
     #[test]
@@ -260,11 +342,163 @@ mod tests {
         assert!(v.iter().find(|x| x.key == "b.two").unwrap().is_ratify());
     }
 
+    // ── same-key supersession (GH-1066) ─────────────────────────────────
+
+    #[test]
+    fn same_key_later_decision_holds_the_older_row() {
+        let mut old = cand("db.engine", "postgres, per #1", 1);
+        old.cites = vec!["issue:#1".to_string()];
+        let mut newer = cand("db.engine", "sqlite instead, embedded is simpler", 2);
+        newer.cites = vec!["issue:#2".to_string()];
+        let v = evaluate(&[old, newer], &none());
+        // Both verdicts share the key "db.engine" here — same-key chains are
+        // exactly the case where key alone cannot disambiguate — so pick out
+        // each side by outcome instead. Both rows carry a valid citation, so
+        // only same-key supersession explains why one is held.
+        assert_eq!(v.len(), 2);
+        let held = v.iter().find(|x| !x.is_ratify()).unwrap();
+        assert!(
+            held.columns().1.starts_with("superseded-by-same-key"),
+            "{held:?}"
+        );
+        assert!(v.iter().any(|x| x.is_ratify()), "{v:?}");
+    }
+
+    #[test]
+    fn newest_row_in_a_same_key_chain_still_reaches_citation() {
+        let old = cand("db.engine", "postgres", 1);
+        let mut newer = cand("db.engine", "sqlite instead", 2);
+        newer.cites = vec!["issue:#2".to_string()];
+        let v = evaluate(&[old, newer], &none());
+        // Two candidates share one key here (mod.rs::collect no longer
+        // dedups before the rule sees them — GH-1066), so `evaluate` returns
+        // two verdicts under the same key; the newest one must ratify.
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().any(|x| x.is_ratify()), "{v:?}");
+        assert!(v.iter().any(|x| !x.is_ratify()), "{v:?}");
+    }
+
+    // ── explicit-marker supersession (GH-1066) ──────────────────────────
+
+    #[test]
+    fn explicit_canonical_marker_holds_the_named_key() {
+        let mut old = cand("review.old-gate", "cited in issue #900", 1);
+        old.cites = vec!["issue:#900".to_string()];
+        let newer = cand(
+            "review.new-gate",
+            "supersedes:review.old-gate — the gate moved to the aggregate check",
+            2,
+        );
+        let v = evaluate(&[old, newer], &none());
+        let held = v.iter().find(|x| x.key == "review.old-gate").unwrap();
+        assert!(!held.is_ratify());
+        assert!(
+            held.columns().1.starts_with("superseded-explicit"),
+            "{held:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_all_caps_supersedes_marker_is_recognized() {
+        // The exact phrasing already on the ledger before this rule existed
+        // (fleet.merge-authority's own reason text): `SUPERSEDES <key>` with
+        // no colon. Recognised, not migrated.
+        let mut old = cand("fleet.old-policy", "per #12", 1);
+        old.cites = vec!["issue:#12".to_string()];
+        let newer = cand(
+            "fleet.new-policy",
+            "SUPERSEDES fleet.old-policy=old-value ONLY in its gate clause",
+            2,
+        );
+        let v = evaluate(&[old, newer], &none());
+        let held = v.iter().find(|x| x.key == "fleet.old-policy").unwrap();
+        assert!(!held.is_ratify());
+        assert!(
+            held.columns().1.starts_with("superseded-explicit"),
+            "{held:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_chinese_explicit_marker_is_recognized() {
+        let mut old = cand("review.old-carrier", "per #7", 1);
+        old.cites = vec!["issue:#7".to_string()];
+        let newer = cand(
+            "review.new-carrier",
+            "顯式取代review.old-carrier，理由如下",
+            2,
+        );
+        let v = evaluate(&[old, newer], &none());
+        let held = v.iter().find(|x| x.key == "review.old-carrier").unwrap();
+        assert!(!held.is_ratify());
+        assert!(
+            held.columns().1.starts_with("superseded-explicit"),
+            "{held:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_marker_key_must_be_a_whole_word_not_a_prefix() {
+        // `review.merge-gate` must not be caught by a marker that actually
+        // names the longer key `review.merge-gate-v2` — the whole point of
+        // GH-1066 is that a partial textual match never counts as explicit.
+        let mut short = cand("review.merge-gate", "per #55", 1);
+        short.cites = vec!["issue:#55".to_string()];
+        let newer = cand(
+            "review.merge-gate-v2",
+            "supersedes:review.merge-gate-v2 — restates the v1 record",
+            2,
+        );
+        let v = evaluate(&[short, newer], &none());
+        let short_verdict = v.iter().find(|x| x.key == "review.merge-gate").unwrap();
+        assert!(short_verdict.is_ratify(), "{short_verdict:?}");
+    }
+
+    // ── domain guard (GH-1066) ───────────────────────────────────────────
+
+    #[test]
+    fn domain_guard_holds_older_candidate_behind_a_later_binding_sibling() {
+        let mut old = cand("review.legacy-gate", "per #100", 1);
+        old.cites = vec!["issue:#100".to_string()];
+        let mut newer = cand("review.auto-merge", "gate is now mechanical, per Tim", 2);
+        newer.ratified = true;
+        let v = evaluate(&[old, newer], &none());
+        let held = v.iter().find(|x| x.key == "review.legacy-gate").unwrap();
+        assert!(!held.is_ratify());
+        assert!(
+            held.columns().1.starts_with("older-than-binding-in-domain"),
+            "{held:?}"
+        );
+    }
+
+    #[test]
+    fn domain_guard_does_not_cross_domains() {
+        let mut old = cand("fleet.legacy-gate", "per #100", 1);
+        old.cites = vec!["issue:#100".to_string()];
+        let mut newer = cand("review.auto-merge", "gate is now mechanical", 2);
+        newer.ratified = true;
+        let v = evaluate(&[old, newer], &none());
+        let verdict = v.iter().find(|x| x.key == "fleet.legacy-gate").unwrap();
+        assert!(verdict.is_ratify(), "{verdict:?}");
+    }
+
+    #[test]
+    fn domain_guard_requires_the_sibling_to_be_binding_not_merely_newer() {
+        // An unratified newer decision in the same domain has no more
+        // authority than the candidate itself — it must not hold it.
+        let mut old = cand("review.legacy-gate", "per #100", 1);
+        old.cites = vec!["issue:#100".to_string()];
+        let newer = cand("review.auto-merge", "gate is now mechanical", 2); // not ratified
+        let v = evaluate(&[old, newer], &none());
+        let verdict = v.iter().find(|x| x.key == "review.legacy-gate").unwrap();
+        assert!(verdict.is_ratify(), "{verdict:?}");
+    }
+
     #[test]
     fn uncited_decision_is_held() {
         let v = evaluate(&[cand("cache.ttl", "seems about right", 1)], &none());
         assert!(!v[0].is_ratify());
-        assert!(v[0].columns().1.contains("no citation"));
+        assert!(v[0].columns().1.contains("no-citation"));
     }
 
     #[test]
