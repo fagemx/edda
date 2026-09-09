@@ -443,15 +443,21 @@ imposed on every project.
    never merges its own PR.
 9. **Merge follows the recorded rule gate, not a role's own action**
    (`review.auto-merge`, `review.merge-gate`, `docs/fleet/rules.md` R6): the
-   LGTM-pinned SHA equals current head, P0=0 and P1=0, `CI Gate` (ruleset
+   LGTM-pinned SHA equals current head, P0=0 and P1=0, no other non-LGTM
+   verdict stands on that SHA (the union rule — GH-1057, GH-742; PRs #1055
+   and #570 both merged over exactly this hole), `CI Gate` (ruleset
    18852689's only required status check; `bypass_actors` is empty) is
    green, and the window between the reviewed SHA and current `main` is
-   empty. Any session may execute it once those hold (idempotent);
-   `Independent Review` is advisory evidence `merge-reviewed-pr.sh` checks,
-   not a ruleset-required status. The merging session records the
-   empty-window check in the PR — `git diff <reviewed-sha>..origin/main`
-   over the changed paths, or the squash-vs-diff form `fleet.lgtm-merges`
-   documents when `main` moved those paths independently.
+   empty. Any session may execute it once those hold (idempotent).
+   `Independent Review` is the union rule's machine form (`docs/fleet/rules.md`
+   R18, written by `edda review deliver`) — advisory evidence
+   `merge-reviewed-pr.sh` checks and refuses on, not a ruleset-required
+   status; only an **authoritative** LGTM counts toward it, since a glm
+   SHADOW round is not a verdict, joins no union, and never merges anything
+   (`fleet.lgtm-merges`). The merging session records the empty-window check
+   in the PR — `git diff <reviewed-sha>..origin/main` over the changed
+   paths, or the squash-vs-diff form `fleet.lgtm-merges` documents when
+   `main` moved those paths independently.
 
 Internal verifier reports, task receipts, and CI do not replace PR comments.
 
