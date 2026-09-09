@@ -369,29 +369,52 @@ fn mention_alone_does_not_hold_it_through_the_cli() {
 // Reconstructs the shape of the real 2026-09-07 `--by-rule cited-authority
 // --dry-run` sweep the issue reports (176 rows, 97 ratify / 79 hold): five
 // real, plain-flow rulings the old rule held only because a later decision
-// happened to name them while building on them, and four real 2026-08
-// rail-closeout entries (`d-013`..`d-034`) that a blind sweep would have
-// re-ratified because nothing named them, even though a later, binding
-// ruling (`review.auto-merge`) had already overtaken the whole merge-
-// authority area in substance. Keys, relative order, and citations are
-// drawn from the real ledger (verified read-only against this project's own
+// happened to name them while building on or referencing them, and four
+// real 2026-08 rail-closeout entries (`d-013`..`d-034`) that an *unbounded*
+// sweep still ratifies today. Keys, relative order, and citations are drawn
+// from the real ledger (verified read-only against this project's own
 // `.edda` while diagnosing GH-1066, before any code changed); reasons are
-// paraphrased, not quoted verbatim.
+// paraphrased, not quoted verbatim — and two of the five plain-flow reasons
+// below are edited from that paraphrase to *name* the key they are built to
+// trip (see the per-decision comments): a paraphrase that happened to drop
+// the name would prove nothing about the bug this fixture exists to catch.
 //
-// One thing this fixture does *not* claim: that the four `d-NNN.*` keys
-// share a domain with `review.auto-merge`, or with each other. Each `d-NNN`
-// key is its own historical identifier — a `d-032` decision and a `d-034`
-// decision are never in the same domain by construction, the same way
-// `d-032` is never in the same domain as `review.*`. The domain guard
-// (proven separately above, and via `four_case_ledger`'s case 3) cannot
-// mechanically connect them without inferring a relationship the ledger
-// never recorded, which is the exact kind of inference GH-1066 removes. The
-// `--since` date guard is what actually keeps this specific 2026-08 batch
-// out of an unscoped sweep — proven below — and is the mechanism the issue
-// titles "No domain OR date guard" (bullet 2): either guard protecting a
-// given row is sufficient; this batch is protected by the date guard. That
-// guard only works if the four rows genuinely carry an old date, so they are
-// stamped via `decide_at` rather than `decide` (which would record "now").
+// Controller amendment to GH-1066 doneWhen bullet 5 (PR #1098 Round 1,
+// 2026-09-09 — see the issue's newest comment): the original bullet also
+// asked the four `d-NNN.*` rows to become `hold: older-than-binding-in-
+// domain`. That is mechanically impossible and was withdrawn —
+// `extract_domain` is `key.split('.').next()`, so `d-033` and `review`
+// share no domain, and nothing in this fixture claims otherwise.
+// `review.auto-merge`'s ratification does *not* domain-guard the four rows
+// below; its role here is limited to (a) being the later, binding decision
+// this file's own domain-guard shape is modeled on (mirrored, on a
+// genuinely shared domain, by the `fleet.`-domain pair in `rule.rs`), and
+// (b) naming `fleet.lane-launch` in its own reason — this fixture's
+// mention-inference trip for that key.
+//
+// The amended bullet is outcome-oriented for the four rows instead: an
+// unbounded sweep must not silently ratify them.
+// `gh1066_without_since_the_rail_closeout_batch_would_have_ratified` below
+// proves the residual honestly — they *do* ratify unbounded, because each
+// row's own reason happens to carry a PR/task number the reason-fallback
+// citation reads (a real quirk, out of GH-1066's scope) — and
+// `gh1066_since_bound_keeps_the_rail_closeout_batch_out_of_the_sweep` proves
+// `--since` is what keeps them out. `unbounded_sweep_refuses_past_the_
+// threshold_without_yes`, elsewhere in this file, is the other accepted
+// half: the real table's 97 ratifies exceed the default cap of 20, so a
+// truly unscoped sweep refuses and prints the table rather than writing
+// silently, even without `--since`. That guard only works if the four rows
+// genuinely carry an old date, so they are stamped via `decide_at` rather
+// than `decide` (which would record "now").
+//
+// The domain guard itself is proven on keys that genuinely share a domain —
+// not on this fixture's cross-domain `d-NNN`/`review` pairing — by four
+// unit tests in `rule.rs`: `domain_guard_holds_older_candidate_behind_a_
+// later_binding_sibling` / `domain_guard_requires_the_sibling_to_be_
+// binding_not_merely_newer` (domain `review`), and their fleet-domain
+// counterparts `domain_guard_holds_older_fleet_candidate_behind_a_later_
+// binding_fleet_sibling` / `domain_guard_requires_the_fleet_sibling_to_be_
+// binding_not_merely_newer`.
 fn gh1066_snapshot_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
     let (tmp, ledger) = setup_workspace();
 
@@ -431,20 +454,30 @@ fn gh1066_snapshot_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
         Some("2026-08-15T09:00:00Z"),
     );
 
-    // 2026-09-02/03: fleet.lane-launch, then the ruling that supersedes the
-    // whole 2026-08 merge-authority regime in substance, never by name.
+    // 2026-09-02/03: fleet.lane-launch, then the ruling that follows it.
+    // `fleet.lane-launch` carries a real citation, so under the fixed
+    // engine it ratifies on its own citation once mention alone can no
+    // longer hold it. Before this fix (Round 1 P0-2) it carried no
+    // citation at all, held as `no-citation` regardless of the bug, and
+    // was silently left out of the acceptance assertion below.
     decide(
         &ledger,
         "fleet.lane-launch",
         "profile-a",
         "per the lane launcher design",
-        &[],
+        &["operator:2026-09-02"],
     );
+    // Reason names `fleet.lane-launch` (paraphrased, not the real wording)
+    // — this fixture's mention-inference trip for that key: the pre-
+    // GH-1066 rule held anything a later reason merely named, so without
+    // this mention the fifth key would prove nothing about the bug. This
+    // ratification does not, and is not claimed to, domain-guard the four
+    // `d-NNN.*` rows above — see the file-level comment.
     decide(
         &ledger,
         "review.auto-merge",
         "gate-green-merges-by-machine",
-        "Tim: merge authority moves to the gate",
+        "Tim: merge authority moves to the gate, keeping fleet.lane-launch's rollout order",
         &["operator:2026-09-03"],
     );
     run(&tmp, &args(Some("review.auto-merge"))).unwrap();
@@ -479,11 +512,15 @@ fn gh1066_snapshot_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
         "Tim 2026-09-07",
         &["operator:2026-09-07"],
     );
+    // Reason now names all four plain-flow keys above (paraphrased): the
+    // fixture must trip the old mention-inference bug for all four, not
+    // only two, or two of the four assertions below pass identically on
+    // the unfixed engine (Round 1 P0-2).
     decide(
         &ledger,
         "review.shell-branch",
         "controller-owned",
-        "builds on review.default-path and review.watcher",
+        "builds on review.readonly-proof, review.merge-gate, review.default-path and review.watcher",
         &[],
     );
 
@@ -492,6 +529,15 @@ fn gh1066_snapshot_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
 
 #[test]
 fn gh1066_plain_flow_rulings_ratify_despite_being_named_by_a_later_decision() {
+    // All five held keys the issue reports (bullet 5, controller-amended
+    // 2026-09-09): each is named by a later decision's reason above, which
+    // the pre-GH-1066 rule alone would have held (see PR #1098 Round 2's
+    // Review Response for the scratch-copy proof: reverting just that
+    // inference turns every assertion below red). Asserting all five, not
+    // a subset, is the Round 1 P0-2 fix — two of the previous four
+    // assertions passed identically on the unfixed engine because nothing
+    // actually named them, and the fifth key was silently omitted from
+    // both the fixture's citation and this test.
     let (tmp, ledger) = gh1066_snapshot_ledger();
     let branch = ledger.head_branch().unwrap();
     let (candidates, binding) = collect(&ledger, &branch).unwrap();
@@ -502,6 +548,7 @@ fn gh1066_plain_flow_rulings_ratify_despite_being_named_by_a_later_decision() {
         "review.merge-gate",
         "review.default-path",
         "review.watcher",
+        "fleet.lane-launch",
     ] {
         let v = verdicts.iter().find(|v| v.key == key).unwrap();
         assert!(v.is_ratify(), "{key}: {v:?}");
