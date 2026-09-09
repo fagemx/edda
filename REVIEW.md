@@ -128,7 +128,7 @@ own linkage:
 ISSUES=$(gh pr view "$N" --json body --jq .body \
   | awk 'tolower($0) ~ /^issues?[[:space:]]*:/' | grep -Eo '#[0-9]+' | tr -d '#' | sort -u)
 for i in $ISSUES; do gh issue view "$i" --json body --jq .body \
-  | awk '/^## doneWhen/{f=1;next} /^## /{f=0} f'; done
+  | awk '/^## /{h=tolower($0);gsub(/[^a-z]/,"",h);f=(h=="donewhen")?1:0;next} f'; done
 ```
 # review-spec:check-end
 
