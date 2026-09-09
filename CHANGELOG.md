@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`fleet reclaim-merged` executor** — reclaims merged lane worktrees and local/remote branches with dry-run-first receipts and fail-closed remote verification (GH-1009, #1091)
+- **Merged-lane cleanup executor** — `scripts/fleet/reclaim-merged.sh` reclaims merged lane worktrees and local/remote branches with dry-run-first receipts and fail-closed remote verification (GH-1009, #1091)
 
 ### Changed
 
