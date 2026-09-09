@@ -580,16 +580,28 @@ enum MirrorEncoding {
     Escaped,
 }
 
-/// PR #1017 introduced escaping and the required Scope/Authority lines in
-/// the same writer change. Those lines are therefore the existing format
-/// discriminator for generated domain mirrors; a partial or mixed file is
-/// ambiguous and must fail closed instead of selecting a lossy decoder.
+/// Return the content of an exact backtick-wrapped mirror heading. Once a
+/// structural prefix appears, a missing wrapper or empty value is malformed,
+/// not prose that the encoding detector and parser may interpret differently.
+fn mirror_heading<'a>(line: &'a str, prefix: &str) -> anyhow::Result<Option<&'a str>> {
+    let Some(rest) = line.strip_prefix(prefix) else {
+        return Ok(None);
+    };
+    let value = rest
+        .strip_suffix('`')
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("malformed mirror heading: {line}"))?;
+    Ok(Some(value))
+}
+
+/// PR #1017 introduced escaping and required Scope/Authority lines in the
+/// same writer change. Partial or mixed generated shapes fail closed.
 fn detect_mirror_encoding(text: &str) -> anyhow::Result<MirrorEncoding> {
     let mut detected = None;
     let mut section = None;
 
     for line in text.lines() {
-        if line.starts_with("## `") {
+        if mirror_heading(line, "## `")?.is_some() {
             if let Some((scope, authority)) = section.replace((false, false)) {
                 record_section_encoding(scope, authority, &mut detected)?;
             }
@@ -634,22 +646,17 @@ fn parse_domain_markdown(file_domain: &str, text: &str) -> anyhow::Result<Vec<Mi
     let mut current: Option<MirrorDecision> = None;
 
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# Domain: `") {
-            header_domain = rest
-                .strip_suffix('`')
-                .map(|value| decode_mirror_field(value, encoding));
+        if let Some(domain) = mirror_heading(line, "# Domain: `")? {
+            header_domain = Some(decode_mirror_field(domain, encoding));
             continue;
         }
-        if let Some(rest) = line.strip_prefix("## `") {
+        if let Some(key) = mirror_heading(line, "## `")? {
             if let Some(done) = current.take() {
                 finish_mirror_decision(done, &mut out)?;
             }
             // Trim before decoding, never after: decoding first can produce a
             // trailing newline that `trim` would then eat.
-            let key = decode_mirror_field(rest.strip_suffix('`').unwrap_or(rest).trim(), encoding);
-            if key.is_empty() {
-                continue;
-            }
+            let key = decode_mirror_field(key.trim(), encoding);
             let domain = header_domain
                 .clone()
                 .unwrap_or_else(|| file_domain.to_string());
