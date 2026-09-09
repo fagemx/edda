@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Review diff and shell parsing** — content checks use three-dot PR ranges, and shell-parse evidence reads reviewed blobs without depending on working-tree file presence (GH-1003, GH-992, #1097)
 - **doneWhen parsing** accepts the documented spacing variants across issue/spec matchers (GH-1056, #1089)
 - **`edda review deliver` read path** has an argv-level regression guard and validates PR-vs-issue identity before reducing comments (GH-1079, #1086)
+- **CI test reliability** — verify-contract assertions match Edda's authored success marker instead of random temporary-path text (GH-1033, #1110), and fake-Codex reconciliation tests use event synchronization instead of load-sensitive renewal timing (GH-1078, GH-1031, #1112)
 
 ## [0.6.0] - 2026-09-09
 
