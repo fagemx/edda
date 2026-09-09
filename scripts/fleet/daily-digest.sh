@@ -163,6 +163,20 @@ open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit "$open_pr_limit"
 # takes the same failure path as a gh failure below. GH_OPEN_JSON is cleared
 # for the subprocess so a test fixture written for this script's own
 # post-jq `gh pr list` output is not re-parsed as raw JSON by the drift check.
+#
+# GH-993: verdict-drift.sh may now also append `orphan-response=Round-<N>`
+# — a Review Response answering a round that was never posted (the failure
+# #974/#976/#980/#981 shipped: a completed review whose report reached no
+# one but the implementer's answer to it). No parsing change was needed
+# here for it: it is one more trailing token on the same line, and the awk
+# pass below already forwards every field past the state ($5..$NF)
+# verbatim into the digest row. This digest still only REPORTS — it has
+# always captured drift_rc without blocking on it, by design, since GH-765:
+# a digest that refused to post because the fleet was imperfect would be
+# less useful than the report itself. The caller that now BLOCKS on this
+# same check is scripts/merge-reviewed-pr.sh, run before any --check or
+# --merge; see the comment above its own call for why that entrypoint and
+# not this one.
 drift_out="$tmp/drift.txt"
 drift_rc=0
 GH_OPEN_JSON= EDDA_OPEN_PR_LIMIT="$open_pr_limit" sh "$self_dir/verdict-drift.sh" >"$drift_out" 2>"$tmp/drift.err" || drift_rc=$?

@@ -184,4 +184,56 @@ grep -q 'hit its limit' "$tmp/err" ||
 echo "PASS 11"
 unset GH_ARGV_LOG
 
+# --- case 12: an orphan Review Response holds the PR (GH-993) ------------------
+# The observed defect, as a fixture: PRs #974/#976/#980/#981 each carried a
+# `## Review Response: Round 1` and no `## Code Review: Round 1` at all —
+# real body captured 2026-09-06T06:19:40Z via `gh api .../issues/974/comments`.
+SHA7=7777777777777777777777777777777777777777
+printf '[{"number":12,"headRefOid":"%s","baseRefName":"main"}]\n' "$SHA7" >"$tmp/prs.json"
+printf '{"comments":[{"body":"## Review Response: Round 1\\n\\nNew head: `%s`\\n\\n### f1 — fixed"}]}\n' "$SHA7" >"$tmp/comments-12.json"
+run_drift
+expect 12 1 "#12 777777777777 main no verdict on head orphan-response=Round-1"
+
+# --- case 13: a response answering a round that was really posted is clean ----
+# Ordinary Changes-Requested flow: Round 1 posted, pinned to head, the
+# implementer answers it. No orphan annotation. (The base state itself does
+# not hold the PR here — see the existing "else" branch above: a head
+# verdict that resolves Changes Requested is a visible signal, not drift.)
+SHA8=8888888888888888888888888888888888888888
+printf '[{"number":13,"headRefOid":"%s","baseRefName":"main"}]\n' "$SHA8" >"$tmp/prs.json"
+printf '{"comments":[{"body":"## Code Review: Round 1 — PR #13 @ %s\\n\\n### Verdict\\nChanges Requested, P0=0, P1=1"},{"body":"## Review Response: Round 1\\n\\nNew head: unchanged"}]}\n' "$SHA8" >"$tmp/comments-13.json"
+run_drift
+expect 13 0 "#13 888888888888 main Changes Requested"
+
+# --- case 14: the #974 repair shape — an old orphan does not re-trigger -------
+# Round 1's response is answered by nothing, permanently (the repair chosen
+# for #974/#976/#980/#981 never backfills a Round 1 Code Review — it jumps
+# straight to Round 2, each recording that Round 1's report is absent). Only
+# the NEWEST response is judged, and it is Round 2's, which IS paired — so a
+# PR that recovered this way must read clean, or this check would have
+# permanently blocked the very PRs GH-993's own repair produced. Sequence
+# mirrors the real PR #974 comment order exactly: Response 1, Review 2,
+# Response 2, Review 3 (LGTM, pinned to head).
+SHA9=9999999999999999999999999999999999999999
+SHAMID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+printf '[{"number":14,"headRefOid":"%s","baseRefName":"main"}]\n' "$SHA9" >"$tmp/prs.json"
+{
+    printf '{"comments":['
+    printf '{"body":"## Review Response: Round 1\\n\\nNew head: %s"},' "$SHAMID"
+    printf '{"body":"## Code Review: Round 2 — PR #14 @ %s\\n\\n### Verdict\\nChanges Requested, P0=0, P1=1"},' "$SHAMID"
+    printf '{"body":"## Review Response: Round 2\\n\\nNew head: %s"},' "$SHA9"
+    printf '{"body":"## Code Review: Round 3 — PR #14 @ %s\\n\\n### Verdict\\nLGTM (P0=0, P1=0)"}' "$SHA9"
+    printf ']}\n'
+} >"$tmp/comments-14.json"
+run_drift
+expect 14 0 "#14 999999999999 main LGTM"
+
+# --- case 15: a Review Response heading not on the first line is not a --------
+# trigger, symmetric with case 6's identical rule for Code Review headings.
+SHA10=cccccccccccccccccccccccccccccccccccccccc
+printf '[{"number":15,"headRefOid":"%s","baseRefName":"main"}]\n' "$SHA10" >"$tmp/prs.json"
+printf '{"comments":[{"body":"note first\\n## Review Response: Round 1\\n\\nignored"}]}\n' >"$tmp/comments-15.json"
+run_drift
+expect 15 1 "#15 cccccccccccc main no verdict on head"
+
 echo "verdict-drift fixtures passed"
