@@ -44,16 +44,53 @@ HEAD_SHA=aaaaaaaabbbbbbbbccccccccdddddddd11112222
 
 # ── stubs ────────────────────────────────────────────────────────────
 #
-# `gh` answers exactly the three reads the script makes, off fixture files, and
+# `gh` answers exactly the reads the script makes, off fixture files, and
 # records every call so a case can prove what was and was not reached. Anything
 # else is a hard error rather than a silent success: a stub that shrugs at an
 # unexpected call turns a wiring regression into a green test.
+#
+# GH-993 adds two more calls, made by the verdict-drift.sh subprocess the
+# script now runs before anything else: `pr list` (the open-PR enumeration)
+# and a second, differently-shaped `pr view --json comments` (per-PR
+# comments — distinguished from the script's own `pr view --json
+# headRefOid,state` by that flag, since both start with the same two argv
+# words). Both apply the caller's real `--jq` filter via real jq, the way
+# scripts/fleet/test-verdict-drift.sh's stub already does, so the R23/R993
+# regexes in verdict-drift.sh are exercised, not assumed. Unset
+# STUB_DRIFT_PRS defaults `pr list` to `[]` (zero open PRs) so cases 1-5,
+# which predate GH-993 and set no drift fixture, see a vacuously clean
+# fleet and are unaffected; unset STUB_DRIFT_COMMENTS defaults a drift
+# `pr view` to empty comments (no verdict — the not-ready shape).
 
 cat >"$work/bin/gh" <<'STUB'
 #!/bin/sh
 printf 'gh %s\n' "$*" >>"$GH_CALLS"
+jqfilter=
+prevarg=
+for a in "$@"; do
+    [ "$prevarg" = "--jq" ] && jqfilter=$a
+    prevarg=$a
+done
 case "${1:-} ${2:-}" in
-    "pr view")   printf '%s\tOPEN\n' "$STUB_HEAD" ;;
+    "pr view")
+        case "$*" in
+            *"--json comments"*)
+                src=${STUB_DRIFT_COMMENTS:-}
+                if [ -n "$src" ] && [ -f "$src" ]; then jq -r "$jqfilter" <"$src"
+                else printf '{"comments":[]}\n' | jq -r "$jqfilter"; fi
+                ;;
+            *) printf '%s\tOPEN\n' "$STUB_HEAD" ;;
+        esac
+        ;;
+    "pr list")
+        if [ "${STUB_DRIFT_LIST_FAIL:-0}" = 1 ]; then
+            echo "gh stub: simulated pr list failure" >&2
+            exit 1
+        fi
+        src=${STUB_DRIFT_PRS:-}
+        if [ -n "$src" ] && [ -f "$src" ]; then jq -r "$jqfilter" <"$src"
+        else printf '[]\n' | jq -r "$jqfilter"; fi
+        ;;
     "api --paginate") cat "$STUB_COMMENTS" ;;
     "pr checks") exit "${STUB_CHECKS_EXIT:-0}" ;;
     *) echo "gh stub: unexpected invocation: $*" >&2; exit 1 ;;
@@ -242,5 +279,86 @@ case $err in
     *warning*) : ;;
     *) fail "case 5: expected a warning on stderr naming the failed write, got: $err" ;;
 esac
+
+# ── case 6: an unrelated open PR with no verdict refuses everything (GH-993) ──
+#
+# The fleet-wide drift gate (scripts/fleet/verdict-drift.sh) now runs before
+# any of the checks above. It is deliberately whole-open-set, not scoped to
+# $PR — the same scope daily-digest.sh already shares with it via
+# EDDA_OPEN_PR_LIMIT — so an unrelated PR's missing verdict blocks this PR's
+# --check/--merge too, and blocks it before the union gate or required
+# checks are even asked.
+
+DRIFT_SHA=dddddddddddddddddddddddddddddddddddddddd
+printf '[{"number":9001,"headRefOid":"%s","baseRefName":"main"}]\n' "$DRIFT_SHA" >"$work/fixtures/drift-dirty-prs.json"
+STUB_DRIFT_PRS=$work/fixtures/drift-dirty-prs.json
+export STUB_DRIFT_PRS
+run_case
+unset STUB_DRIFT_PRS
+[ "$code" -ne 0 ] || fail "case 6: an unrelated PR with no verdict did not block: $out"
+case $err in
+    *verdict-drift*) : ;;
+    *) fail "case 6: expected a verdict-drift refusal, got: $err" ;;
+esac
+if grep -q 'api --paginate' "$GH_CALLS"; then
+    fail "case 6: the union gate was reached after drift already refused: $(cat "$GH_CALLS")"
+fi
+if grep -q 'pr checks' "$GH_CALLS"; then
+    fail "case 6: required checks were queried after drift already refused: $(cat "$GH_CALLS")"
+fi
+
+# ── case 7: verdict-drift.sh itself failing to read also refuses (GH-993) ──
+#
+# The fail-closed proof the issue requires: not only "drift was found"
+# (case 6) but "the check that looks for drift could not even run" must
+# block too — exit 2, not only exit 1 — or a broken read would wave every
+# merge through clean.
+
+STUB_DRIFT_LIST_FAIL=1
+export STUB_DRIFT_LIST_FAIL
+run_case
+unset STUB_DRIFT_LIST_FAIL
+[ "$code" -ne 0 ] || fail "case 7: a failed drift read did not block: $out"
+case $err in
+    *verdict-drift*) : ;;
+    *) fail "case 7: expected a verdict-drift refusal, got: $err" ;;
+esac
+if grep -q 'api --paginate' "$GH_CALLS"; then
+    fail "case 7: the union gate was reached after the drift read failed: $(cat "$GH_CALLS")"
+fi
+
+# ── case 8: a genuinely clean, non-vacuous drift state does not block ──────
+#
+# Cases 1-5 all run under the drift gate's vacuous default (zero open PRs
+# in STUB_DRIFT_PRS) — clean, but the empty-set kind of clean the issue's
+# own doneWhen calls out as needing a real fixture instead. This is that
+# fixture: one populated, healthy open PR, distinct from $PR itself, with a
+# real LGTM pinned to its head. The accept path stays byte-identical.
+#
+# `authorAssociation":"OWNER"` is required on this comment since Round 1
+# review's P1 fix: verdict-drift.sh now trusts only OWNER/MEMBER/
+# COLLABORATOR comments (scripts/fleet/verdict-drift.sh), mirroring the
+# union gate's own filter five lines below in this script. The trust-filter
+# logic itself is unit-tested in scripts/fleet/test-verdict-drift.sh (cases
+# 16-18); this fixture only needs to stay trusted so this wiring case keeps
+# proving what it always proved.
+
+OTHER_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+printf '[{"number":9002,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$OTHER_SHA" >"$work/fixtures/drift-clean-prs.json"
+sed "s/@SHA@/$OTHER_SHA/g" >"$work/fixtures/drift-clean-comments.json" <<'JSON'
+{"comments":[{"body":"## Code Review: Round 1 — PR #9002 @ @SHA@\n\n### Verdict\nLGTM (P0=0, P1=0)","authorAssociation":"OWNER"}]}
+JSON
+STUB_DRIFT_PRS=$work/fixtures/drift-clean-prs.json
+STUB_DRIFT_COMMENTS=$work/fixtures/drift-clean-comments.json
+STUB_COMMENTS=$work/fixtures/lgtm-only.json
+STUB_DELIVER=$work/fixtures/deliver-success.json
+export STUB_DRIFT_PRS STUB_DRIFT_COMMENTS STUB_COMMENTS STUB_DELIVER
+run_case
+unset STUB_DRIFT_PRS STUB_DRIFT_COMMENTS
+[ "$code" -eq 0 ] || fail "case 8: a healthy, non-vacuous open set was refused (exit $code): $err"
+[ "$out" = "review accepted: PR #$PR @ $HEAD_SHA" ] \
+    || fail "case 8: accept output changed: $out"
+grep -qF "pr checks $PR" "$GH_CALLS" \
+    || fail "case 8: --required checks were skipped: $(cat "$GH_CALLS")"
 
 echo "PASS scripts/test-merge-reviewed-pr.sh ($case_no cases)"

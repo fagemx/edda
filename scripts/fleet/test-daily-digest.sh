@@ -272,6 +272,31 @@ limits=$(grep -- '--state open' "$GH_STUB_LOG" | sed -n 's/.*--limit \([0-9]*\).
     || fail "case 3c: digest and verdict-drift enumerate different --limit values: $(printf '%s' "$limits" | tr '\n' ' ')"
 unset GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON
 
+# --- case 3d: an orphan Review Response (GH-993) passes through unchanged -----
+# verdict-drift.sh may append `orphan-response=Round-<N>` to a drift line.
+# This proves the digest needs no parsing change for it: it is only more
+# trailing text on the same line, and the awk pass-through above already
+# forwards $5..$NF verbatim into the 擋住什麼 row.
+#
+# `authorAssociation":"OWNER"` is required since Round 1 review's P1 fix:
+# verdict-drift.sh now trusts only OWNER/MEMBER/COLLABORATOR comments, so an
+# unannotated comment here would read as invisible rather than orphan —
+# see scripts/fleet/test-verdict-drift.sh cases 16-18 for the trust-filter
+# fixtures themselves.
+reset_stubs
+SHA80=8080808080808080808080808080808080808080
+printf '[{"number":80,"title":"Orphan response","mergeStateStatus":"CLEAN","headRefOid":"%s"}]\n' "$SHA80" >"$tmp/open-orphan.json"
+printf '[{"number":80,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$SHA80" >"$tmp/drift-open-orphan.json"
+printf '{"comments":[{"body":"## Review Response: Round 1\\n\\nNew head: %s","authorAssociation":"OWNER"}]}\n' "$SHA80" >"$tmp/drift-comments-orphan.json"
+export GH_OPEN_JSON="$tmp/open-orphan.json"
+export GH_DRIFT_OPEN_JSON="$tmp/drift-open-orphan.json"
+export GH_DRIFT_COMMENTS_JSON="$tmp/drift-comments-orphan.json"
+export EDDA_RECAP_FILE="$RECAP_CANNED"
+out=$(run_digest --dry-run 2>&1) || fail 'case 3d: daily-digest.sh exited non-zero'
+printf '%s\n' "$out" | grep -qF -- '- #80 Orphan response — no verdict on head orphan-response=Round-1' \
+    || fail "case 3d: orphan-response annotation missing from 擋住什麼, got: $(printf '%s' "$out" | grep '#80' || true)"
+unset GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON
+
 # --- case 4: board comment with needs-operator lands under 例外 ----------------
 reset_stubs
 printf 'https://github.com/fagemx/edda/issues/613#issuecomment-1\tstatus header\nhttps://github.com/fagemx/edda/issues/613#issuecomment-1\tneeds-operator: relogin gh on 4090\nhttps://github.com/fagemx/edda/issues/613#issuecomment-1\tother details\n' >"$tmp/board.md"
