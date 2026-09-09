@@ -809,6 +809,57 @@ fn backtick_list_item_ending_in_backtick_comma_space_does_not_corrupt_the_next_i
     );
 }
 
+// The two tests below read a mirror line shaped the way a mirror committed
+// before PR #1017 (`3306c1a`, 2026-09-07) actually looks on disk: that
+// writer applied no escaping at all
+// (`3306c1a^:crates/edda-cli/src/cmd_export.rs:150`,
+// `.map(|p| format!("`{}`", p))`). Hand-constructed as literal string
+// slices below, NOT through `mirror_list`/`mirror_escape` — those two
+// helpers duplicate the *current* writer, which is exactly the writer this
+// input predates. GH-1044 Round 2 (re-derived independently, not copied
+// from the review): see `unescape_field`'s doc comment for the full
+// raw-era-vs-escaped-era argument these two tests pin.
+
+#[test]
+fn backtick_list_reads_a_raw_pre_1017_item_whose_backslash_is_not_at_the_trailing_edge() {
+    // Item 1's raw value is `a\b` — a backslash, but not immediately before
+    // the item's own closing wrapper backtick. The escape-aware split still
+    // finds the genuine `` `,  ` `` delimiter correctly here, and this
+    // particular value even round-trips byte-for-byte (`\b` is not a
+    // recognised escape target, so `unescape_field`'s fallback arm passes
+    // it through unchanged). Contrast with the odd-trailing-run case below,
+    // which this does NOT hold for.
+    let raw_legacy_line = "`a\\b`, `c`";
+    assert_eq!(
+        backtick_list(raw_legacy_line),
+        vec!["a\\b".to_string(), "c".to_string()]
+    );
+}
+
+#[test]
+fn backtick_list_merges_a_raw_pre_1017_item_ending_in_an_odd_backslash_run() {
+    // Known, accepted limitation (GH-1044 Round 2 finding F6) — pinned here
+    // so a future change to this function changes this behavior on
+    // purpose, not by accident. Item 1's raw value is `a\` (a, backslash):
+    // the writer rendered the two items as the 9-byte line `` `a\`, `b` ``.
+    // After the outer strip, `inner = a \ ` , ␣ ` b`. The escape-aware walk
+    // hits the backslash at inner[1] and consumes inner[2] — the item's own
+    // *genuine* closing wrapper — as if it were escaped content, so that
+    // backtick is never tested as delimiter material. No further delimiter
+    // exists in the rest of the line, so both items come back as one,
+    // silently (`split_unescaped_backtick_comma` has no error channel).
+    //
+    // This is not fixable by a cleverer scan: a raw-era single item whose
+    // value is literally `` a`, `b `` renders to the identical bytes
+    // `` `a`, `b` `` that a *current* two-item list `["a", "b"]` also
+    // renders to — no decoder operating on bytes alone can be correct for
+    // both origins of that string. Recovering it needs a mirror
+    // format/version marker (GH-1113), out of GH-1044's own stated scope
+    // (mirror directory layout / `INDEX.md`).
+    let raw_legacy_line = "`a\\`, `b`";
+    assert_eq!(backtick_list(raw_legacy_line), vec!["a`, `b".to_string()]);
+}
+
 #[test]
 fn unescape_field_inverts_escaped_backtick() {
     for original in ["a`b", "`lead", "trail`", "``double``"] {

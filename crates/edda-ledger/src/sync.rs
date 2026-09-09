@@ -758,6 +758,14 @@ fn backtick_list_to_json(s: &str) -> String {
 /// that follows it. Because a plain split is leftmost and non-overlapping,
 /// that false match consumes the real delimiter's opening half too,
 /// corrupting both the item that ends there and the one after it.
+///
+/// Known, accepted limitation (GH-1044 Round 2, not fixable by a cleverer
+/// scan — see [`unescape_field`]'s doc comment for the full argument): a
+/// mirror written before PR #1017 (`3306c1a`, 2026-09-07), whose item
+/// values were never escaped at all, can lose an item *boundary* — not just
+/// value content — when a value ends in an odd-length run of raw
+/// backslashes right before the wrapper. Recovering that needs a mirror
+/// format/version marker; routed as GH-1113.
 fn backtick_list(s: &str) -> Vec<String> {
     let inner = s.strip_prefix('`').unwrap_or(s);
     let inner = inner.strip_suffix('`').unwrap_or(inner);
@@ -781,6 +789,16 @@ fn backtick_list(s: &str) -> Vec<String> {
 /// already stepped over. A fresh backtick not immediately followed by
 /// `` , ` `` is left in place rather than treated as an error, the same
 /// leniency `backtick_list` has always extended to malformed input.
+///
+/// Both guarantees above are scoped to text `escape_field` itself produced.
+/// [`unescape_field`]'s doc comment has the full two-era argument; in short,
+/// the backslash branch is safe from PR #1017 onward (every backslash this
+/// scan meets is already paired) but can eat a genuine wrapper on a
+/// pre-#1017 mirror (GH-1044 Round 2, known, accepted, GH-1113), and a fresh
+/// backtick is only guaranteed genuine for current-writer text — a raw
+/// backtick in *any* older text can still look like delimiter material,
+/// which is GH-1044's original defect, unchanged, on files already written
+/// that way.
 fn split_unescaped_backtick_comma(inner: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0usize;
@@ -807,28 +825,59 @@ fn split_unescaped_backtick_comma(inner: &str) -> Vec<&str> {
 /// and (GH-1044) an escaped backslash followed by a raw backtick never
 /// collapses into an unescaped one either.
 ///
-/// Older mirrors wrote some fields raw. An *unknown* escape is passed through
-/// unchanged (`\p` stays `\p`), so most raw text survives — but this is not
-/// lossless in general: a raw `C:\notes` decodes to `C:` + newline + `otes`,
-/// and a raw `\\` halves. Reachability is narrow (the fields that carried
-/// backslashes in practice — `affected_paths`, tags — were already unescaped
-/// before the encoding was made total), which is why the round trip is
-/// preferred over a version-tagged mirror format. The same argument covers
-/// the new backtick arm, but not because every pre-GH-1044 backslash run has
-/// even length — it doesn't: the pre-fix writer's newline pass
-/// (`.replace('\n', "\\n")`) also emits a single backslash, so a raw `\`
-/// immediately before a raw newline encodes to three backslashes then `n`,
-/// an odd-length run. What actually holds is that this scan is
-/// self-synchronising over the old escape alphabet: every backslash it
-/// meets in pre-GH-1044 text is the first character of either a doubled
-/// backslash (`.replace('\\', "\\\\")`) or a newline escape
-/// (`.replace('\n', "\\n")`), and both are consumed as one unit — so
-/// regardless of the run's length or parity, the scan always lands back on
-/// a fresh, unpaired position immediately after it, never mid-run, and so
-/// never pairs a leftover backslash with a raw backtick that happens to
-/// follow. An escaped-backtick two-char sequence can therefore never appear
-/// by accident in a pre-GH-1044 mirror, only be introduced by this fix's own
-/// writer.
+/// GH-1044 Round 2: "older mirrors" is not one era, and the back-compat
+/// argument below covers only the more recent of the two. `edda export md`
+/// has written mirrors since `f3e5e97` (2026-07-08):
+///
+/// - **Raw era** (`f3e5e97`..`3306c1a^`, up to 2026-09-07, ~2 months): list
+///   items were rendered with **no escaping at all**
+///   (`format!("`{}`", p)` — `3306c1a^:crates/edda-cli/src/cmd_export.rs:150`).
+///   A raw backslash had no structural meaning and could appear singly,
+///   anywhere.
+/// - **Escaped era** (`3306c1a`, PR #1017, onward until this fix):
+///   `escape_field` existed and doubled every backslash and escaped every
+///   newline (`.replace('\\', "\\\\").replace('\n', "\\n")`), but did not
+///   yet escape backtick — the GH-1044 defect this PR closes. Every
+///   backslash this era's writer emits is therefore already paired.
+///
+/// For the escaped era (and the current one, which adds a third,
+/// same-shaped backtick pass), this scan is self-synchronising: every
+/// backslash it meets is the first of a doubled backslash or a newline
+/// escape, both consumed as one unit, so the scan always lands back on a
+/// fresh position after it, never mid-run — a claim about the *backslash*
+/// branch only, not that escaped-era text always round-trips. Neither older
+/// era ever escaped backtick (that is this PR), so a **raw backtick in an
+/// escaped- or raw-era value** is GH-1044's own original defect, unchanged
+/// by this PR, still live on any mirror already written that way — distinct
+/// from, and not fixed or worsened by, anything below.
+///
+/// The raw era has no backslash guarantee at all, and is lossy in two
+/// distinct ways beyond the shared raw-backtick issue above. An *unknown*
+/// escape (this scan's fallback arm) passes through unchanged (`\p` stays
+/// `\p`), so most raw text still survives, but not losslessly:
+///
+/// - **Value content** (already accepted, unchanged by this PR): a raw
+///   `C:\notes` decodes to `C:` + newline + `otes`, and a raw `\\` halves.
+///   Reachability is narrow (the fields that carried backslashes in
+///   practice — `affected_paths`, tags — were already unescaped before the
+///   encoding was made total), which is why the round trip is preferred
+///   over a version-tagged mirror format.
+/// - **List structure** (new with this PR's escape-aware split,
+///   [`split_unescaped_backtick_comma`] — base and the pre-Round-1 code
+///   here did not have this failure mode): when a raw-era value ends in an
+///   odd-length run of backslashes immediately before that item's own
+///   closing wrapper backtick, the split consumes the wrapper as escaped
+///   content and the two items either side of it silently merge. Provably
+///   irreducible from the bytes alone, not a bug fixable by a cleverer
+///   scan: a raw-era single item whose value is literally `` a`, `b `` and
+///   a current two-item list `["a", "b"]` render to the identical bytes
+///   `` `a`, `b` `` — no decoder operating on bytes alone can be correct
+///   for both origins of that string. A format/version marker would settle
+///   it; out of GH-1044's own stated scope (mirror directory layout /
+///   `INDEX.md`), routed as GH-1113. Accepted and pinned, not silently
+///   introduced: see
+///   `backtick_list_merges_a_raw_pre_1017_item_ending_in_an_odd_backslash_run`
+///   in `sync/tests.rs`.
 fn unescape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
