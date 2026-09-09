@@ -8,6 +8,16 @@ use edda_ledger::Ledger;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// The exact success marker `cmd_verify::execute` prints on stdout for an
+/// intact chain (`crates/edda-cli/src/cmd_verify.rs`, the two `println!`
+/// arms `"ledger chain OK: empty ledger ..."` / `"ledger chain OK: {n}
+/// event(s), last event {id}"`). Negative assertions below must check for
+/// this authored text, never the bare substring `"OK"` — a bare substring
+/// also matches the letter pair inside a `tempfile`-generated temp
+/// directory name (GH-1033, e.g. `.tmpOKfVBd`), which makes the assertion
+/// depend on text the command never wrote.
+const VERIFY_OK_MARKER: &str = "ledger chain OK:";
+
 /// Path to the `edda` binary (`CARGO_BIN_EXE_edda`).
 fn edda_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_edda"))
@@ -159,12 +169,48 @@ fn verify_deleted_ledger_db_exits_2_and_is_not_recreated() {
         "must explain the ledger problem: {report:?}"
     );
     assert!(
-        !report.contains("OK"),
+        !report.contains(VERIFY_OK_MARKER),
         "must not report success for a vanished ledger: {report:?}"
     );
     assert!(
         !repo.path().join(".edda").join("ledger.db").exists(),
         "verify must never recreate the ledger database"
+    );
+}
+
+/// GH-1033 regression: a harness-generated path segment that happens to
+/// contain the letter pair "OK" must never be mistaken for the real
+/// success marker. `tempfile` names directories with random alphanumerics
+/// and did exactly this in the wild — PR #1016 CI hit `.tmpOKfVBd` on
+/// `macos-latest`. A random tempdir name is not reliable to reproduce on
+/// demand, so this test forces the same coupling deterministically by
+/// nesting the workspace under a directory whose name we choose to
+/// contain "OK" — `cmd_verify::execute` embeds that path directly in its
+/// "cannot open ledger at {path}" error text.
+#[test]
+fn verify_deleted_ledger_ok_in_workspace_path_is_not_mistaken_for_success() {
+    let base = tempfile::tempdir().expect("base tempdir");
+    let repo = base.path().join("workspaceOKdir");
+    std::fs::create_dir_all(&repo).expect("create OK-named workspace dir");
+    seeded_ledger(&repo);
+    std::fs::remove_file(repo.join(".edda").join("ledger.db"))
+        .expect("delete ledger.db, keeping .edda/");
+
+    let (code, stdout, stderr) = run_edda(&["verify"], &repo);
+    assert_eq!(
+        code, 2,
+        "missing ledger must exit 2, not rebuild an empty one: {stdout:?} {stderr:?}"
+    );
+    let report = format!("{stdout}{stderr}");
+    assert!(
+        report.contains("OK"),
+        "sanity: the workspace path must actually carry the bare substring \
+         this regression guards against, or the test proves nothing: {report:?}"
+    );
+    assert!(
+        !report.contains(VERIFY_OK_MARKER),
+        "must not report success for a vanished ledger just because its \
+         workspace path contains \"OK\": {report:?}"
     );
 }
 
@@ -293,7 +339,7 @@ fn verify_anchored_workspace_with_unopenable_ledger_exits_2_and_never_reports_ok
     assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
     let report = format!("{stdout}{stderr}");
     assert!(
-        !report.contains("OK"),
+        !report.contains(VERIFY_OK_MARKER),
         "must not report success on an unopenable ledger: {report:?}"
     );
     assert!(
