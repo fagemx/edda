@@ -128,10 +128,11 @@ reviewers in a SINGLE message:
    a new round.
 3. **On Changes Requested:** dispatch a fresh fix sub-agent that loads the
    `issue-action` skill and addresses the blocking findings on the PR's branch.
-   The fix sub-agent is never the reviewer. After it pushes, run the next round
-   on the new full SHA — the same command, because `--pr` resolves the PR's
-   current head every time. Every push invalidates the previous verdict, so a
-   round is only ever pinned to the SHA it read.
+   The fix sub-agent does not double as the reviewer (GATE-01). After it
+   pushes, run the next round on the new full SHA — the same command,
+   because `--pr` resolves the PR's current head every time. Every push
+   invalidates the previous verdict, so a round is only ever pinned to the
+   SHA it read.
 
 **Wait for all reviewers to complete.** Report verdicts.
 

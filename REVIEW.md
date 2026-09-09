@@ -106,9 +106,16 @@ the rule says so and the command is not piped.
 N=<pr-number>
 gh pr view "$N" --json headRefOid,headRefName,title,body,state,isDraft
 SHA=$(gh pr view "$N" --json headRefOid --jq .headRefOid)   # full 40-hex
-gh pr checkout "$N"
+git fetch origin "pull/$N/head:refs/review/pr$N"
 ```
 # review-spec:check-end
+
+Never `gh pr checkout` in a shared checkout (`.claude/CLAUDE.md`'s isolation
+rule) — the private ref above, or a dedicated worktree, is the reviewer's
+tree; §2's `gh pr diff` reads the PR directly and needs no local checkout
+either way. Read-only is proven by capability flags plus a `git status
+--porcelain` before and after (`review.readonly-proof`), never by repurposing
+a checkout other sessions rely on.
 
 The reviewed SHA is the **full** head SHA and it is pinned for the whole round.
 Every push invalidates the previous verdict and requires another round
@@ -535,11 +542,12 @@ git diff "origin/$BASE...$SHA" | grep '^+' \
 **D4 — authority boundary. P0.** A document may not instruct its reader to act
 beyond their role: merging, force-pushing, deleting branches, or skipping
 review. The grep produces candidates; a candidate passes only if the added text
-in the same paragraph names the authority that permits it (operator
-authorisation, or `fleet.merged-artifact-cleanup` for a **merged** PR's branch
-and lane worktree). A candidate with no such caveat is the finding (canary
-`c4-merge-authority-contradiction`; decisions `fleet.merge-authority`,
-`fleet.merged-artifact-cleanup`).
+in the same paragraph names the recorded rule that permits it (the merge
+gate — `docs/fleet/rules.md` R6: current-head LGTM, `CI Gate` green, empty SHA
+window, P0=P1=0 — or `fleet.merged-artifact-cleanup` for a **merged** PR's
+branch and lane worktree). A candidate with no such caveat is the finding
+(canary `c4-merge-authority-contradiction`; decisions `fleet.merge-authority`,
+`review.merge-gate`, `fleet.merged-artifact-cleanup`).
 
 # review-spec:check D4
 ```sh
@@ -556,8 +564,9 @@ scoped and non-duplicative. Judgement — see §6.
 **S1 — a skill may not tell an agent to cross a gate. P0.** Review skills may
 not instruct fixing what they review or merging (GATE-01); worker skills may
 not instruct self-merge. Check the added text against the prohibitions the
-skill itself declares and against `loop` ("Merge still requires explicit
-operator authority").
+skill itself declares and against `loop` ("merge follows the recorded rule
+gate, never a role's own action") — S1's gate-crossing prohibition itself is
+unaffected by who or what executes the merge gate.
 
 # review-spec:check S1
 ```sh
@@ -841,8 +850,10 @@ rather than overwriting it.
 
 ## 8. Step 8 — the verdict
 
-- **P0 = 0 and P1 = 0 → LGTM.** Add `fleet:reviewed`. Stop. Merge is the
-  operator's action, never the reviewer's (`loop`; GATE-01).
+- **P0 = 0 and P1 = 0 → LGTM.** Add `fleet:reviewed`. Stop. Merge belongs to
+  the rule-based merge gate — current-head LGTM, `CI Gate` green, empty SHA
+  window, P0=0/P1=0 (`docs/fleet/rules.md` R6) — not the reviewer's own
+  action (`loop`; GATE-01).
 - **Any P0 or any P1 → Changes Requested.** Post the comment, leave the PR
   open, stop. Fixing is the implementer's round; every `Changes Requested`
   round is answered by a `Review Response: Round N` that names the new full SHA

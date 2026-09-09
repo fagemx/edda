@@ -355,7 +355,7 @@ edda watch                 # real-time TUI: peers, events, decisions
 |---------|-------------|
 | `edda claim` | Declare working scope so peers don't collide |
 | `edda task` | Task rail: create, hand off, and track tasks (`new/start/done/fail/list/show`) |
-| `edda ratify` | Confer operator authority on a decision (recorded ≠ ratified) |
+| `edda ratify` | Bind a decision by rule — citation + `--by-rule cited-authority` (recorded ≠ ratified) |
 | `edda conduct` | Multi-phase plan orchestration with checks and gates |
 | `edda dispatch` | Single-turn agent dispatch (claude / codex / pi) |
 | `edda verdict` | Approve / reject a gated subject, pinned to a git SHA |

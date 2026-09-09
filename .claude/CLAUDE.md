@@ -388,6 +388,19 @@ signature — the controller selects the batch itself (fleet-orchestrate's
 ready-batch selection procedure) without asking the operator for issue
 numbers; the operator intervenes at promote and adjudication.
 
+### Isolation
+
+- **A session that edits works in its own worktree, on its own branch.**
+  This shared checkout stays on `main` — never switch it to a feature
+  branch; a peer session reading it as `main` would otherwise silently see
+  your work-in-progress instead of the branch it expects.
+- **A reviewer never runs `gh pr checkout` in a shared checkout.** Fetch the
+  PR head into a private ref instead — `git fetch origin
+  pull/<N>/head:refs/review/pr<N>` — or review from its own worktree.
+  Read-only is proven by capability flags plus a `git status --porcelain`
+  before and after (`review.readonly-proof`), never by repurposing a
+  checkout other sessions rely on.
+
 ### PR review-fix loop
 
 **How to review is `REVIEW.md` at the repo root — run it top to bottom.** It is
@@ -425,12 +438,43 @@ imposed on every project.
 6. Stop after two non-product/harness-only cycles without useful progress or
    at diminishing returns; classify/route the finding instead of continuing.
 7. The final comment is current-head `LGTM`, P0=0, P1=0, with exact gates.
+8. **The reviewer is a session or subagent other than the implementer**
+   (GATE-01) — a fix sub-agent never reviews its own fix, and an executor
+   never merges its own PR.
+9. **Merge follows the recorded rule gate, not a role's own action**
+   (`review.auto-merge`, `review.merge-gate`, `docs/fleet/rules.md` R6): the
+   LGTM-pinned SHA equals current head, P0=0 and P1=0, no other non-LGTM
+   verdict stands on that SHA (the union rule — GH-1057, GH-742; PRs #1055
+   and #570 both merged over exactly this hole), `CI Gate` (ruleset
+   18852689's only required status check; `bypass_actors` is empty) is
+   green, and the window between the reviewed SHA and current `main` is
+   empty. Any session may execute it once those hold (idempotent).
+   `Independent Review` is the union rule's machine form (`docs/fleet/rules.md`
+   R18, written by `edda review deliver`) — advisory evidence
+   `merge-reviewed-pr.sh` checks and refuses on, not a ruleset-required
+   status; only an **authoritative** LGTM counts toward it, since a glm
+   SHADOW round is not a verdict, joins no union, and never merges anything
+   (`fleet.lgtm-merges`). The merging session records the empty-window check
+   in the PR — `git diff <reviewed-sha>..origin/main` over the changed
+   paths, or the squash-vs-diff form `fleet.lgtm-merges` documents when
+   `main` moved those paths independently.
 
 Internal verifier reports, task receipts, and CI do not replace PR comments.
-Merge still requires explicit operator authority.
 
 For local-only delivery, record the same round/response/verdict fields in the
 strongest durable local carrier; do not invent a PR.
+
+### Review: the plain flow is the default (`review.default-path`)
+
+Any online strong-engine session reviews directly: read the diff, run
+`REVIEW.md` top to bottom, post the §7 verdict on the PR — no watcher lane,
+no review worktree, no full-tree snapshot, and the retired shell (GH-1061,
+`review.shell-branch`) does not come back. LGTM plus the merge gate above
+(item 9) is what merges. An **on-demand independent** round — a third party
+when the implementer is the controller, or any flash-engine round, since the
+shell is what makes flash safe to run — is the three-step mechanism
+(dispatch, self-posted verdict, `edda review deliver` settles the status)
+that `docs/guides/operator-runbook.md` §三 step 5 leaves.
 
 ### Verification cost
 

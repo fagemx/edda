@@ -70,8 +70,9 @@ output as the pack:
   Internal verifier reports do not replace the PR-visible loop. For local-only
   delivery, record the same fields in the strongest durable local carrier; do
   not invent a PR.
-- Worker receipts are execution evidence, not acceptance. Merge only with
-  explicit operator authority.
+- Worker receipts are execution evidence, not acceptance. Merge follows the
+  recorded rule gate — current-head LGTM, P0=0/P1=0, `CI Gate` green, empty
+  SHA window (`docs/fleet/rules.md` R6) — never a role's own action.
 
 ## Repository safety
 
