@@ -441,7 +441,7 @@ imposed on every project.
 8. **The reviewer is a session or subagent other than the implementer**
    (GATE-01) — a fix sub-agent never reviews its own fix, and an executor
    never merges its own PR.
-9. **Merge follows the recorded rule gate, not an operator's action**
+9. **Merge follows the recorded rule gate, not a role's own action**
    (`review.auto-merge`, `review.merge-gate`, `docs/fleet/rules.md` R6): the
    LGTM-pinned SHA equals current head, P0=0 and P1=0, `CI Gate` (ruleset
    18852689's only required status check; `bypass_actors` is empty) is

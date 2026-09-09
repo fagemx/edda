@@ -845,8 +845,8 @@ rather than overwriting it.
 
 - **P0 = 0 and P1 = 0 → LGTM.** Add `fleet:reviewed`. Stop. Merge belongs to
   the rule-based merge gate — current-head LGTM, `CI Gate` green, empty SHA
-  window, P0=0/P1=0 (`docs/fleet/rules.md` R6) — never the reviewer
-  (`loop`; GATE-01).
+  window, P0=0/P1=0 (`docs/fleet/rules.md` R6) — not the reviewer's own
+  action (`loop`; GATE-01).
 - **Any P0 or any P1 → Changes Requested.** Post the comment, leave the PR
   open, stop. Fixing is the implementer's round; every `Changes Requested`
   round is answered by a `Review Response: Round N` that names the new full SHA
