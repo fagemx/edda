@@ -53,6 +53,21 @@ pub struct RatifyArgs {
     /// With --by-rule: print the table without writing anything
     #[arg(long = "dry-run", requires = "by_rule")]
     pub dry_run: bool,
+    /// With --by-rule: only judge these keys (repeatable). Bounds the sweep
+    /// (GH-1066) — with this set, the unbounded-sweep size refusal below
+    /// does not apply.
+    #[arg(long = "key", requires = "by_rule")]
+    pub keys: Vec<String>,
+    /// With --by-rule: only judge decisions recorded on or after this date
+    /// (`YYYY-MM-DD`). Bounds the sweep the same way `--key` does (GH-1066).
+    #[arg(long, requires = "by_rule")]
+    pub since: Option<String>,
+    /// With --by-rule and neither --key nor --since: proceed even though the
+    /// ratify set exceeds the safety threshold (GH-1066). Without it, an
+    /// unbounded sweep that would ratify more than the threshold prints the
+    /// table and counts, and writes nothing.
+    #[arg(long, requires = "by_rule")]
+    pub yes: bool,
     /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
     #[arg(long)]
     pub session: Option<String>,
@@ -156,23 +171,112 @@ fn append_ratify(
     Ok(())
 }
 
+/// Default cap on an unbounded `--by-rule` sweep's ratify count before it
+/// refuses without `--yes` (GH-1066): a sweep nobody scoped is a sweep
+/// nobody dares run, so the default protects against acting on more than a
+/// screenful of decisions sight-unseen. `--key`/`--since` bound the sweep
+/// deliberately, so the threshold does not apply once either is given.
+const RATIFY_THRESHOLD: usize = 20;
+
+/// True when `s` is a real calendar date in `YYYY-MM-DD` form — not merely
+/// shaped like one (PR #1098 Round 1 P2): the original shape-only check
+/// accepted `2026-99-99`. The `--since` comparison itself stays
+/// lexicographic and was never unsafe on a malformed value, but the flag
+/// advertises a date it should actually parse.
+fn is_valid_since_date(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| matches!(i, 4 | 7) || b.is_ascii_digit())
+    {
+        return false;
+    }
+    let Ok(year) = s[0..4].parse::<i32>() else {
+        return false;
+    };
+    let Ok(month) = s[5..7].parse::<u32>() else {
+        return false;
+    };
+    let Ok(day) = s[8..10].parse::<u32>() else {
+        return false;
+    };
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => unreachable!("month already bounded to 1..=12"),
+    };
+    (1..=max_day).contains(&day)
+}
+
+/// `--since <date>` must be a real `YYYY-MM-DD` calendar date: cheap to
+/// check at the boundary, so a typo is a usage error (exit 2) rather than a
+/// silently-wrong comparison.
+fn validate_since(s: &str) -> String {
+    if !is_valid_since_date(s) {
+        usage_exit(&format!(
+            "--since must be a real YYYY-MM-DD date — got '{s}'"
+        ));
+    }
+    s.to_string()
+}
+
 /// `--by-rule <RULE>`: evaluate every active decision on this branch and
 /// print one row per unratified key. `--dry-run` prints the same table and
 /// writes nothing, so the operator can read what the machine is about to do
 /// on their behalf before it does it.
+///
+/// `--key`/`--since` bound *which* verdicts are shown and acted on, not what
+/// the rule sees while deciding: same-key and domain-guard comparisons
+/// (rule.rs) still see every active decision on the branch, so scoping a
+/// sweep can never blind it to an older, still-relevant ruling.
 fn sweep(repo_root: &Path, rule_name: &str, args: &RatifyArgs) -> anyhow::Result<()> {
     if rule_name != RULE_CITED_AUTHORITY {
         usage_exit(&format!(
             "unknown rule '{rule_name}' — known rules: {RULE_CITED_AUTHORITY}"
         ));
     }
+    let since = args.since.as_deref().map(validate_since);
 
     let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_ratify: opening ledger")?;
     let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
 
     let (candidates, binding) = collect(&ledger, &branch)?;
-    let verdicts = evaluate(&candidates, &binding);
+    let dates: HashMap<&str, &str> = candidates
+        .iter()
+        .map(|c| (c.key.as_str(), c.date.as_str()))
+        .collect();
+    let all_verdicts = evaluate(&candidates, &binding);
+
+    let bounded = !args.keys.is_empty() || since.is_some();
+    let verdicts: Vec<Verdict> = all_verdicts
+        .into_iter()
+        .filter(|v| args.keys.is_empty() || args.keys.iter().any(|k| k == &v.key))
+        .filter(|v| {
+            since
+                .as_deref()
+                .is_none_or(|s| dates.get(v.key.as_str()).is_some_and(|d| *d >= s))
+        })
+        .collect();
+
+    let ratify_count = verdicts.iter().filter(|v| v.is_ratify()).count();
+    if !args.dry_run && !bounded && !args.yes && ratify_count > RATIFY_THRESHOLD {
+        print_table(&verdicts, rule_name, true);
+        println!(
+            "refusing: {ratify_count} decisions would ratify unscoped (threshold {RATIFY_THRESHOLD}) — bound with --key/--since, or pass --yes; nothing written."
+        );
+        return Ok(());
+    }
 
     print_table(&verdicts, rule_name, args.dry_run);
 
@@ -244,19 +348,23 @@ fn collect(
             cites: cites_by_event.remove(&d.event_id).unwrap_or_default(),
             ratified: ratified.contains_key(&d.event_id),
             order: ledger.rowid_for_event_id(&d.event_id)?.unwrap_or(0),
+            date: d.ts.clone().unwrap_or_default(),
             key: d.key,
             reason: d.reason,
         });
     }
     candidates.sort_by_key(|c| c.order);
-    // One row per key: `active_decisions` can return more than one active row
-    // for a `(branch, key)` — `Ledger::ratified_decisions_map` groups them for
-    // exactly that reason — and two rows would otherwise write two ratify
-    // events for one key. The later row is the current value, so keep it.
-    let mut seen = BTreeSet::new();
-    candidates.reverse();
-    candidates.retain(|c| seen.insert(c.key.clone()));
-    candidates.reverse();
+    // `active_decisions` never returns two rows for one `(branch, key)`: the
+    // ledger deactivates a key's prior row in the same write that appends a
+    // same-key successor (`UPDATE decisions SET is_active = FALSE ... WHERE
+    // key = ? AND branch = ?`, sqlite_store/events.rs) — a redecided key's
+    // old value is gone from this candidate set before the rule ever runs,
+    // not merely held by it. `evaluate`'s own same-key check
+    // (rule.rs::same_key_superseded) stays correct regardless and is
+    // exercised directly there with hand-built same-key candidates, so it
+    // still guards the pure function itself if a future caller ever feeds it
+    // a candidate set that is not pre-deduplicated this way. Either way, the
+    // write loop below appends at most one ratify event per key.
     Ok((candidates, binding))
 }
 

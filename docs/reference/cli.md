@@ -233,6 +233,9 @@ edda ratify --by-rule <RULE> [--dry-run] [OPTIONS]
 | `--evidence pr#N@SHA` | The merged PR that made this decision binding. The SHA is a full 40-hex commit; an abbreviated one is refused |
 | `--by-rule RULE` | Sweep every active, unratified decision with a named rule. Today: `cited-authority` |
 | `--dry-run` | With `--by-rule`: print the table and write nothing |
+| `--key KEY` | With `--by-rule`: only judge this key (repeatable). Bounds the sweep (GH-1066) — with this set, the unbounded-sweep size refusal below does not apply |
+| `--since DATE` | With `--by-rule`: only judge decisions recorded on or after `DATE` — a real calendar date, `YYYY-MM-DD`; a malformed or impossible one (e.g. `2026-99-99`) exits 2. Bounds the sweep the same way `--key` does (GH-1066) |
+| `--yes` | With `--by-rule`, and neither `--key` nor `--since` given: proceed even though the sweep's ratify count exceeds the safety threshold (20). Without it, an unscoped sweep that would ratify more than the threshold prints the table and refuses, writing nothing (GH-1066) |
 | `--session ID` | Session ID (uses `EDDA_SESSION_ID`; `--session` required when identity is ambiguous) |
 
 Exit codes (`claim-check.exit-codes=0/1/2`): **0** success, including the no-op
@@ -261,8 +264,17 @@ or the word "operator" in its reason. It holds:
 
 - keys under `product.`, `commercial.` and `spend.` — these bind money or
   product promises, and a cited issue is not authority for either;
-- anything a later decision's reason names, which has already been overtaken;
-- anything with no citation at all.
+- a decision superseded by a later one recorded under the identical key
+  (`superseded-by-same-key`);
+- a decision a later reason **explicitly** marks as superseded —
+  `supersedes:<key>`, bare `SUPERSEDES <key>`, or `顯式取代<key>` immediately
+  naming it, never merely mentioning it elsewhere in the prose
+  (`superseded-explicit`; GH-1066 removed the old mention-based inference,
+  which held anything a later reason happened to name);
+- a decision whose governance domain (its key up to the first `.`) has a
+  later ruling that is already binding — `older-than-binding-in-domain`, the
+  GH-1066 domain guard;
+- anything with no citation at all (`no-citation`).
 
 `--dry-run` prints the same table it would act on, so the sweep can be read
 before it runs:
@@ -271,9 +283,24 @@ before it runs:
 key                action  why
 db.engine          ratify  issue:#742
 product.tier       hold    held domain 'product.' — operator ratifies these
-review.engine      hold    superseded — a later decision 'review.pool' names it
-cache.ttl          hold    no citation — add --cite operator:<when> | issue:#<n> | decision:<key>
+review.old-gate    hold    older-than-binding-in-domain — 'review.auto-merge' is binding and newer in domain 'review'
+cache.ttl          hold    no-citation — add --cite operator:<when> | issue:#<n> | decision:<key>
 dry run — would ratify 1, hold 3 (rule: cited-authority); nothing written.
+```
+
+By default the sweep is unscoped: `--by-rule` alone judges every active,
+unratified decision on the branch, and writing more than 20 ratifications
+this way is refused unless `--yes` is also given (GH-1066) — the table above
+still prints so the refusal is never silent. `--key`/`--since` bound *which*
+verdicts are shown and written, without changing what the rule sees while
+judging same-key or domain-guard supersession: an older, still-relevant
+ruling stays visible to the rule even when the sweep's own output is scoped
+away from it.
+
+```bash
+edda ratify --by-rule cited-authority --key db.engine --key review.old-gate
+edda ratify --by-rule cited-authority --since 2026-09-01
+edda ratify --by-rule cited-authority --yes
 ```
 
 Ratification is per decision event, not per key: re-deciding a key resets it to
