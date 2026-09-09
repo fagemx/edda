@@ -736,18 +736,44 @@ fn backtick_list_to_json(s: &str) -> String {
 
 /// `` `a`, `b` `` → `vec!["a", "b"]`, each item unescaped.
 ///
-/// The export escapes every item (`cmd_export::escape_field`), so a tag or a
-/// citation containing a backslash or a newline survives the single-line
-/// encoding instead of splitting the list or truncating the value.
+/// The export escapes every item, backtick included (GH-1044:
+/// `cmd_export::escape_field`), so a tag or a citation containing a
+/// backslash, a newline, or a backtick — including the two-character
+/// sequence `` `, `` that would otherwise read as this list's own item
+/// separator — survives the single-line encoding instead of splitting the
+/// list or truncating a value.
+///
+/// The list's own outer wrapping backticks are stripped exactly once, from
+/// the *whole* string, before splitting — never per fragment (GH-1044). One
+/// pass over the joined string already shows why: `split("`, `")` finds and
+/// consumes every INTERIOR delimiter pair as part of its match (the
+/// preceding item's closing backtick together with the next item's opening
+/// one), so once the two outer delimiters are gone, nothing left in any
+/// fragment is ever a genuine wrapping backtick — every backtick still there
+/// is escaped content (`` \` ``) bound for [`unescape_field`]. A middle item
+/// whose own value ends in a backtick is the case that breaks a per-fragment
+/// strip: it renders as `` ...\``` `` at that item's boundary (the escaped
+/// backtick's own closing backtick immediately followed by the real
+/// delimiter), `split` correctly consumes only the real delimiter as part of
+/// the *next* match, and a fragment-local `strip_suffix('`')` — unable to
+/// tell the two apart from inside one fragment — then strips the escaped
+/// backtick's bare half too, corrupting the item. Stripping the outer pair
+/// once, before any fragment exists, removes the ambiguity instead of
+/// guessing at it.
 fn backtick_list(s: &str) -> Vec<String> {
-    s.split("`, `")
-        .map(|p| unescape_field(p.trim_matches('`').trim()))
+    let inner = s.strip_prefix('`').unwrap_or(s);
+    let inner = inner.strip_suffix('`').unwrap_or(inner);
+    inner
+        .split("`, `")
+        .map(|p| unescape_field(p.trim()))
         .filter(|p| !p.is_empty())
         .collect()
 }
 
 /// Inverse of `edda-cli::cmd_export::escape_field` — a left-to-right scan so
-/// `\\n` (escaped backslash followed by `n`) never collapses into a newline.
+/// `\\n` (escaped backslash followed by `n`) never collapses into a newline,
+/// and (GH-1044) an escaped backslash followed by a raw backtick never
+/// collapses into an unescaped one either.
 ///
 /// Older mirrors wrote some fields raw. An *unknown* escape is passed through
 /// unchanged (`\p` stays `\p`), so most raw text survives — but this is not
@@ -755,7 +781,13 @@ fn backtick_list(s: &str) -> Vec<String> {
 /// and a raw `\\` halves. Reachability is narrow (the fields that carried
 /// backslashes in practice — `affected_paths`, tags — were already unescaped
 /// before the encoding was made total), which is why the round trip is
-/// preferred over a version-tagged mirror format.
+/// preferred over a version-tagged mirror format. The same argument covers
+/// the new backtick arm: every backslash run in mirror text written before
+/// GH-1044 came only from doubling a raw `\` (`.replace('\\', "\\\\")`), so
+/// every such run has even length and this scan always pairs it off
+/// completely — an escaped-backtick two-char sequence can therefore never
+/// appear by accident in a pre-GH-1044 mirror, only be introduced by this
+/// fix's own writer.
 fn unescape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -764,6 +796,7 @@ fn unescape_field(s: &str) -> String {
             match chars.next() {
                 Some('n') => out.push('\n'),
                 Some('\\') => out.push('\\'),
+                Some('`') => out.push('`'),
                 Some(other) => {
                     out.push('\\');
                     out.push(other);

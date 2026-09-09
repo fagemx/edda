@@ -682,3 +682,115 @@ fn mirror_dry_run_writes_nothing() {
 
     let _ = std::fs::remove_dir_all(&tmp_tgt);
 }
+
+// ── GH-1044: `backtick_list` / `unescape_field` backtick handling ──────
+//
+// `edda-ledger` cannot call the real `cmd_export::escape_field` (it lives in
+// `edda-cli`, which depends on `edda-ledger`, not the reverse), so
+// `mirror_escape` below is a deliberate, documented duplicate of it, used
+// only to CONSTRUCT test input the same way the real writer would — every
+// assertion is still against `backtick_list`/`unescape_field`, the read
+// side. Building `rendered` with this helper (rather than hand-encoded
+// string literals) keeps each test's intent checkable by inspection instead
+// of by counting backslashes. The full write-then-read pipeline is
+// exercised end-to-end by `export_import_round_trip_is_total_for_backticks`
+// in `edda-cli::cmd_export`; these pin the read side alone, in isolation, so
+// a failure here points at `backtick_list`/`unescape_field` directly rather
+// than somewhere in the round trip.
+
+/// Duplicate of `edda-cli::cmd_export::escape_field` — see the module
+/// comment above for why this crate cannot call the original directly. Keep
+/// in sync with it by hand; a divergence here would make these tests assert
+/// against a writer the real code no longer has.
+fn mirror_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('`', "\\`")
+}
+
+/// `["a", "b", ...]` → the exact `` `a`, `b` `` markdown `backtick_list`
+/// reads, each item escaped and wrapped the way `render_domain` does.
+fn mirror_list(items: &[&str]) -> String {
+    items
+        .iter()
+        .map(|it| format!("`{}`", mirror_escape(it)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[test]
+fn backtick_list_ordinary_items_unchanged() {
+    // Regression: no backticks involved, must split exactly as before.
+    assert_eq!(
+        backtick_list(&mirror_list(&["sqlite", "postgres"])),
+        vec!["sqlite".to_string(), "postgres".to_string()]
+    );
+    assert_eq!(
+        backtick_list(&mirror_list(&["solo"])),
+        vec!["solo".to_string()]
+    );
+    assert_eq!(backtick_list(""), Vec::<String>::new());
+}
+
+#[test]
+fn backtick_list_does_not_split_on_embedded_separator_sequence() {
+    // GH-1044, the exact reported defect: a single tag whose value is
+    // `a`, `b` — i.e. it contains the raw four-byte sequence "`, `" that
+    // `backtick_list` splits list items on. One item in, one item out.
+    let item = "a`, `b";
+    assert_eq!(backtick_list(&mirror_list(&[item])), vec![item.to_string()]);
+}
+
+#[test]
+fn backtick_list_recovers_leading_and_trailing_backtick_items() {
+    // GH-1044's secondary hole: once backticks are escaped, an item whose
+    // escaped form is adjacent to the list's own wrapping delimiter must not
+    // have that delimiter's greedy removal eat the escaped backtick's bare
+    // half too.
+    assert_eq!(
+        backtick_list(&mirror_list(&["`leading"])),
+        vec!["`leading".to_string()]
+    );
+    assert_eq!(
+        backtick_list(&mirror_list(&["trailing`"])),
+        vec!["trailing`".to_string()]
+    );
+}
+
+#[test]
+fn backtick_list_multi_item_mixes_edge_and_embedded_backticks() {
+    // Four items in one list, each exercising a different edge of the
+    // GH-1044 hole: embedded separator-lookalike, leading backtick, trailing
+    // backtick, and one plain item as a control.
+    let items = ["a`, `b", "`leading", "trailing`", "plain"];
+    assert_eq!(
+        backtick_list(&mirror_list(&items)),
+        items.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unescape_field_inverts_escaped_backtick() {
+    for original in ["a`b", "`lead", "trail`", "``double``"] {
+        assert_eq!(
+            unescape_field(&mirror_escape(original)),
+            original,
+            "round trip for {original:?}"
+        );
+    }
+    // Backslash-first ordering (matches `escape_field`): a real backslash
+    // immediately before a real backtick — `mirror_escape` doubles the
+    // backslash before it escapes the backtick — must round-trip whole, not
+    // be misread as one already-escaped unit that swallows the backtick.
+    let original = "a\\`b"; // a, backslash, backtick, b
+    assert_eq!(unescape_field(&mirror_escape(original)), original);
+}
+
+#[test]
+fn unescape_field_unknown_escape_passes_through_unchanged() {
+    // Back-compat (doneWhen #3): a mirror written before GH-1044 never
+    // produced `` \` `` (escape_field did not escape backticks), so this arm
+    // only ever fires on mirrors written by the fixed writer. An unrelated
+    // unknown escape must still pass through unchanged, exactly as before.
+    assert_eq!(unescape_field("\\p"), "\\p");
+}

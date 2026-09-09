@@ -15,14 +15,16 @@
 //!   the committed-mirror import in `edda-ledger::sync` needs those fields to
 //!   restore the row faithfully (original actor included). Every
 //!   caller-supplied component of that encoding — the `## `key`` header and
-//!   the `- **Field**: value` lines alike — is escaped (`\` and newline) by
-//!   [`escape_field`], so a multi-line reason or a newline in any other field
-//!   survives the single-line markdown encoding losslessly instead of emitting
-//!   a line the importer would read as another field. Only the branch name and
-//!   the timestamp ride raw; both are machine-constrained, and the reason is
-//!   recorded at the `- **Branch/ts**:` line itself. Cites (GH-761) is read
-//!   from the decision event payload, not the projected row — see
-//!   [`collect_cites`].
+//!   the `- **Field**: value` lines alike — is escaped (`\`, newline and
+//!   backtick, GH-1044) by [`escape_field`], so a multi-line reason or a
+//!   newline in any other field survives the single-line markdown encoding
+//!   losslessly instead of emitting a line the importer would read as another
+//!   field, and a backtick inside a Tags/Affected paths/Cites item survives
+//!   instead of colliding with that list's `` `, ` `` separator or wrapping
+//!   delimiters. Only the branch name and the timestamp ride raw; both are
+//!   machine-constrained, and the reason is recorded at the
+//!   `- **Branch/ts**:` line itself. Cites (GH-761) is read from the decision
+//!   event payload, not the projected row — see [`collect_cites`].
 //! - Layout:
 //!   <out>/INDEX.md             — table of contents with freshness metadata
 //!   <out>/decisions/<domain>.md — one file per domain (active decisions)
@@ -353,14 +355,25 @@ fn render_index(
 }
 
 /// Escape a field for single-line markdown (GH-671 round trip): backslash
-/// first, then newline. Inverse lives in `edda-ledger::sync::unescape_field`.
+/// first, then newline, then backtick (GH-1044) — in that order, so the
+/// escape backslashes the later two passes insert are never themselves
+/// re-escaped by the first. Inverse lives in
+/// `edda-ledger::sync::unescape_field`.
 ///
-/// Applied to every caller-supplied component of the encoding. The pair is
-/// only sound when both halves are total — escaping a field on write without
-/// unescaping it on read hands the importer a literal `\n`, which is a quieter
-/// corruption than the injected line it replaced, not a fix.
+/// Applied to every caller-supplied component of the encoding, including
+/// each item of a backtick-wrapped list (Tags, Affected paths, Cites) before
+/// `` `{item}` `` wraps it. Without the backtick pass, an item containing a
+/// raw backtick is indistinguishable from the list's own `` `, ` `` item
+/// separator or its wrapping delimiters, so `backtick_list` either splits one
+/// item into two (GH-1044) or mis-trims the wrapping backtick off an item
+/// that itself starts or ends with one. The pair is only sound when both
+/// halves are total — escaping a field on write without unescaping it on
+/// read hands the importer a literal `\n` or `` \` ``, which is a quieter
+/// corruption than the injected line or split it replaced, not a fix.
 fn escape_field(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('`', "\\`")
 }
 
 fn resolve_machine(explicit: Option<&str>) -> String {
@@ -518,6 +531,22 @@ mod tests {
             !md.contains("a\nb"),
             "raw newline must not leak into the file"
         );
+    }
+
+    /// GH-1044: a backtick must survive `escape_field` too, in the same
+    /// backslash-escape scheme as newline — not just the one reported
+    /// character (a lone backtick, one leading, one trailing, and the
+    /// two-character separator `backtick_list` splits on), since the reader
+    /// is a single shared function and every caller-supplied field rides it.
+    #[test]
+    fn escape_field_escapes_backticks() {
+        assert_eq!(escape_field("a`b"), "a\\`b");
+        assert_eq!(escape_field("`lead"), "\\`lead");
+        assert_eq!(escape_field("trail`"), "trail\\`");
+        assert_eq!(escape_field("a`, `b"), "a\\`, \\`b");
+        // Backslash-first ordering: a literal backslash immediately before a
+        // backtick must not be read back as one already-escaped unit.
+        assert_eq!(escape_field("a\\`b"), "a\\\\\\`b");
     }
 
     #[test]
@@ -861,6 +890,99 @@ mod tests {
             after.source_event_id.as_deref(),
             Some(before.event_id.as_str())
         );
+    }
+
+    /// GH-1044: `escape_field` left backticks raw, so a Tags/Affected
+    /// paths/Cites item containing the list's own two-character separator
+    /// `` `, `` split into two items after a mirror round trip — the one
+    /// hole `export_import_round_trip_is_total_for_newlines_and_backslashes`
+    /// (PR #1017) left in the "encoding is total" property. Property, not
+    /// the one reported character: this payload also covers a tag that
+    /// starts with a backtick and one that ends with one, both of which
+    /// `backtick_list`'s old `trim_matches('`')` (a greedy strip, not the
+    /// one-at-a-time `strip_prefix`/`strip_suffix` this fix switches to)
+    /// would mis-trim once backticks are escaped, by eating the escaped
+    /// backtick's bare half along with the list's real wrapping delimiter.
+    ///
+    /// Round trip, not render inspection, same shape as the sibling test
+    /// above: A decides, A exports, B imports, B's row must equal A's field
+    /// for field — `tags` above all, since that is where GH-1044 lived, but
+    /// also the scalar fields the same shared `escape_field` touches.
+    #[test]
+    fn export_import_round_trip_is_total_for_backticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        let dp = edda_core::types::DecisionPayload {
+            key: "esc.backtick`key".to_string(),
+            value: "a`, `b".to_string(),
+            reason: Some("see `escape_field`, the reader".to_string()),
+            scope: None,
+            authority: Some("`agent".to_string()),
+            affected_paths: Some(vec!["crates/a`b/**".to_string()]),
+            tags: Some(vec![
+                // The exact GH-1044 defect: a single tag that IS the list's
+                // own item separator, embedded.
+                "a`, `b".to_string(),
+                // The secondary hole a naive "just escape the backtick" fix
+                // still leaves: an item whose escaped form ends up adjacent
+                // to the wrapping delimiter on one edge only.
+                "`leading".to_string(),
+                "trailing`".to_string(),
+                "plain".to_string(),
+            ]),
+            review_after: None,
+            reversibility: Some("hard`".to_string()),
+            village_id: None,
+            cites: None,
+        };
+        let ev = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        a.append_event(&ev).unwrap();
+        let source = a.active_decisions(None, None, None, None).unwrap();
+        assert_eq!(source.len(), 1, "one decision on machine A");
+        drop(a);
+
+        let mirror = a_root.join("docs").join("decisions");
+        execute(&a_root, &mirror, false, Some("host-a")).unwrap();
+
+        let b = Ledger::open_or_init(&b_root).unwrap();
+        let imported = edda_ledger::sync::sync_from_mirror(
+            &b,
+            &edda_ledger::sync::MirrorSource {
+                mirror_dir: mirror.clone(),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            imported.imported.len(),
+            1,
+            "exactly one decision crosses the mirror"
+        );
+
+        let landed = b.active_decisions(None, None, None, None).unwrap();
+        assert_eq!(landed.len(), 1, "one decision on machine B: {landed:#?}");
+        let (before, after) = (&source[0], &landed[0]);
+
+        assert_eq!(after.key, before.key, "key rides the `## `key`` header");
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.reason, before.reason);
+        assert_eq!(after.authority, before.authority);
+        assert_eq!(after.reversibility, before.reversibility);
+        assert_eq!(after.affected_paths, before.affected_paths);
+        // The core GH-1044 assertion: four tags in, four tags out,
+        // byte-identical — none split, none truncated at an edge backtick.
+        assert_eq!(
+            after.tags.len(),
+            4,
+            "a tag containing `, ` must not split the list: {:?}",
+            after.tags
+        );
+        assert_eq!(after.tags, before.tags);
     }
 
     #[test]
