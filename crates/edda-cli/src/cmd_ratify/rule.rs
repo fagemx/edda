@@ -179,9 +179,14 @@ const SUPERSEDES_MARKERS: [&str; 3] = ["supersedes:", "SUPERSEDES", "顯式取�
 /// whitespace or a colon) by `target_key` at a word boundary. `target_key`
 /// appearing anywhere else in the sentence does not count — that is the
 /// exact shape of the GH-1066 bug this replaces.
+///
+/// Checks **every** occurrence of each marker, not only the first (PR #1098
+/// Round 1 P2): a reason superseding two keys with the same marker —
+/// `"supersedes:a.one and supersedes:b.two"` — must hold both, and a
+/// single `str::find` only ever sees the first one.
 fn names_explicit_supersession(reason: &str, target_key: &str) -> bool {
     SUPERSEDES_MARKERS.iter().any(|marker| {
-        reason.find(marker).is_some_and(|idx| {
+        reason.match_indices(marker).any(|(idx, _)| {
             let after = reason[idx + marker.len()..].trim_start_matches([' ', ':', '\t', '　']);
             after.strip_prefix(target_key).is_some_and(|rest| {
                 rest.chars()
@@ -438,6 +443,28 @@ mod tests {
     }
 
     #[test]
+    fn explicit_marker_used_twice_holds_both_named_keys() {
+        // PR #1098 Round 1 P2: `reason.find(marker)` located only the first
+        // "supersedes:" occurrence, so a reason superseding two keys with
+        // the same marker held only the first-named one. `match_indices`
+        // checks every occurrence.
+        let mut a = cand("a.one", "cited a", 1);
+        a.cites = vec!["issue:#1".to_string()];
+        let mut b = cand("b.two", "cited b", 2);
+        b.cites = vec!["issue:#2".to_string()];
+        let newer = cand("c.three", "supersedes:a.one and supersedes:b.two", 3);
+        let v = evaluate(&[a, b, newer], &none());
+        for key in ["a.one", "b.two"] {
+            let held = v.iter().find(|x| x.key == key).unwrap();
+            assert!(!held.is_ratify(), "{key}: {held:?}");
+            assert!(
+                held.columns().1.starts_with("superseded-explicit"),
+                "{key}: {held:?}"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_marker_key_must_be_a_whole_word_not_a_prefix() {
         // `review.merge-gate` must not be caught by a marker that actually
         // names the longer key `review.merge-gate-v2` — the whole point of
@@ -491,6 +518,38 @@ mod tests {
         let newer = cand("review.auto-merge", "gate is now mechanical", 2); // not ratified
         let v = evaluate(&[old, newer], &none());
         let verdict = v.iter().find(|x| x.key == "review.legacy-gate").unwrap();
+        assert!(verdict.is_ratify(), "{verdict:?}");
+    }
+
+    // The two tests above prove the domain guard on `review.` keys sharing a
+    // domain. PR #1098 Round 2 (controller amendment to GH-1066 doneWhen
+    // bullet 5, 2026-09-09) requires the same positive/negative pair proven
+    // on a second, genuinely shared domain — `fleet.` — rather than relying
+    // on `domain_guard_does_not_cross_domains` below, which is a cross-domain
+    // negative and proves a different property.
+
+    #[test]
+    fn domain_guard_holds_older_fleet_candidate_behind_a_later_binding_fleet_sibling() {
+        let mut old = cand("fleet.legacy-gate", "per #100", 1);
+        old.cites = vec!["issue:#100".to_string()];
+        let mut newer = cand("fleet.rollout-gate", "dispatch is now mechanical", 2);
+        newer.ratified = true;
+        let v = evaluate(&[old, newer], &none());
+        let held = v.iter().find(|x| x.key == "fleet.legacy-gate").unwrap();
+        assert!(!held.is_ratify());
+        assert!(
+            held.columns().1.starts_with("older-than-binding-in-domain"),
+            "{held:?}"
+        );
+    }
+
+    #[test]
+    fn domain_guard_requires_the_fleet_sibling_to_be_binding_not_merely_newer() {
+        let mut old = cand("fleet.legacy-gate", "per #100", 1);
+        old.cites = vec!["issue:#100".to_string()];
+        let newer = cand("fleet.rollout-gate", "dispatch is now mechanical", 2); // not ratified
+        let v = evaluate(&[old, newer], &none());
+        let verdict = v.iter().find(|x| x.key == "fleet.legacy-gate").unwrap();
         assert!(verdict.is_ratify(), "{verdict:?}");
     }
 

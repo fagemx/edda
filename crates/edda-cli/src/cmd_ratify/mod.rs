@@ -178,19 +178,54 @@ fn append_ratify(
 /// deliberately, so the threshold does not apply once either is given.
 const RATIFY_THRESHOLD: usize = 20;
 
-/// `--since <date>` must be `YYYY-MM-DD`: cheap to check at the boundary, so
-/// a typo is a usage error (exit 2) rather than a silently-wrong comparison.
-fn validate_since(s: &str) -> String {
+/// True when `s` is a real calendar date in `YYYY-MM-DD` form — not merely
+/// shaped like one (PR #1098 Round 1 P2): the original shape-only check
+/// accepted `2026-99-99`. The `--since` comparison itself stays
+/// lexicographic and was never unsafe on a malformed value, but the flag
+/// advertises a date it should actually parse.
+fn is_valid_since_date(s: &str) -> bool {
     let bytes = s.as_bytes();
-    let ok = bytes.len() == 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes.iter().enumerate().all(|(i, b)| match i {
-            4 | 7 => true,
-            _ => b.is_ascii_digit(),
-        });
-    if !ok {
-        usage_exit(&format!("--since must be YYYY-MM-DD — got '{s}'"));
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| matches!(i, 4 | 7) || b.is_ascii_digit())
+    {
+        return false;
+    }
+    let Ok(year) = s[0..4].parse::<i32>() else {
+        return false;
+    };
+    let Ok(month) = s[5..7].parse::<u32>() else {
+        return false;
+    };
+    let Ok(day) = s[8..10].parse::<u32>() else {
+        return false;
+    };
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => unreachable!("month already bounded to 1..=12"),
+    };
+    (1..=max_day).contains(&day)
+}
+
+/// `--since <date>` must be a real `YYYY-MM-DD` calendar date: cheap to
+/// check at the boundary, so a typo is a usage error (exit 2) rather than a
+/// silently-wrong comparison.
+fn validate_since(s: &str) -> String {
+    if !is_valid_since_date(s) {
+        usage_exit(&format!(
+            "--since must be a real YYYY-MM-DD date — got '{s}'"
+        ));
     }
     s.to_string()
 }

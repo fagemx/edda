@@ -102,6 +102,26 @@ fn malformed_since_exits_2() {
 }
 
 #[test]
+fn since_with_an_impossible_calendar_date_exits_2() {
+    // PR #1098 Round 1 P2: the shape-only check accepted `2026-99-99` (right
+    // length, dashes in the right places) even though no such date exists.
+    let env = TestEnv::new();
+    let (code, stdout, stderr) = env.run_edda(&[
+        "ratify",
+        "--by-rule",
+        "cited-authority",
+        "--since",
+        "2026-99-99",
+    ]);
+
+    assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        stderr.contains("--since"),
+        "stderr should name the malformed flag, got: {stderr:?}"
+    );
+}
+
+#[test]
 fn since_without_by_rule_exits_2() {
     let env = TestEnv::new();
     let (code, stdout, stderr) = env.run_edda(&["ratify", "db.engine", "--since", "2026-09-01"]);

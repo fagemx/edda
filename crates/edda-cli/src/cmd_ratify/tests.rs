@@ -619,6 +619,25 @@ fn well_formed_since_passes_through_unchanged() {
     assert_eq!(validate_since("2026-08-20"), "2026-08-20");
 }
 
+#[test]
+fn since_calendar_validity_rejects_impossible_dates() {
+    // PR #1098 Round 1 P2: the old shape-only check accepted `2026-99-99`.
+    // The exit-2 boundary itself is covered end to end by
+    // ratify_exit_codes.rs::since_with_an_impossible_calendar_date_exits_2
+    // (same reason `well_formed_since_passes_through_unchanged` above
+    // cannot exercise `usage_exit` in-process); this checks the pure
+    // predicate that boundary now calls.
+    assert!(!is_valid_since_date("2026-99-99"));
+    assert!(!is_valid_since_date("2026-02-30")); // February never has 30 days
+    assert!(!is_valid_since_date("2026-04-31")); // April has 30 days
+    assert!(!is_valid_since_date("2026-00-10")); // month 0
+    assert!(is_valid_since_date("2026-02-28"));
+    assert!(is_valid_since_date("2024-02-29")); // 2024 is a leap year
+    assert!(!is_valid_since_date("2026-02-29")); // 2026 is not
+    assert!(!is_valid_since_date("1900-02-29")); // divisible by 100, not 400
+    assert!(is_valid_since_date("2000-02-29")); // divisible by 400
+}
+
 // ── through `edda decide` — these mutate process env, so they take the
 //    shared guard in `crate::test_support` (one test binary, one lock) ──
 
