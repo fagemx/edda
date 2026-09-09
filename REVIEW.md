@@ -23,7 +23,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.5`
+- Spec version: `review-spec-v1.6`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -174,6 +174,20 @@ For a delta round (a re-review after a fix push) the target is
 `git diff <previously-reviewed-sha>..<new-sha>` plus a RAN confirmation that
 each prior blocking finding is resolved. Do not re-review the whole PR
 (`loop` items 2 and 6).
+
+**Two-dot and three-dot are both intentional below, and mean different things
+to these two commands (GH-1003).** `git diff "origin/$BASE...$SHA"` (three-dot,
+§5's content enumerators) diffs from the merge base, so it reports what the PR
+changed even when `$SHA` is behind `$BASE`; two-dot there diffs tip-to-tip and
+folds in every commit `$BASE` gained after the branch point too. `git log
+"origin/$BASE..$SHA"` (two-dot, U2/U4/C2) lists commits reachable from `$SHA`
+but not `$BASE` — the PR's own commits; three-dot there is the symmetric
+difference and would pull in `$BASE`'s commits too, breaking the
+commit-message rules. Do not swap the two forms, and do not "fix" the `git
+log` lines to match a `git diff` line sitting next to them. A regression back
+to two-dot `git diff` is caught by `scripts/test-review-l0.sh`; check by hand
+with `git grep -nE 'git diff "origin/\$BASE\.\.\$SHA"' -- REVIEW.md` (must
+print nothing).
 
 ## 3. Step 3 — classify it
 
@@ -468,7 +482,7 @@ probe as that finding. This is mechanical routing, not reviewer discretion.
 
 # review-spec:check D1
 ```sh
-git diff "origin/$BASE..$SHA" | grep '^+' \
+git diff "origin/$BASE...$SHA" | grep '^+' \
   | grep -oE '`(edda|gh|git|cargo|pi|claude) [a-z][a-z0-9-]*' | tr -d '`' | sort -u \
   | while read -r c; do
       case "$c" in git\ *) flag=-h; want=129 ;; *) flag=--help; want=0 ;; esac
@@ -511,7 +525,7 @@ does not exist).
 # review-spec:check D3
 ```sh
 tops=$(git ls-files | cut -d/ -f1 | sort -u | tr '\n' '|' | sed 's/|$//')
-git diff "origin/$BASE..$SHA" | grep '^+' \
+git diff "origin/$BASE...$SHA" | grep '^+' \
   | grep -oE '`[^`]+`|\]\([^)]+\)' | sed 's/^`//;s/`$//;s/^](//;s/)$//' \
   | grep -E "^($tops)(/|$)" | sed 's/[ <*#\\].*$//;s#/$##' | sort -u \
   | while read -r p; do [ -e "$p" ] && echo "OK      $p" || echo "MISSING $p"; done
@@ -529,7 +543,7 @@ and lane worktree). A candidate with no such caveat is the finding (canary
 
 # review-spec:check D4
 ```sh
-git diff "origin/$BASE..$SHA" --unified=0 | grep -nE '^\+' \
+git diff "origin/$BASE...$SHA" --unified=0 | grep -nE '^\+' \
   | grep -E 'gh pr merge|--delete-branch|--admin|--no-verify|push --force|force-push'
 ```
 # review-spec:check-end
@@ -547,7 +561,7 @@ operator authority").
 
 # review-spec:check S1
 ```sh
-git diff "origin/$BASE..$SHA" -- '*SKILL.md' '.claude/**' 'skills/**' | grep '^+' \
+git diff "origin/$BASE...$SHA" -- '*SKILL.md' '.claude/**' 'skills/**' | grep '^+' \
   | grep -nEi 'merge|--delete-branch|self-review|skip (the )?review'
 ```
 # review-spec:check-end
@@ -573,7 +587,7 @@ adds:
 # review-spec:check C2
 ```sh
 git log --format=%s "origin/$BASE..$SHA"
-git diff "origin/$BASE..$SHA" -- 'crates/**' | grep -cE '^\+.*(#\[test\]|fn test_)'
+git diff "origin/$BASE...$SHA" -- 'crates/**' | grep -cE '^\+.*(#\[test\]|fn test_)'
 ```
 # review-spec:check-end
 
@@ -584,7 +598,7 @@ list; a candidate is N.A. only when the reported line is inside a
 
 # review-spec:check C3
 ```sh
-git diff "origin/$BASE..$SHA" -- 'crates/**' | grep -nE '^\+.*\.(unwrap|expect)\('
+git diff "origin/$BASE...$SHA" -- 'crates/**' | grep -nE '^\+.*\.(unwrap|expect)\('
 ```
 # review-spec:check-end
 
@@ -595,7 +609,7 @@ findings; empty output passes (`.claude/CLAUDE.md` §3.1–3.2). A targeted
 
 # review-spec:check C4
 ```sh
-git diff "origin/$BASE..$SHA" \
+git diff "origin/$BASE...$SHA" \
   | grep -nE '^\+.*(unsafe[[:space:]]*\{|#\[allow\(clippy::all\)\]|#!\[allow)'
 ```
 # review-spec:check-end
@@ -624,7 +638,7 @@ itself the finding.
 
 # review-spec:check R1
 ```sh
-git diff "origin/$BASE..$SHA" --unified=0 | grep -nE '^\+' \
+git diff "origin/$BASE...$SHA" --unified=0 | grep -nE '^\+' \
   | grep -E 'rm -rf|git clean|reset --hard|git rm|--delete-branch|--force|Remove-Item'
 ```
 # review-spec:check-end
@@ -646,18 +660,37 @@ writes the finding anyway, marks it `provisional`, and lists it under
 
 # review-spec:check R2
 ```sh
-git diff "origin/$BASE..$SHA" --unified=0 -- '*.sh' '*.bash' '*.ps1' '.github' \
+git diff "origin/$BASE...$SHA" --unified=0 -- '*.sh' '*.bash' '*.ps1' '.github' \
   | grep -nE '^\+' | grep -E '\|\|.*&&|&&.*\|\|'
 ```
 # review-spec:check-end
 
-**R3 — every changed shell script parses. P0.** Exit code is the signal.
+**R3 — every changed shell script parses. P0.** Exit code is the signal. A
+changed script that is simply absent from this working tree (GH-992 — e.g. a
+reviewer checked out at `$BASE` rather than `$SHA`) is reported but does not
+itself fail the rule; only a real `sh -n` non-zero, or finding zero of the
+named scripts present, does.
 
 # review-spec:check R3 no-pr-needed
 ```sh
-for f in $(if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi | grep -E '\.(sh|bash)$'); do
-  [ -f "$f" ] && { sh -n "$f"; echo "$f -> sh -n exit=$?"; }
+files=$(if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi | grep -E '\.(sh|bash)$')
+total=0; present=0
+for f in $files; do
+  total=$((total + 1))
+  [ -f "$f" ] && present=$((present + 1))
 done
+if [ "$total" -gt 0 ] && [ "$present" -eq 0 ]; then
+  echo "R3: 0 of $total changed shell script(s) present in working tree -- nothing checked"
+  exit 2
+fi
+for f in $files; do
+  if [ -f "$f" ]; then
+    sh -n "$f"; echo "$f -> sh -n exit=$?"
+  else
+    echo "$f -> not in working tree, skipped"
+  fi
+done
+exit 0
 ```
 # review-spec:check-end
 
@@ -761,7 +794,7 @@ One comment per round, pinned to the reviewed full SHA
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
 - reviewer_session: <per-PR UUID the lane was launched with>
-- spec: review-spec-v1.5
+- spec: review-spec-v1.6
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - shadow: true|false  (documentation for a SHADOW round: true requires the heading suffix ` (SHADOW)` — `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; the suffix is the only marker, this field never substitutes for it; a SHADOW round is never a verdict — §8)
@@ -953,6 +986,25 @@ mechanical.
   brief tag moves to `brief-v2`. The #618 calibration is the evidence — glm's
   c1 parse tree and trigger conditions were entirely correct and the old rule
   forbade writing them up, scoring the P0 gate 1/2 (`design` §3 learning 1).
+- `review-spec-v1.6` (2026-09-09, issues #1003, #992): the nine content
+  enumerators in §5 (D1, D3, D4, S1, C2–C4, R1, R2) move from two-dot to
+  three-dot `git diff`, so a branch behind its base is diffed from the merge
+  base instead of tip-to-tip (#1003) — measured on a real PR at 39 files
+  reported for 3 actually changed. `scripts/wiring-scan.sh` carried the same
+  defect in its own two-argument form and gets the same fix. The three
+  `git log` commit enumerators (U2, U4, C2) are unchanged and stay two-dot —
+  §2 now states why the two commands take different forms, and
+  `scripts/test-review-l0.sh` greps this file for a regressed two-dot `git
+  diff` on every run. Separately, R3 no longer reports a false P0 when a
+  changed script the diff names is merely absent from the reviewer's working
+  tree (#992): the old `[ -f "$f" ] && { ... }` loop body let that file's
+  short-circuited exit status become the whole block's exit code whenever it
+  was the alphabetically-last file in the list, flipping a clean round to
+  FAIL on a file R3 never actually parsed. R3 now counts what it can and
+  cannot reach and reports a script's absence as text, not as a failing exit
+  code — except when every named script is absent, which is `ERROR`, not a
+  silent PASS, so a check that verified nothing is never mistaken for one
+  that passed (the #950 failure mode, in the opposite direction).
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
