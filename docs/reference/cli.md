@@ -1383,6 +1383,23 @@ edda review deliver --pr 1030 --sha "$reviewed" --json
 40-character lowercase hex SHA; without it the PR's current head is used. A
 verdict comment counts only when it is pinned to that SHA.
 
+A verdict counts only from a trusted author: the comment's GitHub
+`author_association` must be `OWNER`, `MEMBER`, or `COLLABORATOR` — the same
+set the merge-gate scripts (`scripts/merge-reviewed-pr.sh`,
+`scripts/fleet/verdict-drift.sh`) filter on with jq (GH-1103). The check
+fails closed: a comment whose `author_association` is missing or unreadable
+is untrusted and does not count.
+
+An untrusted §7 comment is not a verdict: it joins no union, triggers no
+malformed-comment notice (#917), and counts as no SHADOW signal — an
+untrusted LGTM earns neither the `success` status nor the `review:lgtm`
+label, and an untrusted Changes Requested does not drive the status to
+`failure`. It is reported instead: one `untrusted <id> <association>` line
+on stdout (`missing` when the association is absent), and under `--json` an
+`untrusted` array whose entries carry `comment_id` and `author_association`
+(null when missing). Comments from trusted authors behave exactly as
+before.
+
 A comment is a verdict when its **first** line is the §7 heading. A heading
 anywhere else in the body is a transcript dump, not a verdict: it contributes
 nothing to the union, and its comment id gets a one-shot `review: malformed
@@ -1425,7 +1442,8 @@ the comments already present, before writing anything, so re-running deliver
 for an already-delivered verdict performs zero new GitHub calls.
 
 Stdout is one line — the union state, the SHA, and the number of verdicts
-standing — followed by one `malformed <id>` line per malformed comment, one
+standing — followed by one `untrusted <id> <association>` line per untrusted
+§7 comment, one `malformed <id>` line per malformed comment, one
 `notice <id> <outcome>` line per notice attempted, and a `status`/`label`/
 `label_removed` line for each of those writes. `--json` emits the same as an
 object, with an `outcome` of `done`, `skipped`, `withheld`, or `failed` (with
