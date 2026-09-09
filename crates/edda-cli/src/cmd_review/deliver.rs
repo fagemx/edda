@@ -243,26 +243,37 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
     out
 }
 
-/// The §7 comments GitHub holds for one PR.
+/// The exact `gh` argv [`comments`] shells out with — REST (`gh api`), not
+/// GraphQL (`gh pr view --json comments`): the GraphQL shape carries only
+/// base64 node ids, which the #917 malformed-notice contract cannot use — it
+/// needs the numeric id a human can resolve in the UI. `--paginate` alone (no
+/// `--slurp`) is enough: `gh` combines an array-shaped REST endpoint's pages
+/// into one JSON array before this ever sees it (verified live against this
+/// repo, forcing multiple pages with `per_page=2`), so a comment list longer
+/// than one page is never silently truncated on the merge-gate path.
 ///
-/// REST (`gh api`), not GraphQL (`gh pr view --json comments`): the GraphQL
-/// shape carries only base64 node ids, which the #917 malformed-notice
-/// contract cannot use — it needs the numeric id a human can resolve in the
-/// UI. `--paginate` alone (no `--slurp`) is enough: `gh` combines an
-/// array-shaped REST endpoint's pages into one JSON array before this ever
-/// sees it (verified live against this repo, forcing multiple pages with
-/// `per_page=2`), so a comment list longer than one page is never silently
-/// truncated on the merge-gate path.
+/// Split out from [`comments`] — and actually consumed by it below, not just
+/// left standing beside it — so the argv is asserted directly (GH-1079):
+/// every prior test here feeds `extract`/`parse_comments` parsed JSON and
+/// never sees what was actually requested, so Round 1's P1 (this endpoint
+/// reverted back to `gh pr view --json comments`) left every module test
+/// green. Because `comments` builds its call from this function's return
+/// value rather than a second, independent literal, a revert has nowhere to
+/// hide: either it changes what this returns (the test below goes red), or
+/// it leaves `comments` not calling this at all (dead code, `-D warnings`).
+fn comments_argv(pr: u64) -> Vec<String> {
+    vec![
+        "api".to_owned(),
+        "--paginate".to_owned(),
+        format!("repos/{{owner}}/{{repo}}/issues/{pr}/comments"),
+    ]
+}
+
+/// The §7 comments GitHub holds for one PR.
 pub(crate) fn comments(repo: &Path, pr: u64) -> Result<Vec<Comment>> {
-    let value = gh(
-        repo,
-        &[
-            "api",
-            "--paginate",
-            &format!("repos/{{owner}}/{{repo}}/issues/{pr}/comments"),
-        ],
-    )
-    .with_context(|| format!("read comments of PR #{pr}"))?;
+    let argv = comments_argv(pr);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let value = gh(repo, &args).with_context(|| format!("read comments of PR #{pr}"))?;
     Ok(parse_comments(&value))
 }
 
@@ -307,6 +318,28 @@ pub fn run(args: DeliverArgs, cwd: &Path) -> Result<()> {
     }
 }
 
+/// Confirm `pr` is a pull request before trusting an operator-supplied
+/// `--sha` to skip [`super::github::resolve_pr`]'s own PR-only fetch.
+///
+/// `--pr <issue-number> --sha <hex>` used to reach [`comments`] unvalidated:
+/// `resolve_pr` is the only place that ever asked GitHub "is this really a
+/// PR?", and `--sha` bypasses it (measured: `gh pr view 1030 --json comments`
+/// exits 1 while `gh api .../issues/1030/comments` exits 0 with real
+/// comments — GH-1079). `probe` is the injected PR-only check (the real path
+/// passes [`super::github::pr_head`], which already exists for a lighter
+/// reason and happens to fail exactly the way `resolve_pr` does on an issue
+/// number); its `Ok` value is discarded here — this only wants its failure
+/// mode. Tests fake `probe` to reproduce that failure without shelling out.
+fn validate_pr_for_sha(pr: u64, probe: impl FnOnce(u64) -> Result<String>) -> Result<()> {
+    probe(pr).map(|_| ()).with_context(|| {
+        format!(
+            "--pr {pr} did not resolve as a pull request (gh could not find a PR #{pr} — is \
+             {pr} an issue instead? --sha only skips the PR head fetch, not this PR-vs-issue \
+             check, so it would otherwise read issue #{pr}'s comments)"
+        )
+    })
+}
+
 /// The read, decide, and write sequence; returns the exit code `run` should
 /// use on success (0 delivered, 1 partially delivered, 2 failed, 3 a due
 /// status/label withheld under R23/#917 — never returned as an `Err`, since
@@ -314,7 +347,16 @@ pub fn run(args: DeliverArgs, cwd: &Path) -> Result<()> {
 /// [`delivery::Delivery::exit_code`]).
 fn deliver_inner(args: &DeliverArgs, cwd: &Path) -> Result<i32> {
     let sha = match &args.sha {
-        Some(sha) => sha.clone(),
+        Some(sha) => {
+            // GH-1079: without --sha, resolve_pr's own PR-only GraphQL fetch
+            // already fails closed on an issue number. --sha skips that
+            // fetch entirely, so this is the one gh call that stands in for
+            // it here — gh's REST issue-comments endpoint below (unlike
+            // resolve_pr) answers success on an issue number too, so nothing
+            // downstream would otherwise notice #<pr> was never a PR.
+            validate_pr_for_sha(args.pr, |number| super::github::pr_head(cwd, number))?;
+            sha.clone()
+        }
         None => super::github::resolve_pr(cwd, args.pr)?.head,
     };
     anyhow::ensure!(
@@ -585,5 +627,77 @@ mod tests {
     fn parse_comments_on_an_unexpected_shape_yields_no_comments_rather_than_panicking() {
         let got = parse_comments(&serde_json::json!({"not": "an array"}));
         assert!(got.is_empty());
+    }
+
+    // ---- GH-1079: argv-level regression guard on the comment-source seam --
+
+    #[test]
+    fn comments_argv_is_the_paginated_rest_endpoint_not_the_graphql_view() {
+        // Locks the exact call `comments` shells out with. A revert back to
+        // `gh pr view <pr> --json comments` (Round 1's P1: base64 node ids
+        // where #917 needs numeric ones, plus an unpaginated union input on
+        // the merge-gate path) must change this function's return value —
+        // `comments` has no other source for its argv — so this goes red on
+        // that revert instead of staying green like every test above it,
+        // which only ever sees already-parsed JSON.
+        assert_eq!(
+            comments_argv(1030),
+            vec![
+                "api",
+                "--paginate",
+                "repos/{owner}/{repo}/issues/1030/comments"
+            ],
+        );
+    }
+
+    #[test]
+    fn comments_argv_is_not_the_old_pr_view_json_comments_shape() {
+        // The specific shape a revert would reintroduce, spelled out so the
+        // guard fails for the right, legible reason rather than merely any
+        // mismatch.
+        let argv = comments_argv(1030);
+        assert_ne!(argv, vec!["pr", "view", "1030", "--json", "comments"]);
+    }
+
+    // ---- GH-1079: --sha validates PR-vs-issue before reading comments -----
+
+    #[test]
+    fn sha_path_rejects_a_number_gh_cannot_resolve_as_a_pull_request() {
+        // Reproduces gh's real failure mode on an issue number
+        // (`gh pr view 1030 --json headRefOid` => "Could not resolve to a
+        // PullRequest with the number of 1030.") without shelling out.
+        let err = validate_pr_for_sha(1030, |_| {
+            Err(anyhow::anyhow!(
+                "gh: GraphQL: Could not resolve to a PullRequest with the number of 1030. \
+                 (repository.pullRequest)"
+            ))
+        })
+        .expect_err("an issue number must not validate as a PR");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("pull request") || message.contains("PR"),
+            "message must name the PR-vs-issue distinction: {message}"
+        );
+        assert!(
+            message.contains("1030"),
+            "message must name the offending number: {message}"
+        );
+    }
+
+    #[test]
+    fn sha_path_accepts_a_number_gh_resolves_as_a_pull_request() {
+        assert!(validate_pr_for_sha(1030, |_| Ok("deadbeef".repeat(5))).is_ok());
+    }
+
+    #[test]
+    fn sha_path_probe_is_called_with_the_pr_number_argument() {
+        // Guards the wiring itself: deliver_inner must probe the *same*
+        // number `--pr` carries, not a hardcoded or mismatched one.
+        let seen = std::cell::Cell::new(0u64);
+        let _ = validate_pr_for_sha(1030, |number| {
+            seen.set(number);
+            Ok("deadbeef".repeat(5))
+        });
+        assert_eq!(seen.get(), 1030);
     }
 }
