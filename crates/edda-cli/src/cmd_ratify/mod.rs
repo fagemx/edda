@@ -319,16 +319,17 @@ fn collect(
         });
     }
     candidates.sort_by_key(|c| c.order);
-    // Every active row reaches the rule, same-key predecessors included:
-    // `active_decisions` can return more than one active row for a `(branch,
-    // key)` — `Ledger::ratified_decisions_map` groups them for exactly that
-    // reason. Before GH-1066 this function collapsed to "keep only the
-    // latest row per key" so an older row was invisible to the rule and its
-    // supersession was silently assumed rather than shown; now the rule's
-    // own same-key check (rule.rs) holds every predecessor explicitly and
-    // names why, and only the newest row in a same-key chain can ever clear
-    // that check and reach the citation check — so the write loop below
-    // still appends at most one ratify event per key.
+    // `active_decisions` never returns two rows for one `(branch, key)`: the
+    // ledger deactivates a key's prior row in the same write that appends a
+    // same-key successor (`UPDATE decisions SET is_active = FALSE ... WHERE
+    // key = ? AND branch = ?`, sqlite_store/events.rs) — a redecided key's
+    // old value is gone from this candidate set before the rule ever runs,
+    // not merely held by it. `evaluate`'s own same-key check
+    // (rule.rs::same_key_superseded) stays correct regardless and is
+    // exercised directly there with hand-built same-key candidates, so it
+    // still guards the pure function itself if a future caller ever feeds it
+    // a candidate set that is not pre-deduplicated this way. Either way, the
+    // write loop below appends at most one ratify event per key.
     Ok((candidates, binding))
 }
 

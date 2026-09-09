@@ -19,6 +19,23 @@ fn setup_workspace() -> (std::path::PathBuf, edda_ledger::Ledger) {
 /// Write a decision the way `edda decide` writes one, including the
 /// structured `cites` field when given.
 fn decide(ledger: &edda_ledger::Ledger, key: &str, value: &str, reason: &str, cites: &[&str]) {
+    decide_at(ledger, key, value, reason, cites, None)
+}
+
+/// Same as `decide`, but stamped with `ts` (RFC3339) instead of "now" when
+/// given. Every plain `decide()` call in one test run lands within the same
+/// wall-clock second, so a fixture that needs `--since` to see genuinely
+/// distinct dates (GH-1066) must override `ts` explicitly — a narrative
+/// comment claiming a row is "2026-08-14" does not make the ledger record
+/// that date.
+fn decide_at(
+    ledger: &edda_ledger::Ledger,
+    key: &str,
+    value: &str,
+    reason: &str,
+    cites: &[&str],
+    ts: Option<&str>,
+) {
     let branch = ledger.head_branch().unwrap();
     let parent_hash = ledger.last_event_hash().unwrap();
     let dp = edda_core::types::DecisionPayload {
@@ -38,8 +55,15 @@ fn decide(ledger: &edda_ledger::Ledger, key: &str, value: &str, reason: &str, ci
             Some(cites.iter().map(|c| (*c).to_string()).collect())
         },
     };
-    let event = edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), "agent", &dp)
-        .unwrap();
+    let mut event =
+        edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), "agent", &dp)
+            .unwrap();
+    if let Some(t) = ts {
+        // The hash covers `ts`, so a caller-supplied date must be finalized
+        // again rather than poked in after the fact.
+        event.ts = t.to_string();
+        edda_core::event::finalize_event(&mut event).unwrap();
+    }
     ledger.append_event(&event).unwrap();
 }
 
@@ -365,40 +389,46 @@ fn mention_alone_does_not_hold_it_through_the_cli() {
 // `--since` date guard is what actually keeps this specific 2026-08 batch
 // out of an unscoped sweep — proven below — and is the mechanism the issue
 // titles "No domain OR date guard" (bullet 2): either guard protecting a
-// given row is sufficient; this batch is protected by the date guard.
+// given row is sufficient; this batch is protected by the date guard. That
+// guard only works if the four rows genuinely carry an old date, so they are
+// stamped via `decide_at` rather than `decide` (which would record "now").
 fn gh1066_snapshot_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
     let (tmp, ledger) = setup_workspace();
 
     // 2026-08-14/15: a PR-rail closeout batch. Each key is its own
-    // historical `d-NNN` identifier, never revisited under that exact key
-    // except d-033 (below) — so each is alone in its own domain.
-    decide(
+    // historical `d-NNN` identifier, never revisited under that exact key —
+    // so each is alone in its own domain.
+    decide_at(
         &ledger,
         "d-013.final_gate",
         "task22",
         "verifier gate per task #22",
         &[],
+        Some("2026-08-14T09:00:00Z"),
     );
-    decide(
+    decide_at(
         &ledger,
         "d-032.fresh_premerge_gate",
         "pass",
         "integration rerun per PRs #459/#460/#461",
         &[],
+        Some("2026-08-14T10:00:00Z"),
     );
-    decide(
+    decide_at(
         &ledger,
         "d-033.merge_authority",
         "required",
         "no merge without explicit delegation, per PR #459",
         &[],
+        Some("2026-08-14T11:00:00Z"),
     );
-    decide(
+    decide_at(
         &ledger,
         "d-034.merge_authority",
         "granted",
         "operator authorized the merge order per PR #459",
         &[],
+        Some("2026-08-15T09:00:00Z"),
     );
 
     // 2026-09-02/03: fleet.lane-launch, then the ruling that supersedes the
@@ -457,16 +487,6 @@ fn gh1066_snapshot_ledger() -> (std::path::PathBuf, edda_ledger::Ledger) {
         &[],
     );
 
-    // The real stopgap the operator recorded once GH-1066 was diagnosed: a
-    // same-key redecision of d-033, so the engine can see it without a fix.
-    decide(
-        &ledger,
-        "d-033.merge_authority",
-        "superseded-by-review.auto-merge",
-        "housekeeping under review.auto-merge and review.merge-gate",
-        &[],
-    );
-
     (tmp, ledger)
 }
 
@@ -490,26 +510,6 @@ fn gh1066_plain_flow_rulings_ratify_despite_being_named_by_a_later_decision() {
 }
 
 #[test]
-fn gh1066_same_key_stopgap_holds_the_original_d033_row() {
-    let (tmp, ledger) = gh1066_snapshot_ledger();
-    let branch = ledger.head_branch().unwrap();
-    let (candidates, binding) = collect(&ledger, &branch).unwrap();
-    let verdicts = evaluate(&candidates, &binding);
-
-    let d033: Vec<_> = verdicts
-        .iter()
-        .filter(|v| v.key == "d-033.merge_authority")
-        .collect();
-    assert_eq!(d033.len(), 2, "two rows share this key: {d033:?}");
-    let held = d033.iter().find(|v| !v.is_ratify()).unwrap();
-    assert!(
-        held.columns().1.starts_with("superseded-by-same-key"),
-        "{held:?}"
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-#[test]
 fn gh1066_since_bound_keeps_the_rail_closeout_batch_out_of_the_sweep() {
     // The date guard (GH-1066): without a same-key or same-domain signal
     // available, `--since` is what an operator who knows this batch is
@@ -522,6 +522,7 @@ fn gh1066_since_bound_keeps_the_rail_closeout_batch_out_of_the_sweep() {
     for key in [
         "d-013.final_gate",
         "d-032.fresh_premerge_gate",
+        "d-033.merge_authority",
         "d-034.merge_authority",
     ] {
         assert!(
@@ -538,9 +539,11 @@ fn gh1066_since_bound_keeps_the_rail_closeout_batch_out_of_the_sweep() {
 fn gh1066_without_since_the_rail_closeout_batch_would_have_ratified() {
     // The negative control for the test above: proves --since is load-
     // bearing here, not incidental — without it, these PR/task-number
-    // "citations" (real quirk, out of GH-1066's scope) let d-034 through.
+    // "citations" (real quirk, out of GH-1066's scope) let the whole 2026-08
+    // batch through, d-033 included.
     let (tmp, ledger) = gh1066_snapshot_ledger();
     run(&tmp, &rule_args(false)).unwrap();
+    assert!(is_binding(&ledger, "d-033.merge_authority"));
     assert!(is_binding(&ledger, "d-034.merge_authority"));
     let _ = std::fs::remove_dir_all(&tmp);
 }
