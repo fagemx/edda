@@ -335,26 +335,81 @@ while IFS="$TAB" read -r branch tip remote_sha checkedout prcount pr state head_
         "$rverdict" "$branch" "$branch" "$pr" "$state" "$remote_sha" "$rreason"
 done <"$work/branches.tsv"
 
+# ── deletion ─────────────────────────────────────────────────────────
+#
+# Both ref deletions are BATCHED and then VERIFIED, rather than run one ref
+# per command and trusted by exit code. `git push origin --delete` accepts
+# many refs in one push, and one ref per push measured ~30s of round trip on
+# this workstation — 115 merged remote branches is most of two hours that way,
+# against one push batched. `git branch -D` batches for the same reason at
+# smaller stakes.
+#
+# The verification is what makes the batch honest: a partially applied batch
+# still deletes the refs it could, so the receipt cannot come from the exit
+# code. Each list is re-read from git afterwards and a receipt is printed only
+# for a ref that is actually gone; anything still standing gets a KEPT line
+# naming it. Chunked at 50 so no single command line grows unbounded.
+delete_batched() { # <reclaim-file> <"local"|"remote">
+    # Read both arguments out before the first `set --`: inside a function the
+    # positional parameters ARE the arguments, so building a batch in them
+    # destroys $1 and $2.
+    list=$1
+    kind=$2
+    [ -s "$list" ] || return 0
+    set --
+    n=0
+    while IFS="$TAB" read -r branch pr merge_oid; do
+        set -- "$@" "$branch"
+        n=$((n + 1))
+        if [ "$n" -ge 50 ]; then
+            if [ "$kind" = local ]; then
+                git branch -D "$@" >/dev/null 2>>"$work/del.err" || true
+            else
+                git push origin --delete "$@" >/dev/null 2>>"$work/del.err" || true
+            fi
+            set --
+            n=0
+        fi
+    done <"$list"
+    if [ "$n" -gt 0 ]; then
+        if [ "$kind" = local ]; then
+            git branch -D "$@" >/dev/null 2>>"$work/del.err" || true
+        else
+            git push origin --delete "$@" >/dev/null 2>>"$work/del.err" || true
+        fi
+    fi
+
+    if [ "$kind" = local ]; then
+        git for-each-ref --format='%(refname:short)' refs/heads >"$work/after.txt"
+        label='local branch'
+        prefix=''
+    else
+        git ls-remote --heads origin 2>/dev/null \
+            | sed "s|^.*${TAB}refs/heads/||" >"$work/after.txt" || true
+        label='remote branch'
+        prefix='origin/'
+    fi
+    awk -F"$TAB" -v OFS="$TAB" -v after="$work/after.txt" -v label="$label" \
+        -v prefix="$prefix" -v kept="$work/kept.txt" '
+        FILENAME == after { still[$1] = 1; next }
+        {
+            if ($1 in still)
+                print "KEPT " label, prefix $1, "still present after delete" >kept
+            else
+                print "reclaimed " label, prefix $1, "pr=" $2, "squash=" $3
+        }
+    ' "$work/after.txt" "$list"
+    if [ -s "$work/kept.txt" ]; then
+        cat "$work/kept.txt" >&2
+        : >"$work/kept.txt"
+    fi
+}
+
 if [ "$apply" -eq 1 ]; then
     printf '\n'
-    while IFS="$TAB" read -r branch pr merge_oid; do
-        if git branch -D "$branch" >/dev/null 2>"$work/rm.err"; then
-            printf 'reclaimed local branch\t%s\tpr=%s\tsquash=%s\n' \
-                "$branch" "$pr" "$merge_oid"
-        else
-            printf 'KEPT local branch\t%s\tgit branch -D refused: %s\n' \
-                "$branch" "$(head -n 1 "$work/rm.err")" >&2
-        fi
-    done <"$work/br.reclaim"
-    while IFS="$TAB" read -r branch pr merge_oid; do
-        if git push origin --delete "$branch" >/dev/null 2>"$work/rm.err"; then
-            printf 'reclaimed remote branch\torigin/%s\tpr=%s\tsquash=%s\n' \
-                "$branch" "$pr" "$merge_oid"
-        else
-            printf 'KEPT remote branch\torigin/%s\tpush --delete refused: %s\n' \
-                "$branch" "$(head -n 1 "$work/rm.err")" >&2
-        fi
-    done <"$work/remote.reclaim"
+    : >"$work/kept.txt"
+    delete_batched "$work/br.reclaim" local
+    delete_batched "$work/remote.reclaim" remote
 fi
 
 printf '\n'

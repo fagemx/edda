@@ -262,4 +262,53 @@ run --apply
 [ "$code" -eq 3 ] || fail "case 5: expected exit 3 on an unreadable PR table, got $code"
 if grep -q 'reclaimed' "$work/out"; then fail 'case 5: something was removed without PR state'; fi
 
+# ── case 6: a batch the remote only PARTIALLY accepts is verified, not
+#            trusted by the push's exit code ─────────────────────────
+#
+# `delete_batched` sends every remote reclaim of one run in ONE `git push
+# --delete`. A real remote can reject one ref out of that batch — a branch
+# protection rule, a ref that moved server-side — while still accepting the
+# rest of the same push, and the combined command exits non-zero either way.
+# That is exactly why the receipt comes from re-reading `git ls-remote`
+# afterwards instead of the push's exit code: an `update` hook that rejects
+# one ref out of two, offline, is the stand-in for that server behavior. Two
+# fresh remote-only branches keep this batch isolated from every branch the
+# earlier cases already resolved.
+
+git branch partial-a main
+git branch partial-b main
+git push --quiet origin partial-a partial-b
+git branch -D partial-a partial-b >/dev/null
+
+{
+    cat "$work/prs.tsv"
+    printf 'partial-a\t201\tMERGED\t%s\t%s\n' "$base" "$squash"
+    printf 'partial-b\t202\tMERGED\t%s\t%s\n' "$base" "$squash"
+} >"$work/prs-case6.tsv"
+STUB_PRS=$work/prs-case6.tsv
+export STUB_PRS
+
+cat >"$work/origin.git/hooks/update" <<'HOOK'
+#!/bin/sh
+case "$1" in
+    refs/heads/partial-b) echo "rejected by hook: $1" >&2; exit 1 ;;
+esac
+exit 0
+HOOK
+chmod +x "$work/origin.git/hooks/update"
+
+run --apply
+[ "$code" -eq 0 ] || fail "case 6: --apply exited $code: $(cat "$work/err")"
+
+if has_remote partial-a; then fail 'case 6: the ref the hook ACCEPTED survived the batch'; fi
+grep -q "reclaimed remote branch.*origin/partial-a.*pr=#201" "$work/out" \
+    || fail 'case 6: no receipt for the ref the hook accepted'
+
+has_remote partial-b || fail 'case 6: a ref the hook REJECTED was deleted anyway'
+grep -q "KEPT remote branch.*origin/partial-b.*still present after delete" "$work/err" \
+    || fail 'case 6: the rejected ref was not reported KEPT'
+if grep -q "reclaimed remote branch.*origin/partial-b" "$work/out"; then
+    fail 'case 6: a ref the remote REJECTED was receipted as reclaimed — exit-code trust, not verification'
+fi
+
 echo 'PASS scripts/fleet/test-reclaim-merged.sh'
