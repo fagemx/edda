@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-09
+
+### Added
+
+- **`edda review` in the product** — the review lifecycle moves from shell scripts into the CLI: `edda review` (#872), the union-gate window check (`edda review gate`, GH-769), the writing half with labels and the `Independent Review` status (`edda review deliver`, GH-1030), and the response trigger with the resume layer (`edda review due`, GH-763)
+- **Typed ratification** — `--evidence pr#N@sha` and `--by-rule cited-authority` give decisions cited, machine-checkable authority (GH-764, GH-761)
+- **`edda fleet order`** — a deterministic health-gated dispatch queue with per-file collision detection and in-product freshness (GH-1015)
+- **`edda fleet health`** — product-share/mechanism-rate health gate with GREEN/YELLOW/RED exit codes (GH-1014)
+- **ACP dispatch in the CLI** — edda-conductor dispatches through ACP with offline fake evidence for tests (GH-800)
+- **Thin TypeScript and Python SDKs** over MCP/HTTP with a shared task-action surface and a complete MCP client contract (GH-611)
+- **Cross-machine decision import** — `edda-ledger` imports committed-mirror decisions across machines (GH-671)
+- **Skill-less controller loop** — `next-issue.sh`, `next-review.sh`, and the pi controller runbook (GH-899)
+- **L0 rule runner** runs every marked REVIEW.md check block as one pass (#915)
+- **Brief tooling** — `brief-from-issue` renders the invariant brief skeleton from an issue body (GH-885) and a dry-run validator applies AUTHORED STEPS in a throwaway worktree at the pinned SHA before any lane launch (#945)
+- **Issue freshness gate** — `next-issue.sh` re-derives issue applicability at dispatch time (#938)
+- **Canary calibration runner** scripts the README recipe (GH-881); shadow-review compare script (GH-887)
+- **SessionStart renders the rail task** this session holds (GH-793)
+- **Pre-push guard** ships in the git-native installer: reads the remote ref and refuses tag moves (#976)
+- **Operator daily digest gains a clock** (GH-765)
+
+### Changed
+
+- SDK packages are made publishable (GH-611, #990)
+- Fleet rules R22–R27 codify engine authority, verdict shape, readiness, policy carrier, origin-first work, and transport (#921); the judgement tag is left to R2 with brief v2 and calibration v1 (GH-884)
+- Direct review is the default path; the watcher lane is the flash tier and the independence source (#1051)
+
+### Fixed
+
+- The dispatch claim guard gets its own window and one shared rule, bounds bare-CLI claims in time, and reconciles attempts by lease while preparing worktrees outside the workspace lock (GH-1018, GH-1047)
+- `merge-reviewed-pr.sh` asks the union gate, not the latest review (GH-1057); the review gate window sees renames with `--no-renames` on both diffs (GH-1062)
+- The Claude bridge's SessionStart writeback teaches the rule-based binding path instead of operator-only authority (GH-1063)
+- OpenClaw bridge redacts durable bridge event data (#876)
+- Verdict publication posts the report only; the watcher rejects transcript dumps, skips non-open PRs, and writes `Independent Review` only when the verdict engine is authoritative for the PR surface (R22, #947, #961)
+- `mergeStateStatus` is no longer treated as a readiness signal — a stacked PR with zero verdicts no longer reports CLEAN (GH-946)
+- The SDK contract is pinned to `SPEC_PIN.json` and red on spec drift (#973); pre-push guard and capability canaries hardened (#900, #929)
+- Review lane terminal lifecycle finished (#867); the release dry-run watches the whole `crates/` tree (#900)
+
+### Docs
+
+- The implementable adapter contract is published (#873); rules and runbooks updated (R22–R27, pi-controller-runbook)
+
 ## [0.5.0] - 2026-09-04
 
 ### Added
