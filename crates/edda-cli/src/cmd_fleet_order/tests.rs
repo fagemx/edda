@@ -385,6 +385,30 @@ fn donewhen_headings_match_case_insensitively() {
     assert_eq!(verdict_for(empty, "## doneWhen"), Some(Verdict::Fail));
 }
 
+/// GH-1056: the case axis shipped in #1040 does not cover the separating
+/// space in `Done when` — `"done when".starts_with("donewhen")` is `false`.
+/// #953 and #970's own corpus spell the heading this way, so a fresh issue
+/// written `## Done when` was reported stale. Same fixture shape as
+/// `donewhen_headings_match_case_insensitively`, one axis over: space,
+/// double space, and hyphen/underscore spellings.
+#[test]
+fn donewhen_headings_match_the_spacing_axis() {
+    for heading in [
+        "## Done when",
+        "## done  when",
+        "## done-when",
+        "## Done_When",
+    ] {
+        let body = format!("## What happened\n\nprose.\n\n{heading}\n\n- delivered.\n");
+        assert!(
+            freshness(&body).is_empty(),
+            "{heading} should satisfy the doneWhen check"
+        );
+    }
+    let empty = "## What happened\n\nprose.\n\n## Done when\n\n";
+    assert_eq!(verdict_for(empty, "## doneWhen"), Some(Verdict::Fail));
+}
+
 /// A command the issue is about to build, or one cited with evidence that it
 /// ran, must not FAIL the gate; an unqualified reference to a verb that does
 /// not exist still does.

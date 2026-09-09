@@ -603,7 +603,8 @@ pub fn cites_red_run(body: &str) -> bool {
 ///
 /// * a path the issue itself declares under `## Predicted surface` WARNs
 ///   instead of FAILing when it is referenced again elsewhere in the body;
-/// * a `doneWhen` heading matches whatever its case;
+/// * a `doneWhen` heading matches whatever its case or spacing (`Done when`,
+///   `done-when`, `DONE_WHEN` all count, GH-1056);
 /// * a command that is to be built (mentioned under `doneWhen` or
 ///   `## Predicted surface`) or is evidence-cited WARNs instead of FAILing;
 /// * a reference to a genuinely deleted path still FAILs.
@@ -681,8 +682,13 @@ fn section_heading(line: &str) -> Option<String> {
     Some(rest.trim().to_ascii_lowercase())
 }
 
+/// `section` is already lowercased ([`section_heading`]); this additionally
+/// strips everything but ASCII letters before the prefix match, so the
+/// separating space in `Done when` (GH-1056) — and any hyphen or underscore
+/// spelling — collapses the same way the case axis already does.
 fn is_donewhen(section: &str) -> bool {
-    section.starts_with("donewhen")
+    let normalized: String = section.chars().filter(char::is_ascii_alphabetic).collect();
+    normalized.starts_with("donewhen")
 }
 
 /// Any `… surface` heading. Collision scoring reads only the canonical
