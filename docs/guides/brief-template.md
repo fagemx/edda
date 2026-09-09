@@ -21,8 +21,9 @@ with reasons, not procedures).
 
 - **worker** — implements a scoped bundle; owns no gate.
 - **verifier** — audits a delivery candidate; runs the review ladder.
-- **controller** — assigns bundles, adjudicates mid-flight, holds the merge
-  decision pending explicit operator authority.
+- **controller** — assigns bundles, adjudicates mid-flight, and executes the
+  merge once the recorded rule gate passes (current-head LGTM, P0=0/P1=0,
+  `CI Gate` green, empty SHA window — `docs/fleet/rules.md` R6).
 
 ### Runtime (three values)
 

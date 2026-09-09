@@ -275,7 +275,7 @@ network protocol:
   back as if B had made it — once per wave, forever, each time superseding A's
   original row and stamping it as a peer's. The origin id is what the
   importer's self-import guard tests, so the loop closes instead of running.
-- **Ratified state travels; operator authority does not.** A ratified decision
+- **Ratified state travels; binding authority does not.** A ratified decision
   arrives ratified — the state is part of the round trip doneWhen — replayed as
   an append-only `decision_ratify` event. But that ratification is read from a
   `- **Governance**: ratified by <who> at <ts>` line in a text file: no hash
@@ -283,10 +283,11 @@ network protocol:
   the loop at all. So the replay is attributed to `mirror:<machine>` under
   `ratify.authority=typed-prefix`, never to the name the markdown claimed, and
   `edda ask` renders it `ratified on <machine> (via mirror)`. Anything else
-  would let a text file mint local operator authority on every machine that
+  would let a text file mint local binding authority on every machine that
   pulls, against the invariant in `edda_core::event::new_decision_ratify_event`
-  that operator authority is conferred by an event and never self-declared on
-  write.
+  that binding authority — an operator's or a cited rule-sweep's
+  (`--by-rule cited-authority`) — is conferred by an event and never
+  self-declared on write.
 - **Values are quoted, never paraphrased.** The mirror carries the verbatim
   value and reason of every decision; the import must never mint a value from
   an INDEX gloss (INDEX.md carries counts and freshness only). The
