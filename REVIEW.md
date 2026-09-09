@@ -535,11 +535,12 @@ git diff "origin/$BASE...$SHA" | grep '^+' \
 **D4 — authority boundary. P0.** A document may not instruct its reader to act
 beyond their role: merging, force-pushing, deleting branches, or skipping
 review. The grep produces candidates; a candidate passes only if the added text
-in the same paragraph names the authority that permits it (operator
-authorisation, or `fleet.merged-artifact-cleanup` for a **merged** PR's branch
-and lane worktree). A candidate with no such caveat is the finding (canary
-`c4-merge-authority-contradiction`; decisions `fleet.merge-authority`,
-`fleet.merged-artifact-cleanup`).
+in the same paragraph names the recorded rule that permits it (the merge
+gate — `docs/fleet/rules.md` R6: current-head LGTM, `CI Gate` green, empty SHA
+window, P0=P1=0 — or `fleet.merged-artifact-cleanup` for a **merged** PR's
+branch and lane worktree). A candidate with no such caveat is the finding
+(canary `c4-merge-authority-contradiction`; decisions `fleet.merge-authority`,
+`review.merge-gate`, `fleet.merged-artifact-cleanup`).
 
 # review-spec:check D4
 ```sh
@@ -556,8 +557,9 @@ scoped and non-duplicative. Judgement — see §6.
 **S1 — a skill may not tell an agent to cross a gate. P0.** Review skills may
 not instruct fixing what they review or merging (GATE-01); worker skills may
 not instruct self-merge. Check the added text against the prohibitions the
-skill itself declares and against `loop` ("Merge still requires explicit
-operator authority").
+skill itself declares and against `loop` ("merge follows the recorded rule
+gate, never a role's own action") — S1's gate-crossing prohibition itself is
+unaffected by who or what executes the merge gate.
 
 # review-spec:check S1
 ```sh
@@ -841,8 +843,10 @@ rather than overwriting it.
 
 ## 8. Step 8 — the verdict
 
-- **P0 = 0 and P1 = 0 → LGTM.** Add `fleet:reviewed`. Stop. Merge is the
-  operator's action, never the reviewer's (`loop`; GATE-01).
+- **P0 = 0 and P1 = 0 → LGTM.** Add `fleet:reviewed`. Stop. Merge belongs to
+  the rule-based merge gate — current-head LGTM, `CI Gate` green, empty SHA
+  window, P0=0/P1=0 (`docs/fleet/rules.md` R6) — never the reviewer
+  (`loop`; GATE-01).
 - **Any P0 or any P1 → Changes Requested.** Post the comment, leave the PR
   open, stop. Fixing is the implementer's round; every `Changes Requested`
   round is answered by a `Review Response: Round N` that names the new full SHA
