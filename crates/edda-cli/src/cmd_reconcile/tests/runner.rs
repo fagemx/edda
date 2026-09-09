@@ -661,33 +661,33 @@ pub(super) fn periodic_renewal_stops_old_runner_before_failure_after_lease_repla
     let runner_config = config.clone();
     let runner = std::thread::spawn(move || run_task(&runner_repo, 1, 1, &runner_config, false));
 
-    let session_deadline = std::time::Instant::now() + FAKE_CODEX_STARTUP_BUDGET;
-    while std::time::Instant::now() < session_deadline {
-        if ledger
-            .task_events()?
-            .iter()
-            .any(|event| event.event_type == "task.session")
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    assert!(ledger
-        .task_events()?
-        .iter()
-        .any(|event| event.event_type == "task.session"));
+    let session_recorded = poll_until(
+        FAKE_CODEX_STARTUP_BUDGET,
+        std::time::Duration::from_millis(25),
+        || {
+            Ok(ledger
+                .task_events()?
+                .iter()
+                .any(|event| event.event_type == "task.session"))
+        },
+    )?;
+    assert!(session_recorded, "runner recorded the durable session");
     let after_session = ledger.task_lease(1)?.expect("session lease");
-    let mut saw_periodic_renewal = false;
-    for _ in 0..100 {
-        let current = ledger.task_lease(1)?.expect("current lease");
-        if current.heartbeat_at != after_session.heartbeat_at
-            || current.expires_at != after_session.expires_at
-        {
-            saw_periodic_renewal = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+    // Same hang-safety-valve as FAKE_CODEX_STARTUP_BUDGET, not a tuned
+    // deadline: with lease_ttl_s = 1 the runner renews roughly once a second
+    // (`(ttl_s / 2).max(1)` in run_turn_with_renewals), but that tick shares
+    // the tokio runtime with the fake process's I/O, so a loaded host can
+    // stretch the wait well past its nominal interval without anything being
+    // wrong (GH-1031).
+    let saw_periodic_renewal = poll_until(
+        FAKE_CODEX_STARTUP_BUDGET,
+        std::time::Duration::from_millis(25),
+        || {
+            let current = ledger.task_lease(1)?.expect("current lease");
+            Ok(current.heartbeat_at != after_session.heartbeat_at
+                || current.expires_at != after_session.expires_at)
+        },
+    )?;
     assert!(
         saw_periodic_renewal,
         "runner crossed a periodic renewal interval"
