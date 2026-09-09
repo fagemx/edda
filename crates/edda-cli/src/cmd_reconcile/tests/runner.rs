@@ -628,6 +628,13 @@ pub(super) fn fake_runner_records_session_in_main_ledger_before_turn_and_fails_w
 #[test]
 pub(super) fn periodic_renewal_stops_old_runner_before_failure_after_lease_replacement(
 ) -> anyhow::Result<()> {
+    // This test writes process env (`EDDA_FAKE_*`) to gate the fake turn
+    // below, so it takes the crate-wide env guard alongside its own
+    // fake-Codex lock — otherwise it races any other test in this binary
+    // that mutates process env, the same reason
+    // `fake_runner_resumes_current_attempt_after_slow_startup_before_turn`
+    // takes both.
+    let _env = crate::test_support::env_guard();
     let _fake = test_lock(&FAKE_CODEX_LOCK);
     let dir = tempfile::tempdir()?;
     let repo = dir.path().join("repo");
@@ -653,53 +660,104 @@ pub(super) fn periodic_renewal_stops_old_runner_before_failure_after_lease_repla
     )?)?;
     append_started(&ledger, 1, 1, 1)?;
     ledger.upsert_task_lease(&lease(1, 1, "2026-08-16T02:00:00Z"))?;
-    let fake = fake_codex(dir.path(), 2, false)?;
+    let fake = fake_codex(dir.path(), 0, false)?;
     let mut config = ReconcileConfig::test_defaults();
     config.lease_ttl_s = 1;
     config.codex_bin = fake;
+
+    // Gate the fake turn at the same EDDA_FAKE_CHALLENGE checkpoint
+    // `allow_fake_turn_after_durable_session` uses (tests/mod.rs): the fake
+    // process writes the challenge file and then blocks — bounded by
+    // FAKE_CODEX_STARTUP_BUDGET — until this test writes `allow` or `deny`.
+    // Without this, the turn resolves on `fake_codex`'s fixed `Start-Sleep`
+    // and `finish_runner` deletes the lease the moment it does, so the
+    // periodic-renewal tick this test waits for below has to land inside
+    // whatever is left of that fixed window: a race whose loss makes the
+    // condition permanently unobservable rather than merely late, which no
+    // poll budget can reach (GH-1031). Gating the turn means
+    // `run_turn_with_renewals`'s ~1s interval (`(ttl_s / 2).max(1)` with
+    // `lease_ttl_s = 1`, runner.rs:473-474) keeps ticking for as long as the
+    // gate stays shut, so the renewal below is an event this test waits on
+    // instead of a deadline it races.
+    let challenge = dir.path().join("renewal.challenge");
+    let allow = dir.path().join("renewal.allow");
+    let deny = dir.path().join("renewal.deny");
+    std::env::set_var("EDDA_FAKE_CHALLENGE", &challenge);
+    std::env::set_var("EDDA_FAKE_ALLOW", &allow);
+    std::env::set_var("EDDA_FAKE_DENY", &deny);
+
     let runner_repo = repo.clone();
     let runner_config = config.clone();
     let runner = std::thread::spawn(move || run_task(&runner_repo, 1, 1, &runner_config, false));
 
-    let session_recorded = poll_until(
-        FAKE_CODEX_STARTUP_BUDGET,
-        std::time::Duration::from_millis(25),
-        || {
-            Ok(ledger
-                .task_events()?
-                .iter()
-                .any(|event| event.event_type == "task.session"))
-        },
-    )?;
-    assert!(session_recorded, "runner recorded the durable session");
-    let after_session = ledger.task_lease(1)?.expect("session lease");
-    // Same hang-safety-valve as FAKE_CODEX_STARTUP_BUDGET, not a tuned
-    // deadline: with lease_ttl_s = 1 the runner renews roughly once a second
-    // (`(ttl_s / 2).max(1)` in run_turn_with_renewals), but that tick shares
-    // the tokio runtime with the fake process's I/O, so a loaded host can
-    // stretch the wait well past its nominal interval without anything being
-    // wrong (GH-1031).
-    let saw_periodic_renewal = poll_until(
-        FAKE_CODEX_STARTUP_BUDGET,
-        std::time::Duration::from_millis(25),
-        || {
-            let current = ledger.task_lease(1)?.expect("current lease");
-            Ok(current.heartbeat_at != after_session.heartbeat_at
-                || current.expires_at != after_session.expires_at)
-        },
-    )?;
-    assert!(
-        saw_periodic_renewal,
-        "runner crossed a periodic renewal interval"
-    );
-    ledger.upsert_task_lease(&TaskLease {
-        task_id: 1,
-        attempt: 2,
-        owner: "replacement".into(),
-        expires_at: "2026-08-16T03:00:00Z".into(),
-        heartbeat_at: "2026-08-16T01:00:00Z".into(),
-    })?;
-    runner.join().expect("runner thread")?;
+    let outcome = (|| -> anyhow::Result<()> {
+        let session_recorded = poll_until(
+            FAKE_CODEX_STARTUP_BUDGET,
+            std::time::Duration::from_millis(25),
+            || {
+                Ok(ledger
+                    .task_events()?
+                    .iter()
+                    .any(|event| event.event_type == "task.session"))
+            },
+        )?;
+        anyhow::ensure!(session_recorded, "runner recorded the durable session");
+        let after_session = ledger.task_lease(1)?.expect("session lease");
+
+        let challenge_seen = poll_until(
+            FAKE_CODEX_STARTUP_BUDGET,
+            std::time::Duration::from_millis(10),
+            || Ok(challenge.exists()),
+        )?;
+        anyhow::ensure!(challenge_seen, "fake never reached the turn gate");
+
+        // The turn is held at the gate now, so it cannot resolve out from
+        // under this poll: `finish_runner` cannot delete the lease until
+        // the gate opens below, which happens only after this observation
+        // succeeds.
+        let saw_periodic_renewal = poll_until(
+            FAKE_CODEX_STARTUP_BUDGET,
+            std::time::Duration::from_millis(25),
+            || {
+                let current = ledger.task_lease(1)?.expect("current lease");
+                Ok(current.heartbeat_at != after_session.heartbeat_at
+                    || current.expires_at != after_session.expires_at)
+            },
+        )?;
+        anyhow::ensure!(
+            saw_periodic_renewal,
+            "runner crossed a periodic renewal interval"
+        );
+
+        ledger.upsert_task_lease(&TaskLease {
+            task_id: 1,
+            attempt: 2,
+            owner: "replacement".into(),
+            expires_at: "2026-08-16T03:00:00Z".into(),
+            heartbeat_at: "2026-08-16T01:00:00Z".into(),
+        })?;
+        Ok(())
+    })();
+
+    // Release the gate unconditionally: allow if the observation above
+    // succeeded, deny otherwise, so a failed observation doesn't also make
+    // the fake process (and the join below) wait out its own copy of
+    // FAKE_CODEX_STARTUP_BUDGET on top of the one the failure already
+    // consumed.
+    let _ = std::fs::write(if outcome.is_ok() { &allow } else { &deny }, "gate");
+
+    // Whichever way the runner notices from here — the next renewal tick
+    // seeing it no longer owns the lease (runner.rs:480-484), or the turn
+    // completing and `finish_runner` reading the now-replaced lease —
+    // `finish_runner` re-reads current ownership rather than trusting a
+    // value captured earlier, so both paths land on the same outcome the
+    // assertions below check for.
+    let run_result = runner.join().expect("runner thread");
+    std::env::remove_var("EDDA_FAKE_CHALLENGE");
+    std::env::remove_var("EDDA_FAKE_ALLOW");
+    std::env::remove_var("EDDA_FAKE_DENY");
+    outcome?;
+    run_result?;
 
     assert_eq!(ledger.task_lease(1)?.expect("replacement").attempt, 2);
     assert!(ledger
@@ -735,17 +793,20 @@ pub(super) fn fake_runner_resumes_current_attempt_after_slow_startup_before_turn
     std::env::set_var("EDDA_FAKE_CHALLENGE", &challenge);
     std::env::set_var("EDDA_FAKE_ALLOW", &allow);
     std::env::set_var("EDDA_FAKE_DENY", &deny);
-    // The deliberate delay that simulates a slow runner startup happens
-    // before the observer starts polling, not after: the observer's budget
-    // exists to cover the handshake it is actually watching for, not time
-    // this test spends manufacturing "slow startup" on purpose. Sleeping
-    // after the observer was already running used to spend part of its
-    // hang-safety-valve on nothing observable — the unconditional-wait
-    // anti-pattern this reordering removes (GH-1078).
-    std::thread::sleep(std::time::Duration::from_millis(2_100));
-
     let observer =
         allow_fake_turn_after_durable_session(repo.clone(), 2, 1, challenge, allow, deny);
+
+    // The deliberate "slow startup" delay runs after the observer has
+    // already started polling, not before: that is what makes this a slow
+    // *startup* the observer has to wait through, rather than a delay that
+    // finishes before anything is watching and pins nothing. `84cbbdd`
+    // (2026-08-17) added this sleep in this position deliberately, in the
+    // same commit that renamed this test to `..._after_slow_startup_...`;
+    // it deliberately spends part of the observer's FAKE_CODEX_STARTUP_BUDGET
+    // hang-safety-valve on nothing observable, which is exactly what pins
+    // that the budget is generous enough to absorb a slow handshake and not
+    // merely a fast one.
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
 
     let run_result = run_task(&repo, 2, 1, &config, false);
     let observer_result = observer.join();
