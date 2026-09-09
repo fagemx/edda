@@ -82,6 +82,13 @@ cat >"$work/fixtures/issue-mention.json" <<'JSON'
 {"state":"OPEN","title":"feat(fleet): freshness mention","labels":[{"name":"fleet:ready"}],"comments":[],
  "body":"## doneWhen\n- `scripts/fleet/next-issue.sh`\n"}
 JSON
+# GH-1056: the spacing axis — "Done when" differs from "doneWhen" by a
+# space, not by case, and the pre-fix regex (`/^##[ \t]*doneWhen[ \t]*$/`)
+# rejected it.
+cat >"$work/fixtures/issue-donewhen-spaced.json" <<'JSON'
+{"state":"OPEN","title":"feat(fleet): freshness spaced donewhen","labels":[{"name":"fleet:ready"}],"comments":[],
+ "body":"## Predicted surface\n\nGate file `scripts/fleet/next-issue.sh` exists.\n\n## Done when\n- `edda ask` resolves\n"}
+JSON
 cat >"$work/fixtures/pr-list-hit.json" <<'JSON'
 [{"number":746,"state":"MERGED","title":"x","body":"Closes #993",
   "closingIssuesReferences":[{"number":993}]}]
@@ -132,6 +139,7 @@ case "$1 $2" in
             *\ 995\ *|*\ 995) resp=$(cat "$GH_FIXTURES/issue-barename.json") ;;
             *\ 996\ *|*\ 996) resp=$(cat "$GH_FIXTURES/issue-concept.json") ;;
             *\ 997\ *|*\ 997) resp=$(cat "$GH_FIXTURES/issue-mention.json") ;;
+            *\ 998\ *|*\ 998) resp=$(cat "$GH_FIXTURES/issue-donewhen-spaced.json") ;;
             *) resp=$(cat "$GH_FIXTURES/issue-ok.json") ;;
         esac ;;
     "issue edit")
@@ -265,6 +273,16 @@ if [ "$run_suite" -eq 1 ]; then
     grep -q '^PASS not delivered$' "$work/out-g.txt" ||
         fail "issue 997 must not treat a mention as delivery: $(cat "$work/out-g.txt")"
     echo "ok g mention is not delivery"
+
+    # h. GH-1056 spacing axis: "## Done when" (a space, not a case
+    # difference from "doneWhen") must PASS, not FAIL doneWhen-missing.
+    run_gated sh "$freshness" 998 >"$work/out-h.txt" 2>"$work/err-h.txt" ||
+        fail "issue 998 must pass: rc=$? err=$(cat "$work/err-h.txt")"
+    grep -q '^PASS doneWhen$' "$work/out-h.txt" ||
+        fail "issue 998 misses the doneWhen PASS line for '## Done when': $(cat "$work/out-h.txt")"
+    grep -q '^FAIL doneWhen' "$work/out-h.txt" &&
+        fail "issue 998 must not FAIL doneWhen for '## Done when': $(cat "$work/out-h.txt")"
+    echo "ok h '## Done when' (spacing axis) passes"
 
     echo "PASS: scripts/fleet/test-issue-freshness.sh"
     exit 0

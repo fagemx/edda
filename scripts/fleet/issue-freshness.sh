@@ -133,9 +133,17 @@ for verb in $verbs; do
 done
 
 # 3. doneWhen: present and non-empty (blank lines do not count as content).
+# The heading is matched case- and spacing-insensitively (GH-1056): strip
+# everything but a-z from the lowercased heading text so "Done when",
+# "done-when" and "doneWhen" all collapse to "donewhen" the same way the
+# product gate's is_donewhen() does (crates/edda-cli/src/cmd_fleet_order.rs).
 section=$(printf '%s\n' "$body" | awk '
-    /^##[ \t]*doneWhen[ \t]*$/ { p = 1; next }
-    /^##[ \t]/ { p = 0 }
+    /^##[ \t]/ {
+        h = tolower($0)
+        gsub(/[^a-z]/, "", h)
+        p = (h == "donewhen") ? 1 : 0
+        next
+    }
     p { print }
 ')
 if [ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]; then
