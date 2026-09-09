@@ -744,30 +744,62 @@ fn backtick_list_to_json(s: &str) -> String {
 /// list or truncating a value.
 ///
 /// The list's own outer wrapping backticks are stripped exactly once, from
-/// the *whole* string, before splitting — never per fragment (GH-1044). One
-/// pass over the joined string already shows why: `split("`, `")` finds and
-/// consumes every INTERIOR delimiter pair as part of its match (the
-/// preceding item's closing backtick together with the next item's opening
-/// one), so once the two outer delimiters are gone, nothing left in any
-/// fragment is ever a genuine wrapping backtick — every backtick still there
-/// is escaped content (`` \` ``) bound for [`unescape_field`]. A middle item
-/// whose own value ends in a backtick is the case that breaks a per-fragment
-/// strip: it renders as `` ...\``` `` at that item's boundary (the escaped
-/// backtick's own closing backtick immediately followed by the real
-/// delimiter), `split` correctly consumes only the real delimiter as part of
-/// the *next* match, and a fragment-local `strip_suffix('`')` — unable to
-/// tell the two apart from inside one fragment — then strips the escaped
-/// backtick's bare half too, corrupting the item. Stripping the outer pair
-/// once, before any fragment exists, removes the ambiguity instead of
-/// guessing at it.
+/// the *whole* string, before splitting (GH-1044) — never per fragment: a
+/// fragment-local `strip_suffix('`')` cannot tell an escaped content
+/// backtick's bare half and a genuine wrapping delimiter apart, so it would
+/// sometimes strip the wrong one.
+///
+/// The split itself has to be escape-aware (GH-1044 Round 1 P0 —
+/// `split_unescaped_backtick_comma` below). A plain `split("`, `")` matches
+/// four literal bytes and never looks at what precedes them, so an item
+/// whose value *ends* in exactly backtick, comma, space — escaped by the
+/// writer to `` \`,  `` — still supplies the delimiter's opening half from
+/// its own escaped content, one byte before the genuine wrapper backtick
+/// that follows it. Because a plain split is leftmost and non-overlapping,
+/// that false match consumes the real delimiter's opening half too,
+/// corrupting both the item that ends there and the one after it.
 fn backtick_list(s: &str) -> Vec<String> {
     let inner = s.strip_prefix('`').unwrap_or(s);
     let inner = inner.strip_suffix('`').unwrap_or(inner);
-    inner
-        .split("`, `")
+    split_unescaped_backtick_comma(inner)
+        .into_iter()
         .map(|p| unescape_field(p.trim()))
         .filter(|p| !p.is_empty())
         .collect()
+}
+
+/// Split `inner` on the list's item delimiter `` `, ` ``, treating a
+/// backtick as delimiter material only when it is not itself escaped
+/// content (GH-1044 Round 1 P0).
+///
+/// Walks `inner` left to right the same way [`unescape_field`] does: a `\`
+/// and whatever character follows it are consumed together as one unit and
+/// can never begin a delimiter match. `escape_field` escapes every content
+/// backtick, so the only backtick this scan ever reaches as a fresh,
+/// unconsumed character is a genuine item wrapper — an escaped content
+/// backtick is always the second half of a pair the backslash branch has
+/// already stepped over. A fresh backtick not immediately followed by
+/// `` , ` `` is left in place rather than treated as an error, the same
+/// leniency `backtick_list` has always extended to malformed input.
+fn split_unescaped_backtick_comma(inner: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut chars = inner.char_indices();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            chars.next(); // escaped unit — cannot itself begin a delimiter
+            continue;
+        }
+        if c == '`' && inner[i..].starts_with("`, `") {
+            parts.push(&inner[start..i]);
+            for _ in 0..3 {
+                chars.next(); // ',', ' ', the delimiter's closing '`'
+            }
+            start = i + "`, `".len();
+        }
+    }
+    parts.push(&inner[start..]);
+    parts
 }
 
 /// Inverse of `edda-cli::cmd_export::escape_field` — a left-to-right scan so
@@ -782,12 +814,21 @@ fn backtick_list(s: &str) -> Vec<String> {
 /// backslashes in practice — `affected_paths`, tags — were already unescaped
 /// before the encoding was made total), which is why the round trip is
 /// preferred over a version-tagged mirror format. The same argument covers
-/// the new backtick arm: every backslash run in mirror text written before
-/// GH-1044 came only from doubling a raw `\` (`.replace('\\', "\\\\")`), so
-/// every such run has even length and this scan always pairs it off
-/// completely — an escaped-backtick two-char sequence can therefore never
-/// appear by accident in a pre-GH-1044 mirror, only be introduced by this
-/// fix's own writer.
+/// the new backtick arm, but not because every pre-GH-1044 backslash run has
+/// even length — it doesn't: the pre-fix writer's newline pass
+/// (`.replace('\n', "\\n")`) also emits a single backslash, so a raw `\`
+/// immediately before a raw newline encodes to three backslashes then `n`,
+/// an odd-length run. What actually holds is that this scan is
+/// self-synchronising over the old escape alphabet: every backslash it
+/// meets in pre-GH-1044 text is the first character of either a doubled
+/// backslash (`.replace('\\', "\\\\")`) or a newline escape
+/// (`.replace('\n', "\\n")`), and both are consumed as one unit — so
+/// regardless of the run's length or parity, the scan always lands back on
+/// a fresh, unpaired position immediately after it, never mid-run, and so
+/// never pairs a leftover backslash with a raw backtick that happens to
+/// follow. An escaped-backtick two-char sequence can therefore never appear
+/// by accident in a pre-GH-1044 mirror, only be introduced by this fix's own
+/// writer.
 fn unescape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();

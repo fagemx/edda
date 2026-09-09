@@ -770,6 +770,46 @@ fn backtick_list_multi_item_mixes_edge_and_embedded_backticks() {
 }
 
 #[test]
+fn backtick_list_item_ending_in_backtick_comma_space_does_not_corrupt_the_next_item() {
+    // GH-1044 Round 1 P0 (re-derived independently from the review, not
+    // copied): escaping a content backtick makes it distinguishable *to
+    // `unescape_field`* — it is preceded by a backslash — but does nothing
+    // for a plain `split`, which matches four literal bytes and never looks
+    // at what precedes them. An item whose value ends in exactly backtick,
+    // comma, space renders (escaped) as `` a\`,  `` — so the escaped
+    // backtick's own bare half sits immediately before that same item's
+    // trailing ", " and the wrapper's closing backtick, and a leftmost,
+    // non-overlapping `split("`, `")` matches one byte too early, starting
+    // at the *content* backtick instead of the wrapper one.
+    //
+    // Two items, `` a`, `` (a, backtick, comma, space) and `b` — rendered:
+    //
+    //   ` a \ ` ,  ` , ` b `
+    //   0 1 2 3 4 5 6 7 8 9 10 11        (12 bytes)
+    //         ^wrap-open(3=esc.bt)  ^wrap-close(6)   ^wrap-open(9)
+    //
+    // After the outer strip, `inner = a \ ` , ␣ ` , ␣ ` b`. The leftmost
+    // `` `,  ` `` match starts at inner[2] (the escaped content backtick),
+    // consuming inner[2..6] — the item's own ", " *and* the wrapper's
+    // closing backtick — before the genuine delimiter at inner[5..9] is
+    // ever reached. Pre-fix this produced `["a\\", ", `b"]`: item 1 loses
+    // its trailing comma and gains a dangling backslash, item 2 gains a
+    // leading ", `" stolen from item 1. Both values land corrupted in the
+    // ledger import payload — silently, since `backtick_list` cannot fail.
+    //
+    // The expected value below is `"a`,"`, not `"a`, "`: `backtick_list`'s
+    // own `.trim()` drops the trailing space regardless of this fix — a
+    // separate, pre-existing whitespace-loss limitation tracked outside
+    // GH-1044 (see the reviewer's FOLLOW-UP ISSUE on PR #1108 Round 1), not
+    // something this test conflates with the split corruption above.
+    let items = ["a`, ", "b"];
+    assert_eq!(
+        backtick_list(&mirror_list(&items)),
+        vec!["a`,".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
 fn unescape_field_inverts_escaped_backtick() {
     for original in ["a`b", "`lead", "trail`", "``double``"] {
         assert_eq!(
