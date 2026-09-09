@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-10
+
+### Added
+
+- **`fleet reclaim-merged` executor** — reclaims merged lane worktrees and local/remote branches with dry-run-first receipts and fail-closed remote verification (GH-1009, #1091)
+
+### Changed
+
+- **Merge governance follows the rule gate** — loaded policy carriers now describe the current-head LGTM, zero-blocker, CI, union, and base-window conditions instead of assigning merge to a named operator; shared checkouts remain on main and reviewers fetch private refs (GH-1064, #1101)
+- **Fleet review rules are complete** — R18–R20 restore Independent Review semantics, review-dispatch pre-claim, and L1 ownership while repairing R21/R22 citations (GH-966, #1095)
+- **Release operations are hardened** — Homebrew formulas build the immutable crates.io source package to avoid Linux glibc-runner coupling (#1090), and the release skill records the slower `0.6.x` patch cadence plus v0.6.0 operational lessons (#1106)
+
+### Fixed
+
+- **Review merge safety** — orphan Review Responses now block merge, untrusted public comments cannot create or clear drift, and failed remote verification no longer looks like a clean result (GH-993, #1102)
+- **`ratify --by-rule` guards** — supersession is no longer inferred from a key mention; same-key, explicit-marker, domain/date, and bounded-sweep guards preserve binding decisions (GH-1066, #1098)
+- **Review diff and shell parsing** — content checks use three-dot PR ranges, and shell-parse evidence reads reviewed blobs without depending on working-tree file presence (GH-1003, GH-992, #1097)
+- **doneWhen parsing** accepts the documented spacing variants across issue/spec matchers (GH-1056, #1089)
+- **`edda review deliver` read path** has an argv-level regression guard and validates PR-vs-issue identity before reducing comments (GH-1079, #1086)
+
 ## [0.6.0] - 2026-09-09
 
 ### Added
