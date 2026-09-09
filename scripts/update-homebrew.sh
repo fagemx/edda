@@ -1,69 +1,65 @@
 #!/usr/bin/env bash
-# Update the Homebrew formula in fagemx/homebrew-tap with SHA256 hashes
-# from a GitHub Release.
+# Update the Homebrew formula in fagemx/homebrew-tap from the published
+# crates.io source package. Building inside Homebrew avoids tying Linux users
+# to the glibc version of GitHub's release runner.
 #
 # Usage:
-#   ./scripts/update-homebrew.sh 0.1.0
-#   ./scripts/update-homebrew.sh 0.1.0 /path/to/homebrew-tap
+#   ./scripts/update-homebrew.sh 0.6.0
+#   ./scripts/update-homebrew.sh 0.6.0 /path/to/homebrew-tap
 
 set -euo pipefail
 
 VERSION="${1:?Usage: update-homebrew.sh <version> [tap-dir]}"
-TAG="v${VERSION}"
-REPO="fagemx/edda"
 TAP_DIR="${2:-}"
 FORMULA_OUT=""
 
-# Fetch SHA256 for a given target
-fetch_hash() {
-  local target="$1"
-  local asset="edda-${TAG}-${target}.tar.gz.sha256"
-  gh release download "$TAG" --repo "$REPO" --pattern "$asset" --output - | awk '{print $1}'
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "error: version must be a bare semantic version (for example 0.6.0)" >&2
+  exit 2
+fi
+
+CRATE_URL="https://static.crates.io/crates/edda/edda-${VERSION}.crate"
+CRATE_FILE=$(mktemp)
+cleanup() {
+  rm -f "$CRATE_FILE"
 }
+trap cleanup EXIT
 
-echo "Fetching SHA256 hashes for ${TAG}..."
+curl -fsSL --retry 3 --user-agent "edda-homebrew-updater/1.0" \
+  --output "$CRATE_FILE" "$CRATE_URL"
 
-HASH_MACOS_ARM=$(fetch_hash "aarch64-apple-darwin")
-HASH_MACOS_X86=$(fetch_hash "x86_64-apple-darwin")
-HASH_LINUX_ARM=$(fetch_hash "aarch64-unknown-linux-gnu")
-HASH_LINUX_X86=$(fetch_hash "x86_64-unknown-linux-gnu")
+if command -v sha256sum >/dev/null 2>&1; then
+  SOURCE_HASH=$(sha256sum "$CRATE_FILE" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  SOURCE_HASH=$(shasum -a 256 "$CRATE_FILE" | awk '{print $1}')
+else
+  echo "error: sha256sum or shasum is required" >&2
+  exit 1
+fi
 
-echo "  macOS arm64:  ${HASH_MACOS_ARM}"
-echo "  macOS x86_64: ${HASH_MACOS_X86}"
-echo "  Linux arm64:  ${HASH_LINUX_ARM}"
-echo "  Linux x86_64: ${HASH_LINUX_X86}"
+if [[ ! "$SOURCE_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "error: invalid SHA256 for ${CRATE_URL}" >&2
+  exit 1
+fi
 
-# Generate formula
+echo "Source: ${CRATE_URL}"
+echo "SHA256: ${SOURCE_HASH}"
+
 generate_formula() {
 cat <<RUBY
 class Edda < Formula
   desc "Decision memory for coding agents"
   homepage "https://github.com/fagemx/edda"
-  version "${VERSION}"
+  url "${CRATE_URL}"
+  sha256 "${SOURCE_HASH}"
   license any_of: ["MIT", "Apache-2.0"]
 
-  on_macos do
-    if Hardware::CPU.arm?
-      url "https://github.com/fagemx/edda/releases/download/v#{version}/edda-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "${HASH_MACOS_ARM}"
-    else
-      url "https://github.com/fagemx/edda/releases/download/v#{version}/edda-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "${HASH_MACOS_X86}"
-    end
-  end
-
-  on_linux do
-    if Hardware::CPU.arm?
-      url "https://github.com/fagemx/edda/releases/download/v#{version}/edda-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "${HASH_LINUX_ARM}"
-    else
-      url "https://github.com/fagemx/edda/releases/download/v#{version}/edda-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "${HASH_LINUX_X86}"
-    end
-  end
+  depends_on "pkgconf" => :build
+  depends_on "rust" => :build
+  depends_on "openssl@3"
 
   def install
-    bin.install "edda"
+    system "cargo", "install", *std_cargo_args
   end
 
   test do
@@ -76,7 +72,6 @@ RUBY
 if [ -n "$TAP_DIR" ]; then
   FORMULA_OUT="${TAP_DIR}/Formula/edda.rb"
   generate_formula > "$FORMULA_OUT"
-  echo ""
   echo "Formula written to: ${FORMULA_OUT}"
 else
   echo ""

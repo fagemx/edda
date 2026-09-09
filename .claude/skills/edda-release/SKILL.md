@@ -233,10 +233,14 @@ Run the one-line installer twice in disposable directories: once pinned
 (`--version v<VERSION>`) and once through its default “latest” path. Both
 binaries must report the same version and expose `dispatch` and `verdict`.
 
-After the release is published, generate the Homebrew formula from the release
-checksums:
+After crates.io publication is verified, generate the Homebrew formula from the
+immutable crates.io source package. The generator downloads and hashes the
+`.crate` itself and emits a source-build formula; do not point Linuxbrew back at
+a GitHub binary built on `ubuntu-latest`, because its glibc floor can exceed the
+Homebrew host's:
 
 ```bash
+sh scripts/test-update-homebrew.sh
 ./scripts/update-homebrew.sh <VERSION> <HOME_BREW_TAP_CHECKOUT>
 brew audit --strict fagemx/tap/edda
 brew reinstall fagemx/tap/edda
@@ -245,9 +249,10 @@ edda dispatch --help
 edda verdict --help
 ```
 
-Commit and push the tap formula only after its diff names the intended version
-and hashes. If no macOS/Linux Homebrew verifier is available, the release cannot
-claim full `DONE`; report `DONE_WITH_CONCERNS` with the missing public canary.
+Commit and push the tap formula only after its diff names the intended static
+crates.io URL, source hash, and build dependencies. If no macOS/Linux Homebrew
+verifier is available, the release cannot claim full `DONE`; report
+`DONE_WITH_CONCERNS` with the missing public canary.
 
 ### Step 5: Record the release receipt
 
