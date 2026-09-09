@@ -519,6 +519,9 @@ fn a_future_tense_section_declares_rather_than_references() {
     // Prose sections that describe the delivery WARN.
     assert_eq!(declared("## 改哪裡"), Some(Verdict::Warn));
     assert_eq!(declared("## doneWhen"), Some(Verdict::Warn));
+    // GH-1056: the spacing axis reaches declares_future too, not just the
+    // freshness gate — a spaced doneWhen heading must WARN here as well.
+    assert_eq!(declared("## Done when"), Some(Verdict::Warn));
     // A surface section is pure declaration and is not scanned at all.
     assert_eq!(declared("## Suspected surface"), None);
     assert_eq!(declared("## Predicted surface"), None);
