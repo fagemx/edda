@@ -38,8 +38,7 @@ If the operation or version is missing, ask for it. Never guess a version.
 
 ## Version selection — preserve runway before 1.0
 
-Edda uses a deliberately slow pre-1.0 cadence (`release.versioning =
-slow-minor-cadence`):
+Edda uses this operator-approved slow pre-1.0 cadence:
 
 - Default compatible fixes and features to the next patch release: after
   `0.6.0`, prefer `0.6.1`, `0.6.2`, and so on.
@@ -52,10 +51,9 @@ slow-minor-cadence`):
 - After 1.0, return to ordinary SemVer: compatible features bump minor and
   breaking changes bump major.
 
-Before proposing a number, read the recorded policy and the release range:
+Before proposing a number, read the release range:
 
 ```bash
-edda ask release.versioning
 git tag --sort=-version:refname | head -5
 git log --oneline "v<PREVIOUS>..origin/main"
 ```
@@ -186,24 +184,23 @@ git checkout -b chore/release-prep-v<VERSION>
 git commit -m "chore(release): prepare v<VERSION>"    # hooks run L0
 cargo package --workspace --locked --no-verify
 cargo publish --dry-run --workspace --locked          # must reach "Uploading edda"
+python .claude/skills/edda-release/scripts/test_crates_release_plan.py
+python .claude/skills/edda-release/scripts/crates_release_plan.py \
+  --version <VERSION> --package-dir target/package --expected-sha <FULL_SHA>
 ```
 
-`crates_release_plan.py` does not exist. Package provenance and dependency
-order are proved by `publish-crates.py plan --tag` after the local tag exists;
-do not substitute an obsolete helper.
+The skill-local helper proves each generated `.crate` carries the clean release
+commit in `.cargo_vcs_info.json`. Later, `publish-crates.py plan --tag` proves
+tag shape, package-version parity, metadata, and dependency order; neither
+proof substitutes for the other.
 
-Open the prep PR with an `Issue: #N` line (and a `Decision:` line only when the
-diff implements it). Run REVIEW.md through a **separate reviewer session** and
-an engine currently qualified for the PR's class; the authoring session never
-satisfies independence. Pass the issue as `--spec` so the review has its real
-acceptance ceiling. `edda review` records a ledger event but does not replace
-the PR-visible §7 comment: post the SHA-pinned comment first, then let
-`deliver` reduce those comments into the label/status union.
+Run repository-root `REVIEW.md` top to bottom for the prep PR. It and
+`.claude/CLAUDE.md` exclusively own issue/spec acceptance, Decision lines,
+reviewer independence, gate selection, §7 comments, response rounds, and merge
+authority; do not restate or weaken those rules here. After the final
+current-head §7 LGTM is visible, settle its union and run the merge check:
 
 ```bash
-edda review --pr <PR> --spec '#<ISSUE>' --agent <AGENT> \
-  --model <CURRENT-R22-QUALIFIED-MODEL> --session-id <NEW-UUID> --run-gates
-gh pr comment <PR> --body-file <SECTION-7-VERDICT>
 edda review deliver --pr <PR> --sha <FULL_SHA>
 sh scripts/merge-reviewed-pr.sh <PR>             # check only
 # only with explicit operator merge authority:
