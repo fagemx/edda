@@ -33,7 +33,7 @@ printf '%s\n' "$repo" | grep -qE '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$' || die 'inva
 # every open PR (GH-914/958) — but its only prior caller (daily-digest.sh)
 # captures the exit code and reports it without blocking (by design — see
 # the comment there). This is the "declare a PR done" entrypoint
-# docs/guides/pi-controller-runbook.md:128 already names as the place to
+# docs/guides/pi-controller-runbook.md:125 already names as the place to
 # run verdict-drift.sh, by policy; wiring it here enforces that policy
 # instead of relying on an operator remembering it, for --check and --merge
 # alike (nothing above this point branches on $action, so both share this

@@ -88,8 +88,30 @@ while IFS="$(printf '\t')" read -r num head base mergeable; do
     # or "r" (a first-line `## Review Response: Round N` heading, round
     # number only). A comment can match only one shape; most match neither
     # and yield nothing (`empty`).
+    #
+    # Round 1 review (P1): both row shapes are gated on `authorAssociation`
+    # first. This repo is PUBLIC, so an unfiltered read let any commenter
+    # either *hold* the PR (post any `## Review Response: Round N`, no SHA
+    # required — every --check/--merge in the fleet then refuses) or
+    # *silence* this check (post a §7-shaped `## Code Review: Round N`
+    # pinned to head, waving through the exact "the round never reached the
+    # PR" case this script exists to catch). Trusted set mirrors
+    # merge-reviewed-pr.sh:72 exactly — OWNER, MEMBER, COLLABORATOR — so the
+    # two scripts do not carry two definitions of trust for the same comment
+    # class. Fails closed by construction, not by a separate check: jq's
+    # `==`/`!=` never errors across mismatched types (verified directly
+    # against jq — a missing key, `null`, or a wrong-shaped value are all
+    # simply unequal to every trusted string), so an absent or unreadable
+    # `authorAssociation` makes the `select` below drop the comment, and it
+    # falls through to the same `empty` a comment matching neither heading
+    # already produces — neither a verdict nor a response. The product-side
+    # counterpart of this same gap — `edda review deliver`'s `Comment`
+    # struct carries no author at all, and it is what writes the
+    # `Independent Review` status — is filed separately as #1103; not fixed
+    # here.
     verdicts=$(gh pr view "$num" --repo "$repo" --json comments --jq '
         .comments[]
+        | select(.authorAssociation == "OWNER" or .authorAssociation == "MEMBER" or .authorAssociation == "COLLABORATOR")
         | (.body) as $b
         | ($b | split("\n")[0]) as $fl
         | if ($fl | test("^## Code Review: Round [0-9]+( \\(SHADOW\\))? — PR #[0-9]+ @ [0-9a-f]{40}( \\(SHADOW\\))?$")) then

@@ -334,11 +334,19 @@ fi
 # own doneWhen calls out as needing a real fixture instead. This is that
 # fixture: one populated, healthy open PR, distinct from $PR itself, with a
 # real LGTM pinned to its head. The accept path stays byte-identical.
+#
+# `authorAssociation":"OWNER"` is required on this comment since Round 1
+# review's P1 fix: verdict-drift.sh now trusts only OWNER/MEMBER/
+# COLLABORATOR comments (scripts/fleet/verdict-drift.sh), mirroring the
+# union gate's own filter five lines below in this script. The trust-filter
+# logic itself is unit-tested in scripts/fleet/test-verdict-drift.sh (cases
+# 16-18); this fixture only needs to stay trusted so this wiring case keeps
+# proving what it always proved.
 
 OTHER_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 printf '[{"number":9002,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$OTHER_SHA" >"$work/fixtures/drift-clean-prs.json"
 sed "s/@SHA@/$OTHER_SHA/g" >"$work/fixtures/drift-clean-comments.json" <<'JSON'
-{"comments":[{"body":"## Code Review: Round 1 — PR #9002 @ @SHA@\n\n### Verdict\nLGTM (P0=0, P1=0)"}]}
+{"comments":[{"body":"## Code Review: Round 1 — PR #9002 @ @SHA@\n\n### Verdict\nLGTM (P0=0, P1=0)","authorAssociation":"OWNER"}]}
 JSON
 STUB_DRIFT_PRS=$work/fixtures/drift-clean-prs.json
 STUB_DRIFT_COMMENTS=$work/fixtures/drift-clean-comments.json

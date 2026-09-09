@@ -277,11 +277,17 @@ unset GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON
 # This proves the digest needs no parsing change for it: it is only more
 # trailing text on the same line, and the awk pass-through above already
 # forwards $5..$NF verbatim into the 擋住什麼 row.
+#
+# `authorAssociation":"OWNER"` is required since Round 1 review's P1 fix:
+# verdict-drift.sh now trusts only OWNER/MEMBER/COLLABORATOR comments, so an
+# unannotated comment here would read as invisible rather than orphan —
+# see scripts/fleet/test-verdict-drift.sh cases 16-18 for the trust-filter
+# fixtures themselves.
 reset_stubs
 SHA80=8080808080808080808080808080808080808080
 printf '[{"number":80,"title":"Orphan response","mergeStateStatus":"CLEAN","headRefOid":"%s"}]\n' "$SHA80" >"$tmp/open-orphan.json"
 printf '[{"number":80,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$SHA80" >"$tmp/drift-open-orphan.json"
-printf '{"comments":[{"body":"## Review Response: Round 1\\n\\nNew head: %s"}]}\n' "$SHA80" >"$tmp/drift-comments-orphan.json"
+printf '{"comments":[{"body":"## Review Response: Round 1\\n\\nNew head: %s","authorAssociation":"OWNER"}]}\n' "$SHA80" >"$tmp/drift-comments-orphan.json"
 export GH_OPEN_JSON="$tmp/open-orphan.json"
 export GH_DRIFT_OPEN_JSON="$tmp/drift-open-orphan.json"
 export GH_DRIFT_COMMENTS_JSON="$tmp/drift-comments-orphan.json"
