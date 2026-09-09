@@ -172,7 +172,7 @@
 
    **合併不在這一步**——仍在第 7 步、要操作者授權。
 6. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。走第 4 步直審路徑時不需要 driver：判決與修正在同一個 session 內來回。
-7. **合併**（有操作者授權時）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過。取得合併授權後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
+7. **合併**（有操作者授權時）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過；它另外會問一次聯集判決（GH-1057，經 `edda review deliver`），該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。取得合併授權後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
 

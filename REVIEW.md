@@ -855,15 +855,27 @@ caller's verdict facts with `--verdicts`; it writes nothing, launches nothing,
 and never touches GitHub. Its exit codes and flags are in
 `docs/reference/cli.md`.
 
-No caller asks it today: the shell that posted the `Independent Review` commit
-status from its answer was retired with its status writer (GH-1061), and
-`review.merge-gate` had already taken that context out of the ruleset — verdict
-delivery for a dispatched round is `edda review deliver` (GH-1030). The merge
-step does not ask it either — `scripts/merge-reviewed-pr.sh` still requires the
-*latest* trusted
-review to be a qualifying LGTM, which an earlier standing Changes Requested on
-the same SHA does not survive contact with. GH-1057 wires it; until it lands,
-do not read this paragraph as a claim that merge already goes through the gate.
+**The merge step asks that rule** (GH-1057). `scripts/merge-reviewed-pr.sh`
+still requires the *latest* trusted review pinned to the head to be a
+qualifying LGTM with no unresolved escalation; on top of that it now refuses
+any head whose union is not a pass, so an earlier standing Changes Requested is
+no longer survived by a later LGTM there. It reaches the rule through
+`edda review deliver --pr <n> --sha <head> --json` (GH-1030) rather than
+`edda review gate` directly: verdicts do not cross machines in the ledger yet
+(`D8-debt(#671)`), so the §7 comments are the only source that answers
+correctly at a merge, and `deliver` is what reduces those comments and hands
+them to this same rule. A verdict comment the union could not read (a §7
+heading below line 1, #917) refuses too — a union reading `success` while a
+blocking round is invisible to it is not a pass. The shell that used to post
+the `Independent Review` commit status from the gate's answer was retired with
+its status writer (GH-1061), and `review.merge-gate` had already taken that
+context out of the ruleset, so the merge script — not a required check — is
+where the rule binds. What the merge step does **not** ask is the window check:
+`--base` needs both commits present locally and that entrypoint runs anywhere
+with `gh --repo`, so there `gh pr merge --match-head-commit` plus GitHub's own
+merge-state refusal covers the race at the moment it counts. Run
+`edda review gate <sha> --base <ref>` from a checkout for the stronger
+tree-level window check.
 
 ## 9. Provenance of the check commands
 
