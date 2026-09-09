@@ -36,6 +36,34 @@ Reject a leading `v` in the version argument; derive the tag as `v<version>`.
 
 If the operation or version is missing, ask for it. Never guess a version.
 
+## Version selection — preserve runway before 1.0
+
+Edda uses a deliberately slow pre-1.0 cadence (`release.versioning =
+slow-minor-cadence`):
+
+- Default compatible fixes and features to the next patch release: after
+  `0.6.0`, prefer `0.6.1`, `0.6.2`, and so on.
+- Use a new `0.x` minor only for a named cohesive milestone or an intentional
+  breaking public CLI, config, ledger, or migration contract. A `feat:` commit
+  alone does not force a minor bump.
+- `1.0.0` requires an explicit operator decision that the supported CLI/API,
+  stored-data migration policy, compatibility floor, and all advertised install
+  channels are stable enough to carry a long-lived compatibility promise.
+- After 1.0, return to ordinary SemVer: compatible features bump minor and
+  breaking changes bump major.
+
+Before proposing a number, read the recorded policy and the release range:
+
+```bash
+edda ask release.versioning
+git tag --sort=-version:refname | head -5
+git log --oneline "v<PREVIOUS>..origin/main"
+```
+
+The operator still names the release version. Surface a mismatch with this
+policy, but never silently substitute another number and never infer a bump
+from Conventional Commit prefixes alone.
+
 ## Non-negotiable invariant
 
 The public contract is the `README.md` Install section. At present it advertises
@@ -77,8 +105,10 @@ rg -n "cargo install|brew install|releases|install.sh" README.md
 git status --short --branch
 git fetch origin main --tags
 git rev-parse HEAD
-git ls-remote --tags origin "refs/tags/v<VERSION>"
+git ls-remote --tags origin \
+  "refs/tags/v<VERSION>" "refs/tags/v<VERSION>^{}"
 gh release view "v<VERSION>" --repo fagemx/edda
+gh api repos/fagemx/edda/releases/latest --jq .tag_name
 gh secret list --repo fagemx/edda
 ```
 
@@ -88,7 +118,9 @@ Release job while the workflow run still looks green — a silent no-op release.
 Treat an absent secret as BLOCKED before pushing anything.
 
 Preserve unrelated changes. Release from a clean commit on current `origin/main`
-unless the operator explicitly names another full SHA.
+unless the operator explicitly names another full SHA. For an annotated tag,
+the first `ls-remote` hash is the **tag object**, not the release commit; the
+receipt's Tag SHA is the peeled `^{}` / `git rev-list -n 1` commit.
 
 ### Step 2: Freeze version, SHA, docs, and verification evidence
 
@@ -101,12 +133,17 @@ the tag, so it must exist before the push.
 ```bash
 rg -n '^version = "' Cargo.toml          # workspace version == <VERSION>
 rg -n "^## \[<VERSION>\]" CHANGELOG.md    # release-notes section exists
-EDDA_BIN=<built-edda-binary> bash scripts/check-cli-docs.sh
+<EDDA_BIN> --version                     # must be the just-bumped version
+rg -n '^> Documented for edda ' docs/reference/cli.md
+EDDA_BIN=<EDDA_BIN> bash scripts/check-cli-docs.sh
 ```
 
 - `check-cli-docs.sh` (GH-650/GH-795) is the CLI reference drift gate: it
-  verifies every verb and long flag in `docs/reference/cli.md` against the
-  built binary. The old `check_cli_reference.py` no longer exists.
+  verifies the documented major/minor version, every verb, and every long flag
+  in `docs/reference/cli.md` against the built binary. Build `<EDDA_BIN>` **after**
+  the version bump from the candidate commit; a warm binary from the previous
+  release can pass the verb/flag checks while hiding a stale `Documented for
+  edda 0.x` heading. The old `check_cli_reference.py` no longer exists.
 - Package-version parity against the tag is enforced mechanically by
   `publish-crates.py plan` in Step 3, once the local tag exists.
 Version bump checklist (every release — do this before the CHANGELOG edit):
@@ -124,6 +161,12 @@ versions found which didn't match". Update every pin, resync the lock, and
 move the `[Unreleased]` CHANGELOG entries into a `## [<VERSION>] - <date>`
 section (release.yml's awk extracts exactly that heading for release notes).
 
+An empty `[Unreleased]` is not evidence that there is nothing to release. When
+`git log v<PREVIOUS>..HEAD` is non-empty, reconstruct release notes from the
+whole frozen range, group user-visible changes under Added/Changed/Fixed/Docs,
+and cross-check every summarized GH/PR reference against the commit subjects.
+Empty notes with a non-empty release range are BLOCKED until reconciled.
+
 - Follow the L0/L1/L2 verification ladder in `.claude/CLAUDE.md`. Reuse a valid
   L1 receipt and exact-head CI for the frozen full SHA. Do not rerun the full
   workspace merely to feel safer; run only uncovered focused checks and state
@@ -134,49 +177,71 @@ section (release.yml's awk extracts exactly that heading for release notes).
 Two ordering facts the flow depends on: `cargo package` refuses a dirty tree
 (commit the prep first, then package from the clean release commit), and
 `main` is protected by the repository ruleset (`Protect main`: pull-request
-rule + required status checks `CI Gate` and `Independent Review`), so direct
-pushes are declined and the prep travels on a branch.
+rule + required `CI Gate`); the SHA-pinned independent verdict is additionally
+bound by `scripts/merge-reviewed-pr.sh`. Direct pushes are declined, so the
+prep travels on a branch.
 
 ```bash
 git checkout -b chore/release-prep-v<VERSION>
 git commit -m "chore(release): prepare v<VERSION>"    # hooks run L0
 cargo package --workspace --locked --no-verify
 cargo publish --dry-run --workspace --locked          # must reach "Uploading edda"
-# optionally: local archive provenance via the skill helper
-python scripts/crates_release_plan.py --version <VERSION> \
-  --package-dir target/package --expected-sha <FULL_SHA>
 ```
 
-Open the prep PR, run the independent review round (REVIEW.md), post the
-SHA-pinned §7 verdict, then settle the label and the `Independent Review`
-commit status from those verdicts by the union rule:
+`crates_release_plan.py` does not exist. Package provenance and dependency
+order are proved by `publish-crates.py plan --tag` after the local tag exists;
+do not substitute an obsolete helper.
+
+Open the prep PR with an `Issue: #N` line (and a `Decision:` line only when the
+diff implements it). Run REVIEW.md through a **separate reviewer session** and
+an engine currently qualified for the PR's class; the authoring session never
+satisfies independence. Pass the issue as `--spec` so the review has its real
+acceptance ceiling. `edda review` records a ledger event but does not replace
+the PR-visible §7 comment: post the SHA-pinned comment first, then let
+`deliver` reduce those comments into the label/status union.
 
 ```bash
+edda review --pr <PR> --spec '#<ISSUE>' --agent <AGENT> \
+  --model <CURRENT-R22-QUALIFIED-MODEL> --session-id <NEW-UUID> --run-gates
+gh pr comment <PR> --body-file <SECTION-7-VERDICT>
 edda review deliver --pr <PR> --sha <FULL_SHA>
+sh scripts/merge-reviewed-pr.sh <PR>             # check only
+# only with explicit operator merge authority:
+sh scripts/merge-reviewed-pr.sh <PR> --merge
 ```
 
-Merge, then wait for the `main` push CI to go green — that run is the
-exact-head receipt for the tag target. Only now create an annotated tag
-locally (do not push it yet), then run the plan gate — it requires HEAD to be
-the tag's exact commit on a clean tree, validates the tag shape, and prints
-the dependency-first publish order (`python` instead of `python3` on
-Windows):
+Use a freshly built `edda` that contains the current `review deliver` surface;
+a stale global binary fails closed with an unknown-subcommand or unreadable
+union. Record `<EDDA_BIN> --version` and put its directory first on `PATH` for
+the merge helper when necessary.
+
+After merge, freeze the squash/merge commit and wait for that exact `main` push
+CI to go green. That run is the tag target's receipt. If `origin/main` advances
+again, do not silently include the later commits or move the frozen target:
+keep the reviewed SHA only when it is still an ancestor and the release scope
+was already frozen; otherwise ask the operator.
+
+Create the annotated tag locally, then run the plan gate **inside a detached tag
+worktree**. This avoids failure when the primary checkout has advanced beyond
+the frozen tag. The gate requires HEAD to equal the tag commit on a clean tree,
+validates the tag shape, and prints dependency-first order (`python` instead of
+`python3` on Windows):
 
 ```bash
+git fetch origin main --tags
+git merge-base --is-ancestor <FULL_SHA> origin/main
 git tag -a "v<VERSION>" <FULL_SHA> -m "Release v<VERSION>"
-git rev-list -n 1 "v<VERSION>"
-python3 scripts/publish-crates.py plan --tag "v<VERSION>"
-python3 scripts/publish-crates-test.py
-```
-
-Create a detached worktree from that tag for any local re-verification (for
-example `publish-crates.py verify` after CI, which requires HEAD == tag on a
-clean tree). Use the worktree's default `target/`; do not invent timestamped
-Cargo target lanes.
-
-```bash
+git rev-list -n 1 "v<VERSION>"                  # receipt SHA
 git worktree add --detach <TEMP_WORKTREE> "v<VERSION>"
+(
+  cd <TEMP_WORKTREE>
+  python3 scripts/publish-crates.py plan --tag "v<VERSION>"
+  python3 scripts/publish-crates-test.py
+)
 ```
+
+Use the detached worktree for later `publish-crates.py verify` too. Use its
+default `target/`; do not invent timestamped Cargo target lanes.
 
 `preflight` stops here and reports evidence. Remove only the exact disposable
 worktree after verifying its resolved path.
@@ -196,14 +261,23 @@ gh run watch <RUN_ID> --exit-status
 
 ### Step 2: Verify every CI job did its job
 
-Require all five jobs green — a green run with skipped jobs is BLOCKED:
+Require all five logical stages green — currently nine concrete jobs because
+`build-release` expands to five matrix legs. A green aggregate with a skipped
+required stage or leg is BLOCKED. Read `conclusion` and each job result; do not
+classify arbitrary warning/error-looking lines from `gh run watch` output as a
+workflow failure:
 
-| Job | Requirement |
+```bash
+gh run view <RUN_ID> --json conclusion,jobs \
+  --jq '.conclusion, (.jobs[] | [.name,.conclusion] | @tsv)'
+```
+
+| Stage | Requirement |
 |---|---|
 | `prepare-crates` | `enabled=true` (secret present); tag/plan validation passed |
 | `publish-crates` | `SUCCESS: all <N> workspace versions verified` |
 | `create-release` | parity gate `verify --tag` passed; draft release created from the CHANGELOG section |
-| `build-release` | all five platform archives + `.sha256` uploaded to the draft |
+| `build-release` (5 jobs) | every platform matrix leg green; all five archives + `.sha256` uploaded to the draft |
 | `publish-release` | exact 10-asset set, no empty assets, checksums verified, native binary canary without credentials (version core after stripping the optional build identity suffix), release published `--latest` |
 
 Never repair a failed run by moving the tag.
@@ -220,8 +294,9 @@ cargo install edda --root <FRESH_ROOT>
 <FRESH_ROOT>/bin/edda verdict --help
 ```
 
-The version must equal `<VERSION>`. On Windows, retry once with `--jobs 1` only
-when rustc itself exits with an OS crash/resource signature such as
+The version core must equal `<VERSION>`; a registry build may legitimately
+print an optional identity suffix such as `(unknown)`. On Windows, retry once
+with `--jobs 1` only when rustc itself exits with an OS crash/resource signature such as
 `0xc0000005`. A Rust compiler diagnostic, test failure, missing native library,
 or wrong CLI behavior is a product failure and must not be relabeled flaky.
 
@@ -229,9 +304,31 @@ Do not declare DONE until this unversioned install canary passes.
 
 ### Step 4: Prove install.sh and Homebrew
 
-Run the one-line installer twice in disposable directories: once pinned
-(`--version v<VERSION>`) and once through its default “latest” path. Both
-binaries must report the same version and expose `dispatch` and `verdict`.
+Run the one-line installer twice in disposable directories: once pinned and
+once through its default “latest” path. The option is `--to`, not `--prefix`.
+The installer supports Linux/macOS shells, not Windows MINGW; on a Windows
+workstation use Ubuntu WSL and perform install plus all canaries in the same
+invocation so a WSL restart cannot clear `/tmp` between steps.
+
+```bash
+curl -sSf https://raw.githubusercontent.com/fagemx/edda/v<VERSION>/install.sh \
+  | sh -s -- --version v<VERSION> --to <PINNED_DIR>/bin
+<PINNED_DIR>/bin/edda --version
+<PINNED_DIR>/bin/edda dispatch --help
+<PINNED_DIR>/bin/edda verdict --help
+curl -sSf https://raw.githubusercontent.com/fagemx/edda/main/install.sh \
+  | sh -s -- --to <LATEST_DIR>/bin
+<LATEST_DIR>/bin/edda --version
+<LATEST_DIR>/bin/edda dispatch --help
+<LATEST_DIR>/bin/edda verdict --help
+```
+
+Both binaries must report the intended version. Also prove the downloaded Linux
+asset on the repository's documented minimum Linux/glibc baseline. If no floor
+is documented, test at least a mainstream older baseline (for example Ubuntu
+22.04) and report the highest `GLIBC_x.y` from `readelf --version-info`. An
+`ubuntu-latest` build that starts only on the newest runner is not portable;
+`GLIBC_x.y not found` is a product failure, never an environmental retry.
 
 After crates.io publication is verified, generate the Homebrew formula from the
 immutable crates.io source package. The generator downloads and hashes the
@@ -243,15 +340,42 @@ Homebrew host's:
 sh scripts/test-update-homebrew.sh
 ./scripts/update-homebrew.sh <VERSION> <HOME_BREW_TAP_CHECKOUT>
 brew audit --strict fagemx/tap/edda
-brew reinstall fagemx/tap/edda
+brew install fagemx/tap/edda       # required before reinstall in a fresh verifier
 edda --version
 edda dispatch --help
 edda verdict --help
+brew reinstall fagemx/tap/edda
+brew test fagemx/tap/edda
 ```
 
+The generated formula must use the static crates.io `.crate` URL and declare
+`pkgconf`/Rust build dependencies plus `openssl@3`; the crates.io API redirect
+may return HTTP 403 to Homebrew curl, so do not replace the static URL with
+`/api/v1/crates/.../download`.
+
+On Windows, the official disposable `homebrew/brew:latest` Docker image is a
+valid Linuxbrew verifier. Tap the **remote public tap**, pin its Git HEAD in the
+receipt, and run strict audit, install, reinstall, both CLI help canaries, and
+`brew test` in one container:
+
+```bash
+docker run --rm homebrew/brew:latest bash -lc '
+  set -euo pipefail
+  brew tap fagemx/tap
+  brew audit --strict fagemx/tap/edda
+  brew install fagemx/tap/edda
+  edda --version && edda dispatch --help >/dev/null && edda verdict --help >/dev/null
+  brew reinstall fagemx/tap/edda
+  brew test fagemx/tap/edda
+'
+```
+
+A local formula mount is suitable while iterating but is not the final
+public-channel proof.
+
 Commit and push the tap formula only after its diff names the intended static
-crates.io URL, source hash, and build dependencies. If no macOS/Linux Homebrew
-verifier is available, the release cannot claim full `DONE`; report
+crates.io URL, source hash, and build dependencies. If neither a native
+macOS/Linux verifier nor the official Docker verifier is available, report
 `DONE_WITH_CONCERNS` with the missing public canary.
 
 ### Step 5: Record the release receipt
@@ -268,17 +392,23 @@ Tag SHA: <40-hex>
 |---|---|---|
 | Workspace packages | <N>, version parity (plan ORDER) | PASS/FAIL |
 | Preflight package proof | dry-run publish + local provenance SHA | PASS/FAIL |
-| Release workflow | run URL, all 5 jobs green, none skipped | PASS/FAIL |
+| Release workflow | run URL, 5 stages / 9 concrete jobs green, none required skipped | PASS/FAIL |
 | crates.io | <N> visible and unyanked | PASS/FAIL |
 | crates.io provenance | CI VERIFIED lines / verify --tag SHA match | PASS/FAIL |
 | cargo install edda | resolved version + critical help canaries | PASS/FAIL |
-| GitHub Release | isLatest, 10 assets, checksums, native canary | PASS/FAIL |
+| GitHub Release | latest endpoint == tag, 10 assets, checksums, native canary | PASS/FAIL |
 | install.sh | pinned + latest version canaries | PASS/FAIL |
-| Homebrew | formula commit + install canary | PASS/FAIL/NOT RUN |
+| Linux asset ABI | documented/minimum baseline + observed glibc floor | PASS/FAIL/NOT RUN |
+| Homebrew | remote tap commit + strict audit/install/reinstall/test canaries | PASS/FAIL/NOT RUN |
 
 Failures/retries: <exact command, classification, result>
 Remaining action: <none or one concrete next action>
 ```
+
+Persist the receipt on the release tracking issue (or the strongest PR-visible
+carrier when no release issue exists), then write an `edda note` containing the
+status, tag commit, workflow run, tap commit, and remaining action. A chat-only
+receipt is not durable evidence.
 
 ## Operation: verify
 
@@ -287,8 +417,9 @@ Run the public half of the workflow without changing remote state:
 1. From the tag worktree, `python3 scripts/publish-crates.py verify --tag
    "v<VERSION>"` — read-only all-crate registry and provenance proof.
 2. Repeat the fresh unversioned Cargo canary.
-3. Inspect the exact GitHub Actions run (all five jobs, none skipped), release
-   assets, and checksums; require `isLatest=true`.
+3. Inspect the exact GitHub Actions run (five stages / nine concrete jobs, none
+   required skipped), release assets, and checksums; require
+   `gh api repos/fagemx/edda/releases/latest --jq .tag_name` to equal the tag.
 4. Repeat pinned/latest `install.sh` and Homebrew canaries.
 5. Emit the release receipt. Do not say DONE when any README channel is stale.
 
@@ -300,10 +431,12 @@ every already-verified crate — so resuming is usually just rerunning failed
 jobs:
 
 ```bash
-git ls-remote --tags origin "refs/tags/v<VERSION>"
+git ls-remote --tags origin \
+  "refs/tags/v<VERSION>" "refs/tags/v<VERSION>^{}"
 gh run list --workflow release.yml --branch "v<VERSION>" --limit 5
 gh run view <RUN_ID> --json jobs,conclusion
-gh release view "v<VERSION>" --repo fagemx/edda --json isDraft,isLatest,assets
+gh release view "v<VERSION>" --repo fagemx/edda --json isDraft,assets
+gh api repos/fagemx/edda/releases/latest --jq .tag_name
 # from the detached tag worktree:
 python3 scripts/publish-crates.py verify --tag "v<VERSION>"
 ```
@@ -356,17 +489,37 @@ lag. After three failures with the same stable cause, stop and report
     refuse uncommitted changes; commit the prep, then prove packaging from the
     clean release commit.
 13. **Assume a direct push to main**: the ruleset declines it; budget the prep
-    PR, its review round, and the `Independent Review` status into the release
-    timeline.
+    PR, its PR-visible review round, `review deliver`, and merge-gate check into
+    the release timeline.
+14. **Race toward 1.0**: do not bump `0.x` minor merely because the range
+    contains `feat:` commits. Default to patch; reserve minor for a named
+    milestone/breaking contract and 1.0 for an explicit stability decision.
+15. **Empty Unreleased means empty release**: a non-empty tag range with an
+    empty `[Unreleased]` requires reconstructed, cross-checked notes.
+16. **Stale warm CLI binary**: the CLI-doc gate must use a binary built after
+    the version bump; otherwise the documented-version mismatch stays hidden.
+17. **Tag object equals release SHA**: annotated tags have a tag-object hash and
+    a peeled commit hash. Receipts and provenance use the peeled commit.
+18. **Same-session or ledger-only review**: the review must come from a separate
+    qualified session and appear as a PR-visible §7 comment before `deliver`.
+19. **Tag from a checkout that moved**: freeze the reviewed merge SHA and use a
+    detached tag worktree; never retarget silently when main advances.
+20. **Watch-log diagnosis**: trust run/job conclusions and required success
+    markers, not an alarming tail line from `gh run watch`.
+21. **Newest-runner Linux means portable Linux**: measure the glibc floor and
+    run the release asset on the documented/older baseline.
+22. **Fresh `brew reinstall`**: install first, then reinstall; final proof reads
+    the remote tap, not only a locally mounted formula.
 
 ## References
 
 - crates.io publication mechanics: `references/crates-io.md`
-- release automation: `.github/workflows/release.yml` (five jobs, tag-triggered)
+- release automation: `.github/workflows/release.yml` (five stages, nine concrete jobs, tag-triggered)
 - publication dry-run gate: `.github/workflows/publish-crates-check.yml`
 - publish plan/publish/verify script: `scripts/publish-crates.py` (+ its test
   `scripts/publish-crates-test.py`)
 - consumer promises: `README.md`
-- Homebrew formula generator: `scripts/update-homebrew.sh`
+- Homebrew formula generator and regression: `scripts/update-homebrew.sh`,
+  `scripts/test-update-homebrew.sh`
 - CLI reference drift gate: `scripts/check-cli-docs.sh` (GH-650/GH-795)
 - verification ladder and build lanes: `.claude/CLAUDE.md`
