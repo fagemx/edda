@@ -497,15 +497,13 @@ lag. After three failures with the same stable cause, stop and report
     the version bump; otherwise the documented-version mismatch stays hidden.
 17. **Tag object equals release SHA**: annotated tags have a tag-object hash and
     a peeled commit hash. Receipts and provenance use the peeled commit.
-18. **Same-session or ledger-only review**: the review must come from a separate
-    qualified session and appear as a PR-visible §7 comment before `deliver`.
-19. **Tag from a checkout that moved**: freeze the reviewed merge SHA and use a
+18. **Tag from a checkout that moved**: freeze the reviewed merge SHA and use a
     detached tag worktree; never retarget silently when main advances.
-20. **Watch-log diagnosis**: trust run/job conclusions and required success
+19. **Watch-log diagnosis**: trust run/job conclusions and required success
     markers, not an alarming tail line from `gh run watch`.
-21. **Newest-runner Linux means portable Linux**: measure the glibc floor and
+20. **Newest-runner Linux means portable Linux**: measure the glibc floor and
     run the release asset on the documented/older baseline.
-22. **Fresh `brew reinstall`**: install first, then reinstall; final proof reads
+21. **Fresh `brew reinstall`**: install first, then reinstall; final proof reads
     the remote tap, not only a locally mounted formula.
 
 ## References
