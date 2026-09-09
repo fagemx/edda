@@ -421,7 +421,9 @@ carrier for local-only delivery. Do not invent a PR requirement when no PR
 exists.
 
 The formation produces delivery candidates and execution evidence. Acceptance
-and merge remain outside it unless the operator explicitly delegates them.
+remains outside it unless the operator explicitly delegates it; merge follows
+the recorded rule gate once LGTM lands (`docs/fleet/rules.md` R6), not a
+per-instance operator ask.
 
 ## 12. Carrier selection
 
