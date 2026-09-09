@@ -437,6 +437,59 @@ fn mirror_parse_unescapes_value_and_reason() {
     );
 }
 
+#[test]
+fn mirror_parse_preserves_raw_pre_1017_backslash_shapes() {
+    // Direct raw-era fixture: no Scope/Authority lines, exactly as the writer
+    // before #1017 emitted it. The value's literal backslash+backtick must not
+    // be consumed as a new escape, and the first path's trailing backslash
+    // must not hide its wrapper and merge the second path.
+    let raw = concat!(
+        "# Domain: `legacy`\n\n",
+        "## `legacy.raw`\n\n",
+        "- **Value**: `literal\\`tick`\n",
+        "- **Reason**: raw bytes\n",
+        "- **Branch/ts**: `main` · 2026-09-01T00:00:00Z\n",
+        "- **Governance**: unratified (agent)\n",
+        "- **Affected paths**: `a\\`, `b`\n",
+        "- **event_id**: `evt_legacy`\n",
+    );
+    let parsed = parse_domain_markdown("legacy", raw).unwrap();
+
+    assert_eq!(parsed[0].row.value, "literal\\`tick");
+    let paths: Vec<String> = serde_json::from_str(&parsed[0].row.affected_paths).unwrap();
+    assert_eq!(paths, vec!["a\\".to_string(), "b".to_string()]);
+}
+
+#[test]
+fn mirror_parse_uses_shape_to_disambiguate_the_same_field_bytes() {
+    // In an escaped-era file these bytes encode a content backtick. The
+    // required post-#1017 fields distinguish this from the raw fixture above,
+    // where the same bytes mean a literal backslash followed by a backtick.
+    let escaped = concat!(
+        "## `escaped`\n\n",
+        "- **Value**: `literal\\`tick`\n",
+        "- **Scope**: local\n",
+        "- **Authority**: agent\n",
+        "- **event_id**: `evt_escaped`\n",
+    );
+    let parsed = parse_domain_markdown("escaped", escaped).unwrap();
+    assert_eq!(parsed[0].row.value, "literal`tick");
+}
+
+#[test]
+fn mirror_parse_fails_closed_on_partial_encoding_shape() {
+    let ambiguous = concat!(
+        "## `ambiguous`\n\n",
+        "- **Value**: `literal\\`tick`\n",
+        "- **Scope**: local\n",
+        "- **event_id**: `evt_ambiguous`\n",
+    );
+    let error = parse_domain_markdown("ambiguous", ambiguous)
+        .err()
+        .expect("partial discriminator must fail closed");
+    assert!(error.to_string().contains("ambiguous mirror encoding"));
+}
+
 /// Every caller-supplied field in its escaped form (GH-671 R5) — not only
 /// Value and Reason. `\n` here is the two-character escape the export writes,
 /// never a real line break; a real one would make the line below it a
@@ -722,14 +775,20 @@ fn mirror_list(items: &[&str]) -> String {
 fn backtick_list_ordinary_items_unchanged() {
     // Regression: no backticks involved, must split exactly as before.
     assert_eq!(
-        backtick_list(&mirror_list(&["sqlite", "postgres"])),
+        backtick_list(
+            &mirror_list(&["sqlite", "postgres"]),
+            MirrorEncoding::Escaped,
+        ),
         vec!["sqlite".to_string(), "postgres".to_string()]
     );
     assert_eq!(
-        backtick_list(&mirror_list(&["solo"])),
+        backtick_list(&mirror_list(&["solo"]), MirrorEncoding::Escaped),
         vec!["solo".to_string()]
     );
-    assert_eq!(backtick_list(""), Vec::<String>::new());
+    assert_eq!(
+        backtick_list("", MirrorEncoding::Escaped),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -738,7 +797,10 @@ fn backtick_list_does_not_split_on_embedded_separator_sequence() {
     // `a`, `b` — i.e. it contains the raw four-byte sequence "`, `" that
     // `backtick_list` splits list items on. One item in, one item out.
     let item = "a`, `b";
-    assert_eq!(backtick_list(&mirror_list(&[item])), vec![item.to_string()]);
+    assert_eq!(
+        backtick_list(&mirror_list(&[item]), MirrorEncoding::Escaped),
+        vec![item.to_string()]
+    );
 }
 
 #[test]
@@ -748,11 +810,11 @@ fn backtick_list_recovers_leading_and_trailing_backtick_items() {
     // have that delimiter's greedy removal eat the escaped backtick's bare
     // half too.
     assert_eq!(
-        backtick_list(&mirror_list(&["`leading"])),
+        backtick_list(&mirror_list(&["`leading"]), MirrorEncoding::Escaped),
         vec!["`leading".to_string()]
     );
     assert_eq!(
-        backtick_list(&mirror_list(&["trailing`"])),
+        backtick_list(&mirror_list(&["trailing`"]), MirrorEncoding::Escaped),
         vec!["trailing`".to_string()]
     );
 }
@@ -764,7 +826,7 @@ fn backtick_list_multi_item_mixes_edge_and_embedded_backticks() {
     // backtick, and one plain item as a control.
     let items = ["a`, `b", "`leading", "trailing`", "plain"];
     assert_eq!(
-        backtick_list(&mirror_list(&items)),
+        backtick_list(&mirror_list(&items), MirrorEncoding::Escaped),
         items.iter().map(|s| s.to_string()).collect::<Vec<_>>()
     );
 }
@@ -804,7 +866,7 @@ fn backtick_list_item_ending_in_backtick_comma_space_does_not_corrupt_the_next_i
     // something this test conflates with the split corruption above.
     let items = ["a`, ", "b"];
     assert_eq!(
-        backtick_list(&mirror_list(&items)),
+        backtick_list(&mirror_list(&items), MirrorEncoding::Escaped),
         vec!["a`,".to_string(), "b".to_string()]
     );
 }
@@ -831,33 +893,21 @@ fn backtick_list_reads_a_raw_pre_1017_item_whose_backslash_is_not_at_the_trailin
     // which this does NOT hold for.
     let raw_legacy_line = "`a\\b`, `c`";
     assert_eq!(
-        backtick_list(raw_legacy_line),
+        backtick_list(raw_legacy_line, MirrorEncoding::Raw),
         vec!["a\\b".to_string(), "c".to_string()]
     );
 }
 
 #[test]
-fn backtick_list_merges_a_raw_pre_1017_item_ending_in_an_odd_backslash_run() {
-    // Known, accepted limitation (GH-1044 Round 2 finding F6) — pinned here
-    // so a future change to this function changes this behavior on
-    // purpose, not by accident. Item 1's raw value is `a\` (a, backslash):
-    // the writer rendered the two items as the 9-byte line `` `a\`, `b` ``.
-    // After the outer strip, `inner = a \ ` , ␣ ` b`. The escape-aware walk
-    // hits the backslash at inner[1] and consumes inner[2] — the item's own
-    // *genuine* closing wrapper — as if it were escaped content, so that
-    // backtick is never tested as delimiter material. No further delimiter
-    // exists in the rest of the line, so both items come back as one,
-    // silently (`split_unescaped_backtick_comma` has no error channel).
-    //
-    // This is not fixable by a cleverer scan: a raw-era single item whose
-    // value is literally `` a`, `b `` renders to the identical bytes
-    // `` `a`, `b` `` that a *current* two-item list `["a", "b"]` also
-    // renders to — no decoder operating on bytes alone can be correct for
-    // both origins of that string. Recovering it needs a mirror
-    // format/version marker (GH-1113), out of GH-1044's own stated scope
-    // (mirror directory layout / `INDEX.md`).
+fn backtick_list_preserves_a_raw_pre_1017_item_ending_in_an_odd_backslash_run() {
+    // GH-1044 Round 3 P0: the raw writer rendered `a\` and `b` exactly as
+    // `` `a\`, `b` ``. Raw mode must use the historical plain split: treating
+    // backslash+wrapper as an escaped unit silently merges the two items.
     let raw_legacy_line = "`a\\`, `b`";
-    assert_eq!(backtick_list(raw_legacy_line), vec!["a`, `b".to_string()]);
+    assert_eq!(
+        backtick_list(raw_legacy_line, MirrorEncoding::Raw),
+        vec!["a\\".to_string(), "b".to_string()]
+    );
 }
 
 #[test]
@@ -879,9 +929,8 @@ fn unescape_field_inverts_escaped_backtick() {
 
 #[test]
 fn unescape_field_unknown_escape_passes_through_unchanged() {
-    // Back-compat (doneWhen #3): a mirror written before GH-1044 never
-    // produced `` \` `` (escape_field did not escape backticks), so this arm
-    // only ever fires on mirrors written by the fixed writer. An unrelated
-    // unknown escape must still pass through unchanged, exactly as before.
+    // Escaped-era back-compat (doneWhen #3): an unrelated unknown escape
+    // must still pass through unchanged. Raw-era fields bypass unescaping
+    // entirely, as the direct legacy fixture above verifies.
     assert_eq!(unescape_field("\\p"), "\\p");
 }

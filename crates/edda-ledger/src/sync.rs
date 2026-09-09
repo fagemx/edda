@@ -574,27 +574,79 @@ fn parse_mirror(mirror_dir: &Path) -> anyhow::Result<Vec<MirrorDecision>> {
     Ok(out)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MirrorEncoding {
+    Raw,
+    Escaped,
+}
+
+/// PR #1017 introduced escaping and the required Scope/Authority lines in
+/// the same writer change. Those lines are therefore the existing format
+/// discriminator for generated domain mirrors; a partial or mixed file is
+/// ambiguous and must fail closed instead of selecting a lossy decoder.
+fn detect_mirror_encoding(text: &str) -> anyhow::Result<MirrorEncoding> {
+    let mut detected = None;
+    let mut section = None;
+
+    for line in text.lines() {
+        if line.starts_with("## `") {
+            if let Some((scope, authority)) = section.replace((false, false)) {
+                record_section_encoding(scope, authority, &mut detected)?;
+            }
+        } else if let Some((scope, authority)) = section.as_mut() {
+            *scope |= line.starts_with("- **Scope**: ");
+            *authority |= line.starts_with("- **Authority**: ");
+        }
+    }
+    if let Some((scope, authority)) = section {
+        record_section_encoding(scope, authority, &mut detected)?;
+    }
+
+    Ok(detected.unwrap_or(MirrorEncoding::Raw))
+}
+
+fn record_section_encoding(
+    has_scope: bool,
+    has_authority: bool,
+    detected: &mut Option<MirrorEncoding>,
+) -> anyhow::Result<()> {
+    let encoding = match (has_scope, has_authority) {
+        (false, false) => MirrorEncoding::Raw,
+        (true, true) => MirrorEncoding::Escaped,
+        _ => anyhow::bail!(
+            "ambiguous mirror encoding: decision must contain both Scope and Authority or neither"
+        ),
+    };
+    if detected.is_some_and(|previous| previous != encoding) {
+        anyhow::bail!("ambiguous mirror encoding: raw and escaped decision shapes are mixed");
+    }
+    *detected = Some(encoding);
+    Ok(())
+}
+
 /// Parse one domain file of the mirror format (the exact shape
 /// `edda export md` renders) into decisions. Missing optional lines fall
 /// back to conservative defaults so pre-GH-671 mirrors still import.
 fn parse_domain_markdown(file_domain: &str, text: &str) -> anyhow::Result<Vec<MirrorDecision>> {
+    let encoding = detect_mirror_encoding(text)?;
     let mut out: Vec<MirrorDecision> = Vec::new();
     let mut header_domain: Option<String> = None;
     let mut current: Option<MirrorDecision> = None;
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("# Domain: `") {
-            header_domain = rest.strip_suffix('`').map(unescape_field);
+            header_domain = rest
+                .strip_suffix('`')
+                .map(|value| decode_mirror_field(value, encoding));
             continue;
         }
         if let Some(rest) = line.strip_prefix("## `") {
             if let Some(done) = current.take() {
                 finish_mirror_decision(done, &mut out)?;
             }
-            // Trim before unescaping, never after: unescaping first can
-            // produce a trailing newline that `trim` would then eat, silently
-            // shortening the very key this escape exists to carry whole.
-            let key = unescape_field(rest.strip_suffix('`').unwrap_or(rest).trim());
+            // Trim before decoding, never after: decoding first can produce a
+            // trailing newline that `trim` would then eat.
+            let key = decode_mirror_field(rest.strip_suffix('`').unwrap_or(rest).trim(), encoding);
             if key.is_empty() {
                 continue;
             }
@@ -632,7 +684,7 @@ fn parse_domain_markdown(file_domain: &str, text: &str) -> anyhow::Result<Vec<Mi
         let Some(decision) = current.as_mut() else {
             continue;
         };
-        parse_mirror_field_line(line, decision);
+        parse_mirror_field_line(line, decision, encoding);
     }
     if let Some(done) = current.take() {
         finish_mirror_decision(done, &mut out)?;
@@ -670,19 +722,19 @@ fn finish_mirror_decision(
 /// Match one `- **Field**: value` line inside a decision section.
 /// Unrecognized lines (headers, prose, gloss) are ignored.
 ///
-/// Every caller-supplied field is unescaped here, because `cmd_export` escapes
-/// every caller-supplied field on write — the two halves are one encoding and
-/// only work as a pair. Branch and ts are the exception on both sides: a
-/// branch name is restricted to `[A-Za-z0-9._/-]` by
+/// Every caller-supplied field is decoded here according to the domain file's
+/// writer era: post-#1017 fields are unescaped, while raw-era bytes are kept
+/// literal. Branch and ts are the exception on both sides: a branch name is
+/// restricted to `[A-Za-z0-9._/-]` by
 /// [`crate::validate_branch_name`] and a ts is a machine RFC3339 stamp, so
 /// neither can carry an escape to undo.
-fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
+fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision, encoding: MirrorEncoding) {
     let row = &mut decision.row;
     if let Some(v) = line.strip_prefix("- **Value**: `") {
         let v = v.strip_suffix('`').unwrap_or(v);
-        row.value = unescape_field(v);
+        row.value = decode_mirror_field(v, encoding);
     } else if let Some(v) = line.strip_prefix("- **Reason**: ") {
-        row.reason = unescape_field(v.trim_end());
+        row.reason = decode_mirror_field(v.trim_end(), encoding);
     } else if let Some(v) = line.strip_prefix("- **Branch/ts**: `") {
         if let Some((branch, ts)) = v.split_once("` · ") {
             row.branch = branch.trim().to_string();
@@ -695,46 +747,46 @@ fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
                 // ratification` records the mirror, not this string — but it
                 // is quoted into that event's note, so it is carried exactly
                 // rather than half-decoded.
-                decision.ratified_by = Some(unescape_field(who.trim()));
+                decision.ratified_by = Some(decode_mirror_field(who.trim(), encoding));
                 decision.ratified_at = Some(ts.trim().to_string());
             }
         } else if let Some(rest) = v.strip_prefix("unratified (") {
             let auth = rest.strip_suffix(')').unwrap_or(rest).trim();
             if !auth.is_empty() {
-                row.authority = unescape_field(auth);
+                row.authority = decode_mirror_field(auth, encoding);
             }
         }
     } else if let Some(v) = line.strip_prefix("- **Scope**: ") {
-        row.scope = unescape_field(v.trim());
+        row.scope = decode_mirror_field(v.trim(), encoding);
     } else if let Some(v) = line.strip_prefix("- **Authority**: ") {
-        row.authority = unescape_field(v.trim());
+        row.authority = decode_mirror_field(v.trim(), encoding);
     } else if let Some(v) = line.strip_prefix("- **Affected paths**: ") {
-        row.affected_paths = backtick_list_to_json(v);
+        row.affected_paths = backtick_list_to_json(v, encoding);
     } else if let Some(v) = line.strip_prefix("- **Tags**: ") {
-        row.tags = backtick_list_to_json(v);
+        row.tags = backtick_list_to_json(v, encoding);
     } else if let Some(v) = line.strip_prefix("- **Review after**: ") {
-        row.review_after = Some(unescape_field(v.trim()));
+        row.review_after = Some(decode_mirror_field(v.trim(), encoding));
     } else if let Some(v) = line.strip_prefix("- **Reversibility**: ") {
-        row.reversibility = unescape_field(v.trim());
+        row.reversibility = decode_mirror_field(v.trim(), encoding);
     } else if let Some(v) = line.strip_prefix("- **Village**: ") {
-        row.village_id = Some(unescape_field(v.trim()));
+        row.village_id = Some(decode_mirror_field(v.trim(), encoding));
     } else if let Some(v) = line.strip_prefix("- **Cites**: ") {
         // GH-761 citations ride the mirror as a backtick list, same encoding
         // as Tags and Affected paths. Dropping them would make the mirror lie
         // by omission about what authority a decision rests on.
-        decision.cites = backtick_list(v);
+        decision.cites = backtick_list(v, encoding);
     } else if let Some(v) = line.strip_prefix("- **event_id**: `") {
         let v = v.strip_suffix('`').unwrap_or(v);
-        row.event_id = unescape_field(v.trim());
+        row.event_id = decode_mirror_field(v.trim(), encoding);
     }
 }
 
 /// `` `a`, `b` `` → `["a","b"]` as a JSON array string.
-fn backtick_list_to_json(s: &str) -> String {
-    serde_json::to_string(&backtick_list(s)).unwrap_or_else(|_| "[]".to_string())
+fn backtick_list_to_json(s: &str, encoding: MirrorEncoding) -> String {
+    serde_json::to_string(&backtick_list(s, encoding)).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// `` `a`, `b` `` → `vec!["a", "b"]`, each item unescaped.
+/// `` `a`, `b` `` → `vec!["a", "b"]`, decoded for its writer era.
 ///
 /// The export escapes every item, backtick included (GH-1044:
 /// `cmd_export::escape_field`), so a tag or a citation containing a
@@ -759,19 +811,20 @@ fn backtick_list_to_json(s: &str) -> String {
 /// that false match consumes the real delimiter's opening half too,
 /// corrupting both the item that ends there and the one after it.
 ///
-/// Known, accepted limitation (GH-1044 Round 2, not fixable by a cleverer
-/// scan — see [`unescape_field`]'s doc comment for the full argument): a
-/// mirror written before PR #1017 (`3306c1a`, 2026-09-07), whose item
-/// values were never escaped at all, can lose an item *boundary* — not just
-/// value content — when a value ends in an odd-length run of raw
-/// backslashes right before the wrapper. Recovering that needs a mirror
-/// format/version marker; routed as GH-1113.
-fn backtick_list(s: &str) -> Vec<String> {
+/// Raw pre-#1017 mirrors use their historical plain split and preserve field
+/// bytes. Escaped mirrors use the escape-aware split. Selecting the rule from
+/// the domain-file shape prevents raw trailing backslashes from swallowing a
+/// wrapper while retaining GH-1044's current-writer round trip.
+fn backtick_list(s: &str, encoding: MirrorEncoding) -> Vec<String> {
     let inner = s.strip_prefix('`').unwrap_or(s);
     let inner = inner.strip_suffix('`').unwrap_or(inner);
-    split_unescaped_backtick_comma(inner)
+    let parts = match encoding {
+        MirrorEncoding::Raw => inner.split("`, `").collect(),
+        MirrorEncoding::Escaped => split_unescaped_backtick_comma(inner),
+    };
+    parts
         .into_iter()
-        .map(|p| unescape_field(p.trim()))
+        .map(|p| decode_mirror_field(p.trim(), encoding))
         .filter(|p| !p.is_empty())
         .collect()
 }
@@ -790,15 +843,8 @@ fn backtick_list(s: &str) -> Vec<String> {
 /// `` , ` `` is left in place rather than treated as an error, the same
 /// leniency `backtick_list` has always extended to malformed input.
 ///
-/// Both guarantees above are scoped to text `escape_field` itself produced.
-/// [`unescape_field`]'s doc comment has the full two-era argument; in short,
-/// the backslash branch is safe from PR #1017 onward (every backslash this
-/// scan meets is already paired) but can eat a genuine wrapper on a
-/// pre-#1017 mirror (GH-1044 Round 2, known, accepted, GH-1113), and a fresh
-/// backtick is only guaranteed genuine for current-writer text — a raw
-/// backtick in *any* older text can still look like delimiter material,
-/// which is GH-1044's original defect, unchanged, on files already written
-/// that way.
+/// This function is used only for [`MirrorEncoding::Escaped`]. Raw mirrors
+/// retain the historical plain split in [`backtick_list`].
 fn split_unescaped_backtick_comma(inner: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0usize;
@@ -820,64 +866,16 @@ fn split_unescaped_backtick_comma(inner: &str) -> Vec<&str> {
     parts
 }
 
-/// Inverse of `edda-cli::cmd_export::escape_field` — a left-to-right scan so
-/// `\\n` (escaped backslash followed by `n`) never collapses into a newline,
-/// and (GH-1044) an escaped backslash followed by a raw backtick never
-/// collapses into an unescaped one either.
-///
-/// GH-1044 Round 2: "older mirrors" is not one era, and the back-compat
-/// argument below covers only the more recent of the two. `edda export md`
-/// has written mirrors since `f3e5e97` (2026-07-08):
-///
-/// - **Raw era** (`f3e5e97`..`3306c1a^`, up to 2026-09-07, ~2 months): list
-///   items were rendered with **no escaping at all**
-///   (`format!("`{}`", p)` — `3306c1a^:crates/edda-cli/src/cmd_export.rs:150`).
-///   A raw backslash had no structural meaning and could appear singly,
-///   anywhere.
-/// - **Escaped era** (`3306c1a`, PR #1017, onward until this fix):
-///   `escape_field` existed and doubled every backslash and escaped every
-///   newline (`.replace('\\', "\\\\").replace('\n', "\\n")`), but did not
-///   yet escape backtick — the GH-1044 defect this PR closes. Every
-///   backslash this era's writer emits is therefore already paired.
-///
-/// For the escaped era (and the current one, which adds a third,
-/// same-shaped backtick pass), this scan is self-synchronising: every
-/// backslash it meets is the first of a doubled backslash or a newline
-/// escape, both consumed as one unit, so the scan always lands back on a
-/// fresh position after it, never mid-run — a claim about the *backslash*
-/// branch only, not that escaped-era text always round-trips. Neither older
-/// era ever escaped backtick (that is this PR), so a **raw backtick in an
-/// escaped- or raw-era value** is GH-1044's own original defect, unchanged
-/// by this PR, still live on any mirror already written that way — distinct
-/// from, and not fixed or worsened by, anything below.
-///
-/// The raw era has no backslash guarantee at all, and is lossy in two
-/// distinct ways beyond the shared raw-backtick issue above. An *unknown*
-/// escape (this scan's fallback arm) passes through unchanged (`\p` stays
-/// `\p`), so most raw text still survives, but not losslessly:
-///
-/// - **Value content** (already accepted, unchanged by this PR): a raw
-///   `C:\notes` decodes to `C:` + newline + `otes`, and a raw `\\` halves.
-///   Reachability is narrow (the fields that carried backslashes in
-///   practice — `affected_paths`, tags — were already unescaped before the
-///   encoding was made total), which is why the round trip is preferred
-///   over a version-tagged mirror format.
-/// - **List structure** (new with this PR's escape-aware split,
-///   [`split_unescaped_backtick_comma`] — base and the pre-Round-1 code
-///   here did not have this failure mode): when a raw-era value ends in an
-///   odd-length run of backslashes immediately before that item's own
-///   closing wrapper backtick, the split consumes the wrapper as escaped
-///   content and the two items either side of it silently merge. Provably
-///   irreducible from the bytes alone, not a bug fixable by a cleverer
-///   scan: a raw-era single item whose value is literally `` a`, `b `` and
-///   a current two-item list `["a", "b"]` render to the identical bytes
-///   `` `a`, `b` `` — no decoder operating on bytes alone can be correct
-///   for both origins of that string. A format/version marker would settle
-///   it; out of GH-1044's own stated scope (mirror directory layout /
-///   `INDEX.md`), routed as GH-1113. Accepted and pinned, not silently
-///   introduced: see
-///   `backtick_list_merges_a_raw_pre_1017_item_ending_in_an_odd_backslash_run`
-///   in `sync/tests.rs`.
+fn decode_mirror_field(s: &str, encoding: MirrorEncoding) -> String {
+    match encoding {
+        MirrorEncoding::Raw => s.to_string(),
+        MirrorEncoding::Escaped => unescape_field(s),
+    }
+}
+
+/// Inverse of `edda-cli::cmd_export::escape_field` for escaped-era mirrors.
+/// Raw-era fields bypass this function so literal `\\`, `\\n`, and `` \\` ``
+/// sequences are preserved rather than reinterpreted as escapes.
 fn unescape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
