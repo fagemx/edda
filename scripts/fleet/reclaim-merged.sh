@@ -19,11 +19,12 @@
 # marks a new shell program with control flow as migration debt, and this is
 # one. It is accepted for this ticket as an explicitly-transitional carrier on
 # the condition it stays a thin loop: every per-item fact below comes from
-# `git` or `gh` directly, and the only processing applied to their output is
-# field extraction. The eventual product home is an `edda fleet reclaim` verb,
-# where the classification becomes typed and testable in Rust; this file is
-# expected to shrink to the one line that calls it. Do not grow judgement here
-# — take it to the verb.
+# `git` or `gh` directly, the only processing applied to their output is field
+# extraction and joining those fields onto one row per item, and the judgement
+# is the plain `if` ladder you can read in one screen. The eventual product
+# home is an `edda fleet reclaim` verb, where that ladder becomes typed and
+# unit-testable in Rust; this file is expected to shrink to the one line that
+# calls it. Do not grow judgement here — take it to the verb.
 #
 # usage:
 #   sh scripts/fleet/reclaim-merged.sh [--apply] [--protect <name>]...
@@ -68,16 +69,39 @@ trap 'rm -rf "$work"; exit 130' HUP INT TERM
 
 TAB=$(printf '\t')
 
-# ── the PR table ─────────────────────────────────────────────────────
+# Pure shell on purpose. The obvious `printf '%s\n' "$protect" | grep -qxF`
+# costs two processes, and this predicate is asked once per worktree and twice
+# per branch — on a workstation where a spawn measures ~2.7s that alone put a
+# 46-worktree, 229-branch dry run past forty minutes. `$protect` is a
+# newline-separated list, so a newline-delimited substring test IS the exact
+# match.
+protect_nl="$protect
+"
+is_protected() {
+    case $protect_nl in
+        *"
+$1
+"*) return 0 ;;
+    esac
+    return 1
+}
+
+is_nested() {
+    case $1 in "$2"/*) return 0 ;; *) return 1 ;; esac
+}
+
+# ── the fact tables ──────────────────────────────────────────────────
 #
-# One `gh` call for the whole repository rather than one per branch: with ~90
-# local branches the per-branch form spends a minute and a half on round trips
-# to learn what a single paginated list already says. `--jq` does the field
-# extraction, so nothing downstream parses JSON.
+# Four reads, each answering one question for the whole repository at once,
+# and then one join per pass. The per-item form of these — a `gh pr list
+# --head` and a `git rev-parse` inside the loop — costs one process per item
+# per question; on a workstation where a process spawn measures ~2.7s that is
+# twenty minutes of round trips to learn what four calls already say.
 #
 # `headRefOid` is carried because a PR's state alone does not license deleting
-# a ref: the branch must still point at the commit the PR was merged from. A
-# branch that has moved on carries work no PR ever saw.
+# a ref: the ref must still point at the commit the PR was merged from. A ref
+# that has moved on carries work no PR ever saw, and `refs/pull/N/head` does
+# not preserve it.
 if ! gh pr list --state all --limit "$pr_limit" \
         --json number,state,headRefName,headRefOid,mergeCommit \
         --jq '.[] | [.headRefName, (.number|tostring), .state, .headRefOid, (.mergeCommit.oid // "-")] | @tsv' \
@@ -86,32 +110,12 @@ if ! gh pr list --state all --limit "$pr_limit" \
     exit 3
 fi
 
-# The remote side of the same question, in one call. A missing or unreachable
-# `origin` leaves the table empty, which reads downstream as "no remote branch
-# to reclaim" — the conservative answer.
+# A missing or unreachable `origin` leaves this table empty, which reads
+# downstream as "no remote branch to reclaim" — the conservative answer.
 git ls-remote --heads origin 2>/dev/null \
     | sed "s|${TAB}refs/heads/|${TAB}|" >"$work/remote.tsv" || true
 
-# `pr_row <branch>` prints the single PR row for a branch, or nothing at all.
-# Printing nothing for two rows is deliberate: a branch name reused across PRs
-# has no single state, and a caller that saw the first row would act on the
-# wrong one. `pr_count` below tells the two empty answers apart.
-pr_row() {
-    awk -F"$TAB" -v b="$1" '$1 == b { rows[++n] = $0 } END { if (n == 1) print rows[1] }' \
-        "$work/prs.tsv"
-}
-
-pr_count() {
-    awk -F"$TAB" -v b="$1" '$1 == b { n++ } END { print n + 0 }' "$work/prs.tsv"
-}
-
-is_protected() {
-    printf '%s\n' "$protect" | grep -qxF -- "$1"
-}
-
-is_nested() {
-    case $1 in "$2"/*) return 0 ;; *) return 1 ;; esac
-}
+git worktree list --porcelain >"$work/wt.raw"
 
 # ── snapshot ─────────────────────────────────────────────────────────
 count_worktrees() { git worktree list | wc -l | tr -d ' '; }
@@ -128,9 +132,11 @@ printf '\n'
 #
 # `--porcelain` is the only stable shape: the human `git worktree list` packs
 # path, sha and branch into one padded line, and a path containing spaces
-# makes that unsplittable. The awk below turns each record into one TSV row
-# and extracts nothing else.
-git worktree list --porcelain >"$work/wt.raw"
+# makes that unsplittable. The first awk turns each record into one TSV row;
+# the second joins the PR table onto it by head branch. A branch that carries
+# two PR rows is left with a count and no fields — a name reused across PRs
+# has no single state, and a reader that took the first row would act on the
+# wrong one.
 awk -v OFS="$TAB" '
     function emit() { if (p != "") print p, (b == "" ? "-" : b), (h == "" ? "-" : h), lk, pn }
     /^worktree /  { emit(); p = substr($0, 10); b = ""; h = ""; lk = 0; pn = 0; next }
@@ -139,27 +145,39 @@ awk -v OFS="$TAB" '
     /^locked/     { lk = 1; next }
     /^prunable/   { pn = 1; next }
     END           { emit() }
-' "$work/wt.raw" >"$work/wt.tsv"
+' "$work/wt.raw" >"$work/wt.base"
 
-main_path=$(head -n 1 "$work/wt.tsv" | cut -f1)
+join_prs() { # <file-of-rows> <1-based field holding the branch name>
+    awk -F"$TAB" -v OFS="$TAB" -v prs="$work/prs.tsv" -v key="$2" '
+        FILENAME == prs {
+            c[$1]++
+            if (c[$1] == 1) { num[$1] = $2; st[$1] = $3; ho[$1] = $4; mo[$1] = $5 }
+            next
+        }
+        {
+            b = $key
+            one = (c[b] == 1)
+            print $0, c[b] + 0, (one ? num[b] : "-"), (one ? st[b] : "-"), \
+                  (one ? ho[b] : "-"), (one ? mo[b] : "-")
+        }
+    ' "$work/prs.tsv" "$1"
+}
+
+join_prs "$work/wt.base" 2 >"$work/wt.tsv"
+
+main_path=$(head -n 1 "$work/wt.base" | cut -f1)
 self_path=$(git rev-parse --show-toplevel)
 
 printf 'VERDICT\tKIND\tITEM\tBRANCH\tPR\tSTATE\tTREE/SHA\tREASON\n'
 
 : >"$work/wt.reclaim"
-while IFS="$TAB" read -r path branch head locked prunable; do
+while IFS="$TAB" read -r path branch head locked prunable prcount pr state head_oid merge_oid; do
     [ -n "$path" ] || continue
-    base=${path##*/}
-    row=$(pr_row "$branch")
-    pr='-'; state='-'; merge_oid='-'
-    if [ -n "$row" ]; then
-        pr='#'$(printf '%s' "$row" | cut -f2)
-        state=$(printf '%s' "$row" | cut -f3)
-        merge_oid=$(printf '%s' "$row" | cut -f5)
-    fi
+    [ "$pr" = '-' ] || pr="#$pr"
 
     # The tree state is read before any verdict so the printed row always
-    # reports it, even for items excluded for another reason first.
+    # reports it, which is what makes the dry run auditable rather than just
+    # a list of conclusions.
     tree='clean'
     if [ ! -d "$path" ]; then
         tree='missing'
@@ -180,18 +198,16 @@ while IFS="$TAB" read -r path branch head locked prunable; do
         reason='running-from-here'
     elif [ "$locked" = 1 ]; then
         reason='locked'
-    elif is_protected "$base" || { [ "$branch" != '-' ] && is_protected "$branch"; }; then
+    elif is_protected "${path##*/}" || { [ "$branch" != '-' ] && is_protected "$branch"; }; then
         reason='protected'
     elif [ "$prunable" = 1 ] || [ "$tree" = 'missing' ]; then
         reason='prunable — run git worktree prune'
     elif [ "$branch" = '-' ]; then
         reason='detached — no branch, no PR to judge by'
-    elif [ -z "$row" ]; then
-        if [ "$(pr_count "$branch")" -gt 0 ]; then
-            reason='pr-ambiguous — branch name reused across PRs'
-        else
-            reason='no-pr'
-        fi
+    elif [ "$prcount" -gt 1 ]; then
+        reason='pr-ambiguous — branch name reused across PRs'
+    elif [ "$prcount" -eq 0 ]; then
+        reason='no-pr'
     elif [ "$state" != 'MERGED' ]; then
         reason="pr-$state"
     elif [ "$tree" != 'clean' ]; then
@@ -225,64 +241,91 @@ fi
 #
 # After the worktree pass, because a branch checked out in a worktree cannot
 # be deleted until that worktree is gone — and under --apply some of them just
-# went. The list is therefore re-read rather than reused.
+# went, so the checked-out set is re-read rather than reused.
+#
+# The row set is the UNION of local and remote names: a merged PR's remote
+# branch left behind after its local ref was already deleted is half of what
+# the authority names, and iterating local refs alone never sees it.
+#
+# The checked-out set subtracts the worktrees the pass above just reclaimed.
+# Without that subtraction a dry run reports every reclaimable branch as
+# `checked-out` — true at the instant it looks, false by the time `--apply`
+# reaches the branch pass, and a dry run that does not predict `--apply` is
+# the one thing this script cannot be.
 printf '\n'
-git worktree list --porcelain | sed -n 's|^branch refs/heads/||p' >"$work/checkedout"
+git worktree list --porcelain | sed -n 's|^branch refs/heads/||p' >"$work/checkedout.all"
+awk -v gone="$work/wt.reclaim" -F"$TAB" '
+    FILENAME == gone { g[$2] = 1; next }
+    !($0 in g)       { print }
+' "$work/wt.reclaim" "$work/checkedout.all" >"$work/checkedout"
+git for-each-ref --format="%(refname:short)${TAB}%(objectname)" refs/heads >"$work/local.tsv"
 default=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
 default=${default:-main}
 
+awk -F"$TAB" -v OFS="$TAB" \
+    -v loc="$work/local.tsv" -v rem="$work/remote.tsv" -v co="$work/checkedout" '
+    FILENAME == loc { tip[$1] = $2; seen[$1] = 1; next }
+    FILENAME == rem { rsha[$2] = $1; seen[$2] = 1; next }
+    FILENAME == co  { out[$1] = 1; next }
+    END {
+        for (b in seen)
+            print b, (b in tip ? tip[b] : "-"), (b in rsha ? rsha[b] : "-"), (out[b] ? 1 : 0)
+    }
+' "$work/local.tsv" "$work/remote.tsv" "$work/checkedout" | sort >"$work/br.base"
+join_prs "$work/br.base" 1 >"$work/branches.tsv"
+
 : >"$work/br.reclaim"
 : >"$work/remote.reclaim"
-git for-each-ref --format="%(refname:short)${TAB}%(objectname)" refs/heads >"$work/branches.tsv"
-while IFS="$TAB" read -r branch tip; do
+while IFS="$TAB" read -r branch tip remote_sha checkedout prcount pr state head_oid merge_oid; do
     [ -n "$branch" ] || continue
-    row=$(pr_row "$branch")
-    pr='-'; state='-'; head_oid='-'; merge_oid='-'
-    if [ -n "$row" ]; then
-        pr='#'$(printf '%s' "$row" | cut -f2)
-        state=$(printf '%s' "$row" | cut -f3)
-        head_oid=$(printf '%s' "$row" | cut -f4)
-        merge_oid=$(printf '%s' "$row" | cut -f5)
-    fi
-    remote_sha=$(awk -F"$TAB" -v b="$branch" '$2 == b { print $1 }' "$work/remote.tsv")
+    [ "$pr" = '-' ] || pr="#$pr"
 
-    verdict='KEEP'
-    if [ "$branch" = "$default" ]; then
-        reason='default-branch'
-    elif grep -qxF "$branch" "$work/checkedout"; then
-        reason='checked-out'
-    elif is_protected "$branch"; then
-        reason='protected'
-    elif [ -z "$row" ]; then
-        if [ "$(pr_count "$branch")" -gt 0 ]; then
+    verdict=''
+    reason=''
+    if [ "$tip" != '-' ]; then
+        verdict='KEEP'
+        if [ "$branch" = "$default" ]; then
+            reason='default-branch'
+        elif [ "$checkedout" = 1 ]; then
+            reason='checked-out'
+        elif is_protected "$branch"; then
+            reason='protected'
+        elif [ "$prcount" -gt 1 ]; then
             reason='pr-ambiguous — branch name reused across PRs'
-        else
+        elif [ "$prcount" -eq 0 ]; then
             reason='no-pr'
+        elif [ "$state" != 'MERGED' ]; then
+            reason="pr-$state"
+        elif [ "$tip" != "$head_oid" ]; then
+            reason='local-ahead-of-pr'
+        else
+            verdict='RECLAIM'
+            reason='pr-merged, tip = merged head'
+            printf '%s\t%s\t%s\n' "$branch" "$pr" "$merge_oid" >>"$work/br.reclaim"
         fi
-    elif [ "$state" != 'MERGED' ]; then
-        reason="pr-$state"
-    elif [ "$tip" != "$head_oid" ]; then
-        # The PR is merged but the local ref has moved: whatever is on it now
-        # was never in that PR, so `refs/pull/N/head` does not preserve it.
-        reason='local-ahead-of-pr'
-    else
-        verdict='RECLAIM'
-        reason='pr-merged, tip = merged head'
-        printf '%s\t%s\t%s\n' "$branch" "$pr" "$merge_oid" >>"$work/br.reclaim"
+        printf '%s\tlocal-branch\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$verdict" "$branch" "$branch" "$pr" "$state" "$tip" "$reason"
     fi
-    printf '%s\tlocal-branch\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$verdict" "$branch" "$branch" "$pr" "$state" "$tip" "$reason"
 
-    [ -n "$remote_sha" ] || continue
+    [ "$remote_sha" != '-' ] || continue
     rverdict='KEEP'
-    if is_protected "$branch"; then
+    if [ "$branch" = "$default" ]; then
+        rreason='default-branch'
+    elif is_protected "$branch"; then
         rreason='protected'
-    elif [ -z "$row" ]; then
+    elif [ "$prcount" -gt 1 ]; then
+        rreason='pr-ambiguous — branch name reused across PRs'
+    elif [ "$prcount" -eq 0 ]; then
         rreason='no-pr'
     elif [ "$state" != 'MERGED' ]; then
         rreason="pr-$state"
     elif [ "$remote_sha" != "$head_oid" ]; then
         rreason='remote-moved-since-merge'
+    elif [ -n "$verdict" ] && [ "$verdict" != 'RECLAIM' ]; then
+        # The local ref survived for some reason — a dirty lane, a ref ahead
+        # of its PR, an explicit protection. Whatever that reason was, it is
+        # also a reason to leave the operator somewhere to push it.
+        rreason="local-kept — $reason"
     else
         rverdict='RECLAIM'
         rreason='pr-merged, remote tip = merged head'
