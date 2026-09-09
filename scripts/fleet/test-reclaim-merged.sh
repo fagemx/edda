@@ -311,4 +311,64 @@ if grep -q "reclaimed remote branch.*origin/partial-b" "$work/out"; then
     fail 'case 6: a ref the remote REJECTED was receipted as reclaimed — exit-code trust, not verification'
 fi
 
+# ── case 7: the remote re-read failing must not fabricate a receipt ──
+#
+# P1-1 (Round 1 review): `git ls-remote --heads origin | sed … || true` (the
+# remote arm's post-delete verification) discarded both the exit status and
+# stderr of `ls-remote`, so a re-read that failed left after.txt EMPTY —
+# indistinguishable from "origin now has zero branches" — and every ref in
+# the batch was receipted `reclaimed remote branch` anyway, on exit 0. This
+# reproduces the failure point directly: a `git` shim lets the FIRST
+# `ls-remote --heads origin` (fact-gathering, before any delete) through to
+# the real git, then fails every subsequent one — the shape of a network
+# drop or token expiry landing between the delete push and its verification
+# re-read. `has_remote`'s own 4-argument form (`ls-remote --heads origin
+# <branch>`) is a different argv and passes through the shim untouched.
+
+git branch verify-fail main
+git push --quiet origin verify-fail
+
+{
+    cat "$work/prs.tsv"
+    printf 'verify-fail\t301\tMERGED\t%s\t%s\n' "$base" "$squash"
+} >"$work/prs-case7.tsv"
+STUB_PRS=$work/prs-case7.tsv
+export STUB_PRS
+
+rm -f "$work/origin.git/hooks/update"
+
+real_git=$(command -v git)
+export REAL_GIT="$real_git"
+LSREMOTE_CALLS_FILE="$work/lsremote-calls"
+export LSREMOTE_CALLS_FILE
+printf '0\n' >"$LSREMOTE_CALLS_FILE"
+cat >"$work/bin/git" <<'GITSHIM'
+#!/bin/sh
+if [ "$1" = 'ls-remote' ] && [ "$2" = '--heads' ] && [ "$3" = 'origin' ] && [ $# -eq 3 ]; then
+    n=$(cat "$LSREMOTE_CALLS_FILE")
+    n=$((n + 1))
+    echo "$n" >"$LSREMOTE_CALLS_FILE"
+    if [ "$n" -gt 1 ]; then
+        echo 'git shim: origin unreachable' >&2
+        exit 128
+    fi
+fi
+exec "$REAL_GIT" "$@"
+GITSHIM
+chmod +x "$work/bin/git"
+
+run --apply
+[ "$code" -eq 4 ] || fail "case 7: expected exit 4 on an unverifiable remote re-read, got $code"
+
+grep -q "reclaimed local branch.*verify-fail.*pr=#301" "$work/out" \
+    || fail 'case 7: the local arm (unaffected by the shim) should still reclaim and receipt normally'
+
+if grep -q 'reclaimed remote branch.*verify-fail' "$work/out"; then
+    fail 'case 7: a receipt was fabricated for a batch whose re-read could not be verified'
+fi
+grep -q 'KEPT remote branch.*origin/verify-fail.*unverified' "$work/err" \
+    || fail 'case 7: no unverified/KEPT line for the ref whose re-read failed'
+
+rm -f "$work/bin/git"
+
 echo 'PASS scripts/fleet/test-reclaim-merged.sh'

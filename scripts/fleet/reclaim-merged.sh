@@ -37,7 +37,9 @@
 # worktrees are protected unconditionally and need no flag.
 #
 # Exit codes: 0 = ran, 2 = usage, 3 = the PR table could not be read (without
-# it every item's PR state is unknown, so nothing may be reclaimed).
+# it every item's PR state is unknown, so nothing may be reclaimed), 4 = a
+# post-delete verification re-read failed — the affected refs are reported
+# KEPT/unverified on stderr, not receipted as reclaimed.
 set -eu
 
 usage() {
@@ -47,6 +49,7 @@ usage() {
 apply=0
 pr_limit=2000
 protect=''
+verify_failed=0
 while [ $# -gt 0 ]; do
     case $1 in
         --apply) apply=1; shift ;;
@@ -349,6 +352,15 @@ done <"$work/branches.tsv"
 # code. Each list is re-read from git afterwards and a receipt is printed only
 # for a ref that is actually gone; anything still standing gets a KEPT line
 # naming it. Chunked at 50 so no single command line grows unbounded.
+#
+# The re-read itself is verified too, not trusted by exit code either: an
+# unreachable origin here would otherwise read as "nothing survived the
+# delete" and receipt every ref in the batch as reclaimed — the exact
+# fail-open this script exists to close. `git ls-remote`'s own exit status is
+# checked directly (never the exit status of a pipeline it feeds), and on
+# failure the whole batch is reported KEPT/unverified with no receipt for any
+# ref in it; the run's exit code (4) reflects the failure instead of masking
+# it as a normal 0.
 delete_batched() { # <reclaim-file> <"local"|"remote">
     # Read both arguments out before the first `set --`: inside a function the
     # positional parameters ARE the arguments, so building a batch in them
@@ -384,8 +396,23 @@ delete_batched() { # <reclaim-file> <"local"|"remote">
         label='local branch'
         prefix=''
     else
-        git ls-remote --heads origin 2>/dev/null \
-            | sed "s|^.*${TAB}refs/heads/||" >"$work/after.txt" || true
+        if git ls-remote --heads origin >"$work/remote-after.raw" 2>"$work/lsremote.err"; then
+            sed "s|^.*${TAB}refs/heads/||" "$work/remote-after.raw" >"$work/after.txt"
+        else
+            # The re-read failed — network drop, token expiry, a 5xx, anything
+            # between the push above and this line. An empty after.txt here is
+            # indistinguishable from "origin now has no branches", and every
+            # ref in $list would read as gone. Do not let that manufacture a
+            # receipt: report every ref in this batch KEPT/unverified instead,
+            # on stderr, and fail the run's exit code rather than exit 0 on an
+            # unverified batch.
+            verify_failed=1
+            while IFS="$TAB" read -r branch pr merge_oid; do
+                printf 'KEPT remote branch\torigin/%s\tunverified — git ls-remote failed re-reading origin after delete: %s\n' \
+                    "$branch" "$(head -n 1 "$work/lsremote.err")" >&2
+            done <"$list"
+            return 0
+        fi
         label='remote branch'
         prefix='origin/'
     fi
@@ -421,5 +448,9 @@ else
         "$(wc -l <"$work/wt.reclaim" | tr -d ' ')" \
         "$(wc -l <"$work/br.reclaim" | tr -d ' ')" \
         "$(wc -l <"$work/remote.reclaim" | tr -d ' ')"
+fi
+if [ "$verify_failed" -eq 1 ]; then
+    echo 'reclaim-merged: a post-delete re-read could not be verified — see KEPT/unverified lines above' >&2
+    exit 4
 fi
 exit 0

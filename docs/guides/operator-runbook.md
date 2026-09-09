@@ -240,7 +240,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 操作者在場的小批量併行走 `/issue-pipeline`（in-session 子代理：開工先貼 `taking: <machine>/pipeline`、審查是 house review——審查者不修自己審的 PR、子代理隨 session 死，長時間無人值守改派 Task Scheduler lane）；一次最多兩張要編譯的單 | `fleet.parallel-modes=in-session-pipeline-when-operator-present-lanes-when-unattended` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |
 | 合併＝final current-head LGTM、P0=0/P1=0、required check「`CI Gate`」綠（`ci.merge-gate`）、SHA 窗檢查為空；docs-only PR 的 clippy／test job 顯示 skipped 而 `CI Gate` 仍綠＝`ci.path-filter` 正常跳過，不是漏跑 | `pr.merge-policy`、`ci.merge-gate` |
-| worktree／branch／source 永不刪；build cache 可清、按年齡回收 | CLAUDE.md Build lanes |
+| 未合併的 worktree／branch／source 永不刪；已合併的（PR MERGED）由控制者依第 9 步回收；build cache 可清、按年齡回收 | `fleet.merged-artifact-cleanup` |
 | 決策 recorded ≠ ratified；agent 不 ratify 自己的決策 | README 兩層授權 |
 | 審查 brief 用「驗證清單」框架（契約＋要確認的輸入形狀），不用攻擊計畫框架——後者會被 provider 拒收、燒掉一輪 | `fleet.review-brief-framing` |
 | brief 要先自己跑過一輪才交付（**非帳本決策**：來源是探索場 31 號第零條；edda 側尚無對應決策，要立法先開單） | — |
