@@ -19,6 +19,12 @@
 # credentials are touched. `jq` is the real one — the script under test needs
 # it, and so does no assertion here.
 #
+# GH-1100 extends the same harness to the merge path: the squash subject is
+# always the PR title (`pr view --json title`), validated against REVIEW.md
+# §5 U4 before `gh pr merge` — which therefore never runs without --subject
+# and --body-file; cases 9-13 cover the conforming merge, a caller-supplied
+# --body-file, and the wip/empty-scope/missing-type refusals.
+#
 # usage: sh scripts/test-merge-reviewed-pr.sh
 set -eu
 
@@ -41,6 +47,10 @@ fail() {
 
 PR=4242
 HEAD_SHA=aaaaaaaabbbbbbbbccccccccdddddddd11112222
+# GH-1100 fixtures: the conforming PR title (REVIEW.md §5 U4 shape) and the CI
+# run link the composed merge body must carry.
+GOOD_TITLE='fix(fleet): make the squash subject the PR title (GH-1100)'
+CI_LINK='https://github.com/fagemx/edda/actions/runs/17549312884'
 
 # ── stubs ────────────────────────────────────────────────────────────
 #
@@ -61,6 +71,15 @@ HEAD_SHA=aaaaaaaabbbbbbbbccccccccdddddddd11112222
 # which predate GH-993 and set no drift fixture, see a vacuously clean
 # fleet and are unaffected; unset STUB_DRIFT_COMMENTS defaults a drift
 # `pr view` to empty comments (no verdict — the not-ready shape).
+#
+# GH-1100 adds the merge-path calls: `pr view --json title` (the subject
+# source — printed verbatim from STUB_PR_TITLE, the way the real gh prints
+# the already-filtered .title), `pr checks --json name,state,link` (fed from
+# the file STUB_CHECKS_JSON; unset is a hard error since only merge cases
+# reach it), and `pr merge` itself — recorded like every other call, printing
+# nothing and exiting 0, plus a snapshot of whatever `--body-file` points at
+# into $GH_BODY_CAPTURE at the moment of the call (the script deletes its
+# composed temp file on exit, so the snapshot is what a case reads).
 
 cat >"$work/bin/gh" <<'STUB'
 #!/bin/sh
@@ -79,6 +98,9 @@ case "${1:-} ${2:-}" in
                 if [ -n "$src" ] && [ -f "$src" ]; then jq -r "$jqfilter" <"$src"
                 else printf '{"comments":[]}\n' | jq -r "$jqfilter"; fi
                 ;;
+            *"--json title"*)
+                printf '%s\n' "${STUB_PR_TITLE:-}"
+                ;;
             *) printf '%s\tOPEN\n' "$STUB_HEAD" ;;
         esac
         ;;
@@ -92,7 +114,29 @@ case "${1:-} ${2:-}" in
         else printf '[]\n' | jq -r "$jqfilter"; fi
         ;;
     "api --paginate") cat "$STUB_COMMENTS" ;;
-    "pr checks") exit "${STUB_CHECKS_EXIT:-0}" ;;
+    "pr checks")
+        case "$*" in
+            *"--json"*)
+                src=${STUB_CHECKS_JSON:-}
+                if [ -n "$src" ] && [ -f "$src" ]; then cat "$src"
+                else
+                    echo "gh stub: json checks read without a STUB_CHECKS_JSON fixture: $*" >&2
+                    exit 1
+                fi
+                ;;
+            *) exit "${STUB_CHECKS_EXIT:-0}" ;;
+        esac
+        ;;
+    "pr merge")
+        merge_prev=
+        for merge_arg in "$@"; do
+            if [ "$merge_prev" = "--body-file" ] && [ -n "${GH_BODY_CAPTURE:-}" ]; then
+                cp "$merge_arg" "$GH_BODY_CAPTURE"
+            fi
+            merge_prev=$merge_arg
+        done
+        exit 0
+        ;;
     *) echo "gh stub: unexpected invocation: $*" >&2; exit 1 ;;
 esac
 STUB
@@ -116,7 +160,12 @@ chmod +x "$work/bin/edda"
 PATH="$work/bin:$PATH"
 export PATH
 STUB_HEAD=$HEAD_SHA
-export STUB_HEAD
+# GH-1100: the PR title the merge path pins the squash subject to. This
+# conforming default keeps cases 1-8 (which never override it) on the accept
+# side of the new U4 subject validation; the GH-1100 cases below override it
+# per-case with their own fixtures.
+STUB_PR_TITLE=$GOOD_TITLE
+export STUB_HEAD STUB_PR_TITLE
 
 # ── comment fixtures ─────────────────────────────────────────────────
 #
@@ -170,6 +219,13 @@ cat >"$work/fixtures/deliver-malformed.json" <<'JSON'
 {"pr":4242,"status":"success","verdicts":["LGTM\t0\t0"],"malformed":["5573431960"],"shadow":[],"exit_code":3}
 JSON
 
+# GH-1100: the merge path's `gh pr checks --json name,state,link` read, whose
+# `link` field carries the Actions run URL the composed body names.
+
+cat >"$work/fixtures/checks-green.json" <<JSON
+[{"name":"CI Gate","state":"SUCCESS","link":"$CI_LINK"}]
+JSON
+
 # ── harness ──────────────────────────────────────────────────────────
 
 case_no=0
@@ -177,11 +233,13 @@ run_case() {
     case_no=$((case_no + 1))
     GH_CALLS=$work/gh-calls-$case_no
     EDDA_CALLS=$work/edda-calls-$case_no
-    export GH_CALLS EDDA_CALLS
+    GH_BODY_CAPTURE=$work/gh-body-$case_no
+    export GH_CALLS EDDA_CALLS GH_BODY_CAPTURE
     : >"$GH_CALLS"
     : >"$EDDA_CALLS"
+    : >"$GH_BODY_CAPTURE"
     set +e
-    out=$(sh "$script" "$PR" 2>"$work/err-$case_no")
+    out=$(sh "$script" "$PR" "$@" 2>"$work/err-$case_no")
     code=$?
     set -e
     err=$(cat "$work/err-$case_no")
@@ -360,5 +418,112 @@ unset STUB_DRIFT_PRS STUB_DRIFT_COMMENTS
     || fail "case 8: accept output changed: $out"
 grep -qF "pr checks $PR" "$GH_CALLS" \
     || fail "case 8: --required checks were skipped: $(cat "$GH_CALLS")"
+
+# ── case 9: --merge pins the squash subject to the PR title (GH-1100) ──────
+#
+# The single-commit proof. With exactly one commit and no --subject, GitHub
+# uses that commit's subject verbatim — which wrote `wip(review): ...` onto
+# main permanently as fa0d011. There is no commit count to read from this
+# stub; the proof is the recorded `pr merge` call itself: --subject present
+# and equal to the PR title fixture (bounded by the following --body-file, so
+# it is the whole subject, not a prefix), --body-file present, and the
+# composed body naming the reviewed SHA, the LGTM round, and the CI run link.
+
+STUB_COMMENTS=$work/fixtures/lgtm-only.json
+STUB_DELIVER=$work/fixtures/deliver-success.json
+STUB_CHECKS_JSON=$work/fixtures/checks-green.json
+export STUB_COMMENTS STUB_DELIVER STUB_CHECKS_JSON
+run_case --merge
+unset STUB_CHECKS_JSON
+[ "$code" -eq 0 ] || fail "case 9: the conforming-title merge was refused (exit $code): $err"
+[ "$out" = "review accepted: PR #$PR @ $HEAD_SHA" ] \
+    || fail "case 9: accept output changed: $out"
+grep -qF "pr merge $PR" "$GH_CALLS" \
+    || fail "case 9: the merge was not invoked: $(cat "$GH_CALLS")"
+grep -qF -- "--match-head-commit $HEAD_SHA" "$GH_CALLS" \
+    || fail "case 9: the merge lost its match-head-commit pin: $(cat "$GH_CALLS")"
+grep -qF -- "--subject $STUB_PR_TITLE --body-file" "$GH_CALLS" \
+    || fail "case 9: the squash subject is not the exact PR title: $(cat "$GH_CALLS")"
+grep -qF "$HEAD_SHA" "$GH_BODY_CAPTURE" \
+    || fail "case 9: composed body omits the reviewed SHA: $(cat "$GH_BODY_CAPTURE")"
+grep -qF 'Round 1' "$GH_BODY_CAPTURE" \
+    || fail "case 9: composed body omits the review round: $(cat "$GH_BODY_CAPTURE")"
+grep -qF "$CI_LINK" "$GH_BODY_CAPTURE" \
+    || fail "case 9: composed body omits the CI run link: $(cat "$GH_BODY_CAPTURE")"
+
+# ── case 10: --body-file rides through instead of the composed body ────────
+#
+# A supplied body file is passed to gh as --body-file untouched: the composed
+# receipt is never written, and the checks-json read only composition needs
+# never happens.
+
+user_body=$work/user-merge-body.md
+printf 'choreographed merge body from the operator\n' >"$user_body"
+STUB_COMMENTS=$work/fixtures/lgtm-only.json
+STUB_DELIVER=$work/fixtures/deliver-success.json
+export STUB_COMMENTS STUB_DELIVER
+run_case --merge --body-file "$user_body"
+[ "$code" -eq 0 ] || fail "case 10: the user-body merge was refused (exit $code): $err"
+grep -qF -- "--body-file $user_body" "$GH_CALLS" \
+    || fail "case 10: the user's body file was not used: $(cat "$GH_CALLS")"
+cmp -s "$GH_BODY_CAPTURE" "$user_body" \
+    || fail "case 10: the body gh received is not the user's file: $(cat "$GH_BODY_CAPTURE")"
+if grep -qF -- '--json name,state,link' "$GH_CALLS"; then
+    fail "case 10: a supplied body file still composed a receipt: $(cat "$GH_CALLS")"
+fi
+
+# ── case 11: a wip PR title refuses the merge (GH-1100) ────────────────────
+#
+# A non-conforming subject refuses rather than merges, with the offending
+# string visible in the error. `wip(...)` is exactly the shape fa0d011 put on
+# main; the refusal must land before `gh pr merge` is ever reached.
+
+STUB_PR_TITLE='wip(review): lane work in progress'
+export STUB_PR_TITLE
+run_case --merge
+STUB_PR_TITLE=$GOOD_TITLE
+export STUB_PR_TITLE
+[ "$code" -ne 0 ] || fail "case 11: a wip title was merged over: $out"
+case $err in
+    *"wip(review): lane work in progress"*) : ;;
+    *) fail "case 11: the refusal must name the offending subject, got: $err" ;;
+esac
+grep -qF -- '--json title' "$GH_CALLS" \
+    || fail "case 11: the PR title was never read: $(cat "$GH_CALLS")"
+if grep -q 'pr merge' "$GH_CALLS"; then
+    fail "case 11: gh pr merge was reached with a wip title: $(cat "$GH_CALLS")"
+fi
+
+# ── case 12: an empty scope (`fix(): x`) refuses the merge (GH-1100) ───────
+
+STUB_PR_TITLE='fix(): x'
+export STUB_PR_TITLE
+run_case --merge
+STUB_PR_TITLE=$GOOD_TITLE
+export STUB_PR_TITLE
+[ "$code" -ne 0 ] || fail "case 12: an empty-scope title was merged over: $out"
+case $err in
+    *'fix(): x'*) : ;;
+    *) fail "case 12: the refusal must name the offending subject, got: $err" ;;
+esac
+if grep -q 'pr merge' "$GH_CALLS"; then
+    fail "case 12: gh pr merge was reached with an empty-scope title: $(cat "$GH_CALLS")"
+fi
+
+# ── case 13: a missing type (`no type here`) refuses the merge (GH-1100) ───
+
+STUB_PR_TITLE='no type here'
+export STUB_PR_TITLE
+run_case --merge
+STUB_PR_TITLE=$GOOD_TITLE
+export STUB_PR_TITLE
+[ "$code" -ne 0 ] || fail "case 13: a missing-type title was merged over: $out"
+case $err in
+    *'no type here'*) : ;;
+    *) fail "case 13: the refusal must name the offending subject, got: $err" ;;
+esac
+if grep -q 'pr merge' "$GH_CALLS"; then
+    fail "case 13: gh pr merge was reached with a missing-type title: $(cat "$GH_CALLS")"
+fi
 
 echo "PASS scripts/test-merge-reviewed-pr.sh ($case_no cases)"
