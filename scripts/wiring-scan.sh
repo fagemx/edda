@@ -15,6 +15,11 @@
 #
 # Human judgement is still required (false positives are expected) — this is
 # a reviewer RAN aid, not a CI gate.
+#
+# Both diffs below are three-dot (`"$BASE...$HEAD"`, from the merge base),
+# not tip-to-tip: a plain `git diff "$BASE" "$HEAD"` folds in every commit
+# <base> gained after the branch point, inflating the surface this scan
+# reports on a branch behind its base (GH-1003).
 
 set -u
 
@@ -42,7 +47,7 @@ echo "== New pub surfaces (${BASE}..${HEAD}) =="
 # visibility and the item keyword (e.g. pub(crate) async fn, pub const fn,
 # pub unsafe extern "C" fn). Item keywords: fn struct enum trait type const
 # static mod union. Fields (pub <name>: Type) handled separately below.
-surfaces=$(git diff "$BASE" "$HEAD" --unified=0 -- crates/ | awk '
+surfaces=$(git diff "$BASE...$HEAD" --unified=0 -- crates/ | awk '
   /^diff --git / { file = $NF; sub(/^b\//, "", file); next }
   /^\+\+\+/ { next }
   /^\+/ {
@@ -79,7 +84,7 @@ fi
 echo ""
 echo "== Swallow patterns on added lines =="
 
-git diff "$BASE" "$HEAD" --unified=0 | awk '
+git diff "$BASE...$HEAD" --unified=0 | awk '
   /^diff --git / { file = $NF; sub(/^b\//, "", file); next }
   /^\+\+\+/ { next }
   /^\+/ {

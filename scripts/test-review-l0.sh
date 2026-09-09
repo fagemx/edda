@@ -16,9 +16,17 @@
 #     U2/U3/U6 stay N.A.(needs PR number);
 #   cjk fixture (GH-922) — an R1 evidence line far past the 160-byte cell
 #     cap; the capped cell must still decode as valid UTF-8.
+#   missing-file fixture (GH-992) — two changed .sh files, one clean and
+#     present, one committed on the branch then removed from disk (run under
+#     L0_SHA, so the file list comes from git history, not the working tree)
+#     with a name that sorts alphabetically last → R3 must stay PASS, not
+#     flip to FAIL from the short-circuit the missing file used to cause.
 #
 # It also proves the unmarked-block contract from a temp-modified spec copy:
 # a fenced sh block without markers → `UNMARKED <first line>`, exit 3.
+#
+# A final check greps REVIEW.md itself for a regressed two-dot `git diff`
+# enumerator (GH-1003) — static analysis on the spec, not a fixture run.
 #
 # Everything is written inside one mktemp directory; nothing outside it.
 #
@@ -125,6 +133,17 @@ STUB
     printf '# %s rm -r%s /tmp/fixture-cjk\n' "$cjk" f > "$fix/cjk.sh"
     echo cjk.sh > "$TMP/file-list"
     msg="feat(fleet): cjk fixture change"
+  elif [ "$mode" = missing ]; then
+    # GH-992: two changed .sh files, both committed on this branch — one
+    # stays on disk (clean), the other the caller removes from the working
+    # tree right after make_fixture returns (see the missing-file fixture
+    # below), simulating a reviewer whose checkout never fetched a file the
+    # PR added. "zzz-" sorts alphabetically last, the exact position R3's old
+    # `[ -f ] &&` short-circuit needed to flip a clean round to a false P0.
+    printf '#!/bin/sh\necho fixture-ok\n' > "$fix/aaa-exists.sh"
+    printf '#!/bin/sh\necho never fetched\n' > "$fix/zzz-added-by-pr.sh"
+    printf 'aaa-exists.sh\nzzz-added-by-pr.sh\n' > "$TMP/file-list"
+    msg="feat(fleet): missing-file fixture change"
   else
     printf '#!/bin/sh\necho fixture-ok\n' > "$fix/good.sh"
     echo good.sh > "$TMP/file-list"
@@ -138,14 +157,21 @@ run_l0() { # <fixture-dir> <spec> <out-file> [PR-number] — runner exit code vi
   # With no PR-number argument the runner runs in the pre-push shape
   # (GH-922): U1/C5/R3 must still run, from the runner's own file list.
   # L0_BASE overrides the <base> argument for the GH-950 cases; every other
-  # caller gets the ordinary origin/main shape.
+  # caller gets the ordinary origin/main shape. L0_SHA overrides the literal
+  # "HEAD" <head> argument (GH-992's missing-file fixture): passing a real
+  # commit switches the runner to its `git diff --name-only base...sha` file
+  # list (review-l0.sh's non-HEAD branch), which is computed from git history
+  # alone — the only way to make a file "changed" per that list while absent
+  # from this working tree, exactly the reviewer-behind-the-PR shape the bug
+  # needs. Every other caller gets the ordinary working-tree-vs-base shape.
   (cd "$1" \
     && PATH="$TMP/bin:$PATH" \
        GH_STUB_DIR="$TMP" \
        REVIEW_L0_SPEC="$2" \
-       sh "$RUNNER" "${L0_BASE:-origin/main}" HEAD ${4:-}) > "$3" 2>&1
+       sh "$RUNNER" "${L0_BASE:-origin/main}" "${L0_SHA:-HEAD}" ${4:-}) > "$3" 2>&1
 }
 L0_BASE=
+L0_SHA=
 
 # ---- 1. dirty fixture: R1 + R3 FAIL, exit 1 ---------------------------------
 make_fixture dirty
@@ -336,5 +362,38 @@ case "$u5" in
 esac
 [ "$rc" -eq 2 ] || fail "generic fatal: expected runner exit 2 (ERROR, no FAIL), got $rc"
 echo "generic fatal: an exit-0 block printing 'fatal:' is ERROR — OK"
+
+# ---- 8. R3 short-circuit: a changed .sh missing from the tree, sorting -----
+# alphabetically last, must not flip the block's own exit status (GH-992).
+# L0_SHA switches review-l0.sh to its base...sha (pure git-history) file
+# list, so "changed" comes from the commit and is independent of what this
+# rm leaves on disk — the real-world shape (a reviewer checked out at $BASE,
+# not at the PR's $SHA), not the working-tree-vs-base shape every other
+# fixture here runs under.
+make_fixture missing
+rm "$FIXDIR/zzz-added-by-pr.sh"
+L0_SHA=$(git -C "$FIXDIR" rev-parse HEAD)
+rc=0
+run_l0 "$FIXDIR" "$SPEC" "$TMP/missing.out" || rc=$?
+L0_SHA=
+[ "$rc" -eq 0 ] || fail "missing-file fixture: expected runner exit 0, got $rc: $(cat "$TMP/missing.out")"
+grep -Fq '| R3 | code-risk | P0 | FAIL' "$TMP/missing.out" \
+  && fail "missing-file fixture: R3 row is FAIL — the short-circuit regressed (GH-992)"
+grep -Fq '| R3 | code-risk | P0 | PASS' "$TMP/missing.out" \
+  || fail "missing-file fixture: R3 row is not PASS: $(grep -F '| R3 |' "$TMP/missing.out")"
+echo "missing-file fixture: R3 not FAIL when the alphabetically-last changed .sh is absent from the tree — OK"
+
+# ---- 9. two-dot git diff regression guard (GH-1003) -------------------------
+# REVIEW.md's content enumerators in §5 are three-dot (from the merge base);
+# only the git-log commit enumerators (U2, U4, C2 — REVIEW.md §2 explains
+# why) stay two-dot. A `git diff "origin/$BASE..$SHA"` regression silently
+# widens or narrows the reviewed surface on a branch behind its base. This
+# pattern cannot match the fixed three-dot form (the literal "BASE" and "SHA"
+# anchors on both sides of the dots make the two forms mutually exclusive
+# substrings — verified empirically, not just by inspection).
+twodot=$(grep -nE 'git diff "origin/\$BASE\.\.\$SHA"' "$SPEC" || true)
+[ -z "$twodot" ] \
+  || fail "two-dot git diff regression in $SPEC (GH-1003): $twodot"
+echo "two-dot git diff regression guard: no offending pattern in REVIEW.md — OK"
 
 echo "test-review-l0.sh: all fixture assertions held"
