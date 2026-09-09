@@ -106,9 +106,16 @@ the rule says so and the command is not piped.
 N=<pr-number>
 gh pr view "$N" --json headRefOid,headRefName,title,body,state,isDraft
 SHA=$(gh pr view "$N" --json headRefOid --jq .headRefOid)   # full 40-hex
-gh pr checkout "$N"
+git fetch origin "pull/$N/head:refs/review/pr$N"
 ```
 # review-spec:check-end
+
+Never `gh pr checkout` in a shared checkout (`.claude/CLAUDE.md`'s isolation
+rule) — the private ref above, or a dedicated worktree, is the reviewer's
+tree; §2's `gh pr diff` reads the PR directly and needs no local checkout
+either way. Read-only is proven by capability flags plus a `git status
+--porcelain` before and after (`review.readonly-proof`), never by repurposing
+a checkout other sessions rely on.
 
 The reviewed SHA is the **full** head SHA and it is pinned for the whole round.
 Every push invalidates the previous verdict and requires another round
