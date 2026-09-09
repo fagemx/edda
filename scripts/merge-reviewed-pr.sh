@@ -9,18 +9,52 @@
 # post-2026-09-08); a stale or
 # missing binary is not detected separately here — it reports as a union
 # refusal (fail-closed). Check with `edda --version`.
+# GH-993: also refuses, for both --check and --merge, unless
+# scripts/fleet/verdict-drift.sh exits 0 across every open PR — see the
+# comment above that call, below.
 set -eu
 die() { echo "merge-reviewed-pr: $*" >&2; exit 1; }
 if [ "${1:-}" = --help ]; then
   echo 'usage: merge-reviewed-pr.sh PR [--merge] (merge requires operator authority)'
   exit 0
 fi
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 pr=${1:-}; action=${2:---check}
 printf '%s\n' "$pr" | grep -qE '^[1-9][0-9]*$' || die 'invalid PR'
 case "$action" in --check|--merge) ;; *) die 'expected --check or --merge' ;; esac
 [ "$#" -le 2 ] || die 'too many arguments'
 repo=${EDDA_REPO:-fagemx/edda}
 printf '%s\n' "$repo" | grep -qE '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$' || die 'invalid repository'
+# GH-993: a completed review round must reach the PR regardless of transport
+# — the observed failure was a `Review Response: Round N` comment with no
+# matching `Code Review: Round N` anywhere on the PR (a subagent's report
+# that was never posted). verdict-drift.sh already detects that, plus "no
+# verdict on head", a stale verdict, and CONFLICTING mergeability, across
+# every open PR (GH-914/958) — but its only prior caller (daily-digest.sh)
+# captures the exit code and reports it without blocking (by design — see
+# the comment there). This is the "declare a PR done" entrypoint
+# docs/guides/pi-controller-runbook.md:128 already names as the place to
+# run verdict-drift.sh, by policy; wiring it here enforces that policy
+# instead of relying on an operator remembering it, for --check and --merge
+# alike (nothing above this point branches on $action, so both share this
+# code path). The whole open-PR set is checked, not just $pr: a fleet-wide
+# check scoped down to one PR would stop being the check GH-958 shares with
+# daily-digest.sh, and this is deliberately the same blocking scope
+# pi-controller-runbook.md already names, not a narrower one invented here.
+#
+# `drift_rc` is read directly from `$?` of the substitution on the next
+# line — nothing pipes into or out of it, so there is no stage for the exit
+# code to hide behind (the near-miss the issue's own author records:
+# `verdict-drift.sh | head -20; echo $?` reads `head`'s exit code, not
+# verdict-drift.sh's — GH-993). Every nonzero exit refuses, not only exit 1
+# (drift found): exit 2 (verdict-drift.sh could not read PR state at all)
+# must refuse too, or a broken read would wave every merge through clean.
+drift_rc=0
+drift_out=$(EDDA_REPO="$repo" sh "$self_dir/fleet/verdict-drift.sh" 2>&1) || drift_rc=$?
+if [ "$drift_rc" -ne 0 ]; then
+  printf '%s\n' "$drift_out" >&2
+  die "verdict-drift.sh is not clean across the open PR set (exit $drift_rc) — refusing until every open PR carries a verdict on its head (output above)"
+fi
 facts=$(gh pr view "$pr" --repo "$repo" --json headRefOid,state --jq '[.headRefOid,.state]|@tsv') || die 'cannot read PR head'
 head=$(printf '%s\n' "$facts" | cut -f1)
 state=$(printf '%s\n' "$facts" | cut -f2)
