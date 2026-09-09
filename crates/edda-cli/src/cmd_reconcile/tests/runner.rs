@@ -735,10 +735,17 @@ pub(super) fn fake_runner_resumes_current_attempt_after_slow_startup_before_turn
     std::env::set_var("EDDA_FAKE_CHALLENGE", &challenge);
     std::env::set_var("EDDA_FAKE_ALLOW", &allow);
     std::env::set_var("EDDA_FAKE_DENY", &deny);
+    // The deliberate delay that simulates a slow runner startup happens
+    // before the observer starts polling, not after: the observer's budget
+    // exists to cover the handshake it is actually watching for, not time
+    // this test spends manufacturing "slow startup" on purpose. Sleeping
+    // after the observer was already running used to spend part of its
+    // hang-safety-valve on nothing observable — the unconditional-wait
+    // anti-pattern this reordering removes (GH-1078).
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+
     let observer =
         allow_fake_turn_after_durable_session(repo.clone(), 2, 1, challenge, allow, deny);
-
-    std::thread::sleep(std::time::Duration::from_millis(2_100));
 
     let run_result = run_task(&repo, 2, 1, &config, false);
     let observer_result = observer.join();

@@ -12,9 +12,48 @@ mod scheduler;
 
 #[cfg(windows)]
 pub(super) static FAKE_CODEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// A hang-safety-valve, not a tuned deadline. The waits that consume this
+/// budget (spawning `powershell.exe`, the JSON-RPC handshake, and recording
+/// the durable session under the workspace lock) are the same shape as
+/// `WORKSPACE_LOCK_WAIT_BUDGET` before GH-1047: a fixed ceiling sized as a
+/// multiple of idle-host timing. GH-1047's `git worktree add` was measured at
+/// 27.99 s and 64.8 s under contention against a 30 s budget — its fix did
+/// not raise that number, it moved the slow operation out of what the budget
+/// bounds. There is no equivalent move here (the wait's whole job is to
+/// observe this chain complete), so per GH-1078 ("spawn plus handshake
+/// exceeds the window") this constant is instead set to a magnitude that
+/// contention on this workstation is not expected to reach — comfortably
+/// above GH-1047's own worst measured single-subprocess figure for a chain
+/// with more steps than that one — so a slow host costs latency, never a
+/// failure, and only a genuinely wedged handshake still trips it.
 #[cfg(windows)]
 pub(super) const FAKE_CODEX_STARTUP_BUDGET: std::time::Duration =
-    std::time::Duration::from_secs(30);
+    std::time::Duration::from_secs(180);
+
+/// Poll `condition` every `poll` until it reports `true` or `budget` elapses.
+/// `budget` must be a hang-safety-valve (see `FAKE_CODEX_STARTUP_BUDGET`), not
+/// a value calibrated to idle-host timing — the anti-pattern this exists to
+/// replace let a load-calibrated ceiling double as the test's assertion, so
+/// exceeding it failed the test rather than merely arriving late. Returns
+/// whether the condition held before the deadline; the caller decides what
+/// "false" means (assert, bail, or something softer).
+#[cfg(windows)]
+pub(super) fn poll_until(
+    budget: std::time::Duration,
+    poll: std::time::Duration,
+    mut condition: impl FnMut() -> anyhow::Result<bool>,
+) -> anyhow::Result<bool> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if condition()? {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(poll);
+    }
+}
 
 pub(super) static DOORBELL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -157,25 +196,24 @@ pub(super) fn allow_fake_turn_after_durable_session(
     deny: std::path::PathBuf,
 ) -> std::thread::JoinHandle<anyhow::Result<()>> {
     std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + FAKE_CODEX_STARTUP_BUDGET;
-        while std::time::Instant::now() < deadline {
-            if challenge.exists() {
-                let view = Ledger::open(&repo)?
-                    .task_views()?
-                    .into_iter()
-                    .find(|view| view.task_id == task_id);
-                let valid = view.is_some_and(|view| {
-                    view.session_agent_kind.as_deref() == Some("codex")
-                        && view.session_attempt == Some(attempt)
-                        && view.session_id.as_deref() == Some("fake-thread")
-                });
-                std::fs::write(if valid { allow } else { deny }, "gate")?;
-                anyhow::ensure!(valid, "fake observed turn before durable current session");
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        anyhow::bail!("fake never challenged turn gate")
+        let seen = poll_until(
+            FAKE_CODEX_STARTUP_BUDGET,
+            std::time::Duration::from_millis(10),
+            || Ok(challenge.exists()),
+        )?;
+        anyhow::ensure!(seen, "fake never challenged turn gate");
+        let view = Ledger::open(&repo)?
+            .task_views()?
+            .into_iter()
+            .find(|view| view.task_id == task_id);
+        let valid = view.is_some_and(|view| {
+            view.session_agent_kind.as_deref() == Some("codex")
+                && view.session_attempt == Some(attempt)
+                && view.session_id.as_deref() == Some("fake-thread")
+        });
+        std::fs::write(if valid { allow } else { deny }, "gate")?;
+        anyhow::ensure!(valid, "fake observed turn before durable current session");
+        Ok(())
     })
 }
 
