@@ -111,26 +111,41 @@ pub(crate) struct Extracted {
 /// line (the #917 trim contract). Accepting it here is what makes a SHADOW
 /// round *well-formed*; [`pinned_to`] is what keeps it out of the union.
 fn is_heading(line: &str) -> bool {
-    let rest = match line.strip_prefix("## Code Review: Round ") {
-        Some(rest) => rest,
-        None => return false,
-    };
+    heading_parts(line).is_some()
+}
+
+/// The §7 heading, decomposed: `(round, sha, shadow)` (GH-1105).
+///
+/// One grammar, every reader: [`extract`] above and the drift and merge
+/// readers in [`super::drift`] / [`super::merge`] parse the same heading
+/// through this function rather than carrying a second regex for the same
+/// rule. `shadow` is true when the heading self-declares ` (SHADOW)` in
+/// either recorded position.
+pub(crate) fn heading_parts(line: &str) -> Option<(String, String, bool)> {
+    let rest = line.strip_prefix("## Code Review: Round ")?;
     let after_round = rest.trim_start_matches(|c: char| c.is_ascii_digit());
     if after_round.len() == rest.len() {
-        return false; // "Round " with no round number is not the R23 shape
+        return None; // "Round " with no round number is not the R23 shape
     }
+    let round = &rest[..rest.len() - after_round.len()];
+    let round_shadow = after_round.starts_with(" (SHADOW)");
     let rest = after_round.strip_prefix(" (SHADOW)").unwrap_or(after_round);
-    let rest = match rest.strip_prefix(" — PR #") {
-        Some(rest) => rest,
-        None => return false,
-    };
-    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-    let rest = match rest.strip_prefix(" @ ") {
-        Some(rest) => rest,
-        None => return false,
-    };
-    let rest = rest.strip_suffix(" (SHADOW)").unwrap_or(rest);
-    is_full_sha(rest)
+    let rest = rest.strip_prefix(" — PR #")?;
+    let after_pr = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    if after_pr.len() == rest.len() {
+        return None; // "PR #" with no number is not the R23 shape
+    }
+    let rest = after_pr.strip_prefix(" @ ")?;
+    let tail_shadow = rest.ends_with(" (SHADOW)");
+    let sha = rest.strip_suffix(" (SHADOW)").unwrap_or(rest);
+    if !is_full_sha(sha) {
+        return None;
+    }
+    Some((
+        round.to_owned(),
+        sha.to_owned(),
+        round_shadow || tail_shadow,
+    ))
 }
 
 /// Exactly 40 lowercase hex characters — the shape REVIEW.md R5 requires of a
@@ -197,7 +212,7 @@ fn shadow_pinned_to(line: &str, sha: &str) -> bool {
 /// `Changes Requested, P0=0, P1=1` also contains no LGTM, but one reading
 /// `Provisional — LGTM pending escalation` contains both words and must not be
 /// read as a pass.
-fn verdict_line(lines: &[&str]) -> Option<String> {
+pub(crate) fn verdict_line(lines: &[&str]) -> Option<String> {
     let mut in_verdict = false;
     for line in lines.iter().skip(1) {
         let trimmed = line.trim_start_matches('#');
@@ -311,7 +326,10 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
 /// value rather than a second, independent literal, a revert has nowhere to
 /// hide: either it changes what this returns (the test below goes red), or
 /// it leaves `comments` not calling this at all (dead code, `-D warnings`).
-fn comments_argv(pr: u64) -> Vec<String> {
+///
+/// GH-1105 shares this one definition with `edda review merge`'s comment
+/// read — the same paginated REST endpoint, never a second literal.
+pub(crate) fn comments_argv(pr: u64) -> Vec<String> {
     vec![
         "api".to_owned(),
         "--paginate".to_owned(),

@@ -4,12 +4,14 @@ mod brief;
 mod config;
 mod deliver;
 mod delivery;
+mod drift;
 mod due;
 mod evidence;
 mod gate;
 mod git;
 mod github;
 mod identity;
+mod merge;
 mod prepare;
 mod qualification;
 mod render;
@@ -25,12 +27,14 @@ use crate::cmd_dispatch::{build_phase, CapabilityOptions};
 use anyhow::{bail, Result};
 pub use args::ReviewArgs;
 pub use deliver::DeliverArgs;
+pub use drift::DriftArgs;
 pub use due::DueArgs;
 use edda_conductor::agent::launcher::{AgentLauncher, PhaseResult};
 use edda_core::{
     ReviewBrief, ReviewCost, ReviewFinding, ReviewReviewer, ReviewSubject, ReviewVerdictPayload,
 };
 pub use gate::GateArgs;
+pub use merge::MergeArgs;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +72,32 @@ pub enum ReviewCmd {
         #[command(flatten)]
         args: DeliverArgs,
     },
+    /// Does every open PR carry a verdict on its head? (GH-914, GH-1105)
+    ///
+    /// The readiness check verdict-drift.sh carried, in the product: one
+    /// line per open PR — verdict-on-head, stale, SHADOW-only, LGTM, or
+    /// Changes Requested, plus CONFLICTING/UNKNOWN mergeability, a non-main
+    /// base, and orphan Review Responses (GH-993). Trusts only
+    /// OWNER/MEMBER/COLLABORATOR §7 comments (GH-1103's rule). Read-only.
+    /// Exit: 0 all ready, 1 drift found, 2 cannot judge.
+    Drift {
+        #[command(flatten)]
+        args: DriftArgs,
+    },
+    /// The merge preconditions, in the product (GH-1105; folds GH-1100)
+    ///
+    /// Validates one PR against every precondition R6 names — fleet-wide
+    /// drift (GH-993), the latest trusted review pinned to head, the union
+    /// (GH-769/GH-742), malformed refusals (#917), required checks, and a
+    /// commit-conventional squash subject — without merging. `--merge`
+    /// executes the squash with the validated subject and a gate-receipt
+    /// body and requires operator authority. Read-only without it; never
+    /// writes labels or statuses (deliver owns those).
+    /// Exit: 0 accepted, 1 refused, 2 cannot judge.
+    Merge {
+        #[command(flatten)]
+        args: MergeArgs,
+    },
 }
 
 pub fn run_cmd(cmd: ReviewCmd, cwd: &Path) -> Result<()> {
@@ -75,6 +105,8 @@ pub fn run_cmd(cmd: ReviewCmd, cwd: &Path) -> Result<()> {
         ReviewCmd::Due { args } => due::run(args, cwd),
         ReviewCmd::Gate { args } => gate::run(args, cwd),
         ReviewCmd::Deliver { args } => deliver::run(args, cwd),
+        ReviewCmd::Drift { args } => drift::run(args, cwd),
+        ReviewCmd::Merge { args } => merge::run(args, cwd),
     }
 }
 

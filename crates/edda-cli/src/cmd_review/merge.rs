@@ -1,0 +1,829 @@
+//! `edda review merge` — the operator's merge entrypoint, in the product
+//! (GH-1105).
+//!
+//! `scripts/merge-reviewed-pr.sh` — now a one-line adapter over this verb —
+//! decided whether a PR may merge entirely in shell: the fleet-wide drift
+//! gate (GH-993), the trusted-review checks, the union rule (GH-769,
+//! GH-742), the malformed-comment refusal (#917), and required checks.
+//! That is control flow, parsing, and a trust boundary — three for three
+//! against `mechanism.shell-role=one-line-adapter-only`. Every rule moves
+//! here, unit-tested in Rust rather than by fixture shell, and the merge
+//! preconditions live in ONE enumerated order ([`merge_inner`]) the merge
+//! path actually consults, so a rule change cannot leave the shell and the
+//! product disagreeing.
+//!
+//! ## What changed against the shell it replaces
+//!
+//! - **Read-only without `--merge`.** The shell's last step before its gate
+//!   was an `edda review deliver` call — a write surface, said plainly in
+//!   its own comments. This verb computes the union read-only; the
+//!   `review:*` label and the `Independent Review` status are `edda review
+//!   deliver`'s to write, which the reviewing session runs when it
+//!   delivers its own round.
+//! - **#1100 is folded in.** The squash subject is always the PR title —
+//!   never the branch commit's own subject on a single-commit PR — and it
+//!   is validated against the commit convention before any merge executes.
+//!   The merge body comes from `--body-file`, or a minimal gate receipt is
+//!   composed naming the reviewed SHA, the LGTM round and the CI run.
+//!
+//! ## The window step
+//!
+//! Deliberately not the tree-level `edda review gate --base` check: that
+//! needs both commits locally, and this entrypoint must work without a
+//! checkout. At the moment that counts, the forge makes the equivalent
+//! refusal — `--match-head-commit <head>` rejects anything landed on the
+//! PR after the reviewed SHA, and branch protection rejects a base the PR
+//! is behind. R6's window record stays a checkout-side act.
+
+use super::deliver::{self, comments_argv, heading_parts, trusted_association, Comment};
+use super::drift;
+use super::gate;
+use super::github::{gh, gh_write, gh_write_stdin};
+use anyhow::{Context, Result};
+use std::path::Path;
+
+/// Flags for `edda review merge`.
+#[derive(clap::Args)]
+pub struct MergeArgs {
+    /// The pull request whose merge preconditions are checked
+    #[arg(long)]
+    pub pr: u64,
+    /// Execute the squash merge after every precondition passes; without
+    /// this the verb is validation only (requires operator authority)
+    #[arg(long)]
+    pub merge: bool,
+    /// Validation only — the default; accepted for the shell's usage shape
+    #[arg(long)]
+    pub check: bool,
+    /// Merge-commit body from this file; default composes a minimal gate
+    /// receipt (GH-1100)
+    #[arg(long, value_name = "PATH")]
+    pub body_file: Option<String>,
+    /// Emit the merge report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// One `(pr, head)` merge evaluation's GitHub needs, factored out so the
+/// precondition order is testable without the network (the same shape
+/// `delivery::Gh` took for GH-1030's "injectable gh, no network").
+pub(crate) trait Reads {
+    /// The PR's head SHA, state, and title (`gh pr view --json`).
+    fn pr(&self) -> Result<Pr>;
+    /// The REST issue comments, newest-last, each with its `updated_at`.
+    fn comments(&self, pr: u64) -> Result<Vec<TimedComment>>;
+    /// The fleet-wide drift walk (`edda review drift`'s own query).
+    fn drift(&self) -> Result<(Vec<String>, bool)>;
+    /// Do the ruleset's required checks pass? (`gh pr checks --required`)
+    fn checks_green(&self, pr: u64) -> Result<bool>;
+    /// The `CI Gate` check-run URL for the receipt body, if resolvable.
+    fn ci_gate_url(&self, sha: &str) -> Option<String>;
+    /// Execute the squash merge with subject and body pinned (GH-1100).
+    fn squash(&self, pr: u64, head: &str, subject: &str, body: &str) -> Result<()>;
+}
+
+pub(crate) struct Pr {
+    pub head: String,
+    pub state: String,
+    pub title: String,
+}
+
+/// A REST issue comment plus the `updated_at` timestamp the
+/// latest-trusted-review selection orders by — the one field
+/// [`deliver::Comment`] does not carry, because nothing in delivery sorts.
+#[derive(Debug, Clone)]
+pub(crate) struct TimedComment {
+    pub comment: Comment,
+    pub updated_at: String,
+}
+
+/// The commit-convention types `.claude/CLAUDE.md` fixes — the same list
+/// REVIEW.md enforces on a PR's commits, now enforced on the one commit
+/// that actually lands.
+const TYPES: [&str; 6] = ["feat", "fix", "docs", "refactor", "test", "chore"];
+
+/// Why a PR title cannot be the squash subject (GH-1100). `None` is valid.
+pub(crate) fn subject_problem(title: &str) -> Option<String> {
+    let Some((head, description)) = title.split_once(": ") else {
+        return Some("not <type>(<scope>): <description> — no ': ' separator".into());
+    };
+    let Some(close) = head.strip_suffix(')') else {
+        return Some("no (scope) before ': '".into());
+    };
+    let Some(open) = close.find('(') else {
+        return Some("no (scope) before ': '".into());
+    };
+    let (kind, scope) = (&head[..open], &close[open + 1..]);
+    if !TYPES.contains(&kind) {
+        return Some(format!("type '{kind}' is not one of {}", TYPES.join("|")));
+    }
+    if scope.is_empty()
+        || !scope
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Some("scope is empty or carries characters a path cannot".into());
+    }
+    if description.trim().is_empty() {
+        return Some("the description after ': ' is empty".into());
+    }
+    None
+}
+
+/// Is this the §7 `- escalations: none` line the merge gate requires?
+fn escalations_none(line: &str) -> bool {
+    line.trim_end() == "- escalations: none"
+}
+
+/// The exact approving verdict line: `LGTM (P0=0, P1=0)` then end or space.
+fn approves(line: &str) -> bool {
+    let rest = line
+        .strip_prefix("LGTM (P0=0, P1=0)")
+        .map(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    rest == Some(true) && !line.to_ascii_lowercase().contains("provisional")
+}
+
+/// The minimal merge-body receipt composed when `--body-file` is absent
+/// (GH-1100): a merge with no receipt at all is the thing this repository
+/// keeps re-learning to avoid.
+fn receipt_body(pr: u64, head: &str, round: &str, ci: Option<&str>) -> String {
+    format!(
+        "Squash merge of PR #{pr}, reviewed at {head}.\n\n\
+         - verdict: LGTM (P0=0, P1=0), Round {round} (§7 comment, trusted author)\n\
+         - union: pass over every §7 verdict pinned to this SHA (GH-769)\n\
+         - drift: clean across the open PR set (GH-993)\n\
+         - required checks: green\n\
+         - CI Gate: {}\n",
+        ci.unwrap_or("run id not resolved"),
+    )
+}
+
+/// The latest trusted §7 review's own four checks, in the shell's order:
+/// a trusted §7 comment exists at all; its FIRST §7 heading line is pinned
+/// to `head` (`grep -m1` — line 1 for a well-formed comment, any line for a
+/// transcript dump, #867); escalations resolve; the verdict approves with
+/// P0=0/P1=0 and is not Provisional. Latest is by `(updated_at, numeric
+/// id)` — GitHub's edit ordering, so an edited round returns to newest the
+/// way the shell's `sort_by([.updated_at, .id])` sorted it.
+///
+/// `Ok(round)` on every check passing; `Err(exit_code)` after printing the
+/// refusal, mirroring `merge_inner`'s own stages.
+fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<String, i32> {
+    let mut latest: Option<&TimedComment> = None;
+    for candidate in timed.iter().filter(|t| {
+        trusted_association(t.comment.author_association.as_deref())
+            && t.comment
+                .body
+                .lines()
+                .any(|line| heading_parts(line.trim_end_matches('\r')).is_some())
+    }) {
+        // A fn item, not a closure: it is called with two references of
+        // different borrow lifetimes (candidate vs. current), and a fn is
+        // lifetime-generic where a closure would pin one.
+        fn key(t: &TimedComment) -> (&str, u64) {
+            (
+                t.updated_at.as_str(),
+                t.comment.id.parse::<u64>().unwrap_or(0),
+            )
+        }
+        if latest.is_none_or(|current| key(candidate) > key(current)) {
+            latest = Some(candidate);
+        }
+    }
+    let Some(latest) = latest else {
+        eprintln!("no trusted §7 review on PR #{pr}");
+        return Err(1);
+    };
+    let body: Vec<&str> = latest
+        .comment
+        .body
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    let Some((round, pinned_to, _)) = body.iter().filter_map(|line| heading_parts(line)).next()
+    else {
+        eprintln!("latest trusted review carries no §7 heading");
+        return Err(1);
+    };
+    if pinned_to != head {
+        eprintln!("latest trusted review is not pinned to current head {head}");
+        return Err(1);
+    }
+    if !body.iter().any(|line| escalations_none(line)) {
+        eprintln!("review has missing or unresolved escalations");
+        return Err(1);
+    }
+    match deliver::verdict_line(&body).as_deref().map(approves) {
+        Some(true) => Ok(round),
+        _ => {
+            eprintln!("latest review does not approve with P0=0/P1=0");
+            Err(1)
+        }
+    }
+}
+
+/// The whole merge decision, one enumerated order (R6). Fail-fast on the
+/// same stages the shell refused at, for the same reasons and in the same
+/// order: drift (whole open set, GH-993) before the PR's own facts before
+/// the review's own facts before the forge's required checks.
+pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
+    if args.merge && args.check {
+        anyhow::bail!("--merge and --check are mutually exclusive; --check is the default");
+    }
+    // 1. Fleet-wide drift (GH-993): the whole open set, not just this PR —
+    //    the same scope pi-controller-runbook named by policy.
+    match reads.drift() {
+        Err(error) => {
+            eprintln!("verdict-drift could not read PR state ({error:#}) — refusing until it can");
+            return Ok(2);
+        }
+        Ok((lines, not_ready)) if not_ready => {
+            for line in &lines {
+                eprintln!("{line}");
+            }
+            eprintln!(
+                "verdict-drift is not clean across the open PR set — refusing until every \
+                 open PR carries a verdict on its head (output above)"
+            );
+            return Ok(1);
+        }
+        Ok(_) => {}
+    }
+    // 2. The PR's own facts.
+    let pr = match reads.pr() {
+        Ok(pr) => pr,
+        Err(error) => {
+            eprintln!("cannot read PR head: {error:#}");
+            return Ok(2);
+        }
+    };
+    if pr.state != "OPEN" {
+        eprintln!("PR is {}", pr.state);
+        return Ok(1);
+    }
+    if !is_head(&pr.head) {
+        eprintln!("invalid PR head {}", pr.head);
+        return Ok(2);
+    }
+    // 3. The verdict comments the union and the review checks read.
+    let timed = match reads.comments(args.pr) {
+        Ok(timed) => timed,
+        Err(error) => {
+            eprintln!("cannot read reviews: {error:#}");
+            return Ok(2);
+        }
+    };
+    let comments: Vec<Comment> = timed.iter().map(|t| t.comment.clone()).collect();
+
+    // 4. The latest trusted §7 review's own checks.
+    let round = match latest_review_round(&timed, args.pr, &pr.head) {
+        Ok(round) => round,
+        Err(code) => return Ok(code),
+    };
+
+    // 5. The union gate (GH-1057): an ADDITIONAL refusal over every §7
+    //    verdict pinned to this head — a later LGTM never overrides an
+    //    earlier standing Changes Requested (GH-742).
+    let extracted = deliver::extract(&pr.head, &comments);
+    let union = gate::union(&gate::from_lines(&extracted.lines.join("\n")));
+    let state = match union {
+        gate::Union::Pass => "success",
+        gate::Union::Fail => "failure",
+        gate::Union::None => "error",
+    };
+    if state != "success" {
+        eprintln!(
+            "union over every §7 verdict comment pinned to {} is '{state}', not a pass; a \
+             later LGTM does not override an earlier Changes Requested (GH-742)",
+            pr.head
+        );
+        return Ok(1);
+    }
+    if !extracted.malformed.is_empty() {
+        eprintln!(
+            "{} verdict comment(s) on {} are malformed and outside the union; refusing",
+            extracted.malformed.len(),
+            pr.head
+        );
+        return Ok(1);
+    }
+
+    // 6. The forge's own required checks.
+    match reads.checks_green(args.pr) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("required checks are not green");
+            return Ok(1);
+        }
+        Err(error) => {
+            eprintln!("cannot read required checks: {error:#}");
+            return Ok(2);
+        }
+    }
+
+    // 7. The squash subject, derived from the PR title and validated
+    //    against the commit convention (GH-1100) — `wip`, an empty scope,
+    //    or a missing type refuse with the offending string named.
+    if let Some(problem) = subject_problem(&pr.title) {
+        eprintln!(
+            "PR title {:?} cannot be the squash subject: {problem} — the subject is always \
+             derived from the PR title, never from a branch commit (GH-1100)",
+            pr.title
+        );
+        return Ok(1);
+    }
+
+    // 8. The merge body: the operator's file, or the composed receipt.
+    let body_text = match &args.body_file {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("read merge body {path}: {error}");
+                return Ok(2);
+            }
+        },
+        None => receipt_body(
+            args.pr,
+            &pr.head,
+            &round,
+            reads.ci_gate_url(&pr.head).as_deref(),
+        ),
+    };
+
+    if args.merge {
+        if let Err(error) = reads.squash(args.pr, &pr.head, &pr.title, &body_text) {
+            eprintln!("merge failed: {error:#}");
+            return Ok(2);
+        }
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "pr": args.pr,
+                "head": pr.head,
+                "subject": pr.title,
+                "accepted": true,
+                "merged": args.merge,
+            })
+        );
+    } else {
+        println!("review accepted: PR #{} @ {}", args.pr, pr.head);
+    }
+    Ok(0)
+}
+
+fn is_head(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// CLI entry point. Exit: 0 accepted (merged with `--merge`), 1 refused —
+/// a precondition failed, 2 cannot judge — a read failed, and an
+/// unreadable answer is never an approval.
+pub fn run(args: MergeArgs, cwd: &Path) -> Result<()> {
+    let reads = GhReads { cwd };
+    match merge_inner(&args, &reads) {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("edda review merge: {error:#}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The real `gh`-backed [`Reads`].
+struct GhReads<'a> {
+    cwd: &'a Path,
+}
+
+impl Reads for GhReads<'_> {
+    fn pr(&self) -> Result<Pr> {
+        let value = gh(
+            self.cwd,
+            &["pr", "view", "--json", "headRefOid,state,title"],
+        )?;
+        Ok(Pr {
+            head: value["headRefOid"].as_str().unwrap_or_default().to_owned(),
+            state: value["state"].as_str().unwrap_or_default().to_owned(),
+            title: value["title"].as_str().unwrap_or_default().to_owned(),
+        })
+    }
+
+    fn comments(&self, pr: u64) -> Result<Vec<TimedComment>> {
+        let argv = comments_argv(pr);
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let value = gh(self.cwd, &args).with_context(|| format!("read comments of PR #{pr}"))?;
+        Ok(value
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| TimedComment {
+                comment: Comment {
+                    id: entry["id"]
+                        .as_u64()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default(),
+                    body: entry["body"].as_str().unwrap_or_default().to_owned(),
+                    author_association: entry["author_association"].as_str().map(str::to_owned),
+                },
+                updated_at: entry["updated_at"].as_str().unwrap_or_default().to_owned(),
+            })
+            .collect())
+    }
+
+    fn drift(&self) -> Result<(Vec<String>, bool)> {
+        drift::evaluate(
+            self.cwd,
+            std::env::var("EDDA_OPEN_PR_LIMIT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(200),
+        )
+    }
+
+    fn checks_green(&self, pr: u64) -> Result<bool> {
+        // `gh pr checks --required` exits nonzero both when a required check
+        // is red and when gh itself failed — the shell refused on either,
+        // without distinguishing, and this stays at that parity: nonzero
+        // reads as not green rather than as an unreadable answer.
+        Ok(gh_write(self.cwd, &["pr", "checks", &pr.to_string(), "--required"]).is_ok())
+    }
+
+    fn ci_gate_url(&self, sha: &str) -> Option<String> {
+        let value = gh(
+            self.cwd,
+            &[
+                "api",
+                &format!("repos/{{owner}}/{{repo}}/commits/{sha}/check-runs"),
+            ],
+        )
+        .ok()?;
+        value["check_runs"]
+            .as_array()?
+            .iter()
+            .find(|run| run["name"].as_str() == Some("CI Gate"))
+            .and_then(|run| run["html_url"].as_str())
+            .map(str::to_owned)
+    }
+
+    fn squash(&self, pr: u64, head: &str, subject: &str, body: &str) -> Result<()> {
+        // `--match-head-commit` closes the last race (nothing may land on
+        // the PR after the reviewed SHA); `--subject` pins the validated
+        // PR title so a single-commit PR can never write its branch
+        // commit's subject into main (GH-1100); the body arrives on stdin
+        // through `--body-file -`.
+        gh_write_stdin(
+            self.cwd,
+            &[
+                "pr",
+                "merge",
+                &pr.to_string(),
+                "--squash",
+                "--match-head-commit",
+                head,
+                "--subject",
+                subject,
+                "--body-file",
+                "-",
+            ],
+            body,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    const HEAD: &str = "aaaaaaaabbbbbbbbccccccccdddddddd11112222";
+
+    fn args(merge: bool) -> MergeArgs {
+        MergeArgs {
+            pr: 4242,
+            merge,
+            check: false,
+            body_file: None,
+            json: false,
+        }
+    }
+
+    fn review(round: u64, sha: &str, verdict: &str, updated: &str) -> TimedComment {
+        TimedComment {
+            comment: Comment {
+                id: format!("{round:03}"),
+                body: format!(
+                    "## Code Review: Round {round} — PR #4242 @ {sha}\n\n- escalations: \
+                     none\n\n### Verdict\n\n{verdict}\n"
+                ),
+                author_association: Some("OWNER".into()),
+            },
+            updated_at: updated.into(),
+        }
+    }
+
+    /// The fixture half of test-merge-reviewed-pr.sh: every read pre-seeded,
+    /// every call recorded, so a case can prove what was and was not
+    /// reached — a stub that shrugs at an unexpected call turns a wiring
+    /// regression into a green test.
+    struct Fake {
+        head: &'static str,
+        state: &'static str,
+        title: String,
+        comments: Vec<TimedComment>,
+        drift: Result<(Vec<String>, bool), String>,
+        fail_comments: bool,
+        checks_green: bool,
+        merged: RefCell<Vec<(u64, String, String, String)>>,
+        reached_comments: RefCell<bool>,
+        reached_checks: RefCell<bool>,
+    }
+
+    impl Fake {
+        fn clean(comments: Vec<TimedComment>) -> Self {
+            Self {
+                head: HEAD,
+                state: "OPEN",
+                title: "fix(edda-cli): a merge the fleet already reviewed".into(),
+                comments,
+                drift: Ok((vec![], false)),
+                fail_comments: false,
+                checks_green: true,
+                merged: RefCell::new(Vec::new()),
+                reached_comments: RefCell::new(false),
+                reached_checks: RefCell::new(false),
+            }
+        }
+    }
+
+    impl Reads for Fake {
+        fn pr(&self) -> Result<Pr> {
+            Ok(Pr {
+                head: self.head.into(),
+                state: self.state.into(),
+                title: self.title.clone(),
+            })
+        }
+        fn comments(&self, _pr: u64) -> Result<Vec<TimedComment>> {
+            *self.reached_comments.borrow_mut() = true;
+            if self.fail_comments {
+                return Err(anyhow::anyhow!("gh: not authenticated"));
+            }
+            Ok(self.comments.clone())
+        }
+        fn drift(&self) -> Result<(Vec<String>, bool)> {
+            self.drift.clone().map_err(anyhow::Error::msg)
+        }
+        fn checks_green(&self, _pr: u64) -> Result<bool> {
+            *self.reached_checks.borrow_mut() = true;
+            Ok(self.checks_green)
+        }
+        fn ci_gate_url(&self, _sha: &str) -> Option<String> {
+            Some("https://github.com/fagemx/edda/runs/123".into())
+        }
+        fn squash(&self, pr: u64, head: &str, subject: &str, body: &str) -> Result<()> {
+            self.merged
+                .borrow_mut()
+                .push((pr, head.into(), subject.into(), body.into()));
+            Ok(())
+        }
+    }
+
+    fn lgtm() -> Vec<TimedComment> {
+        vec![review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z")]
+    }
+
+    // case 2/8: a lone qualifying LGTM is accepted; required checks are
+    // still asked, byte-identical accept path.
+    #[test]
+    fn a_lone_qualifying_lgtm_is_accepted() {
+        let fake = Fake::clean(lgtm());
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 0);
+        assert!(*fake.reached_checks.borrow(), "checks must be asked");
+        assert!(fake.merged.borrow().is_empty(), "no --merge, no squash");
+    }
+
+    // case 1: an earlier Changes Requested under a later LGTM is refused by
+    // the union (GH-742) — and required checks are never asked after the
+    // union already refused.
+    #[test]
+    fn a_standing_changes_requested_under_a_later_lgtm_is_refused() {
+        let fake = Fake::clean(vec![
+            review(
+                1,
+                HEAD,
+                "Changes Requested, P0=0, P1=1",
+                "2026-09-08T10:00:00Z",
+            ),
+            review(2, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 1, "a standing Changes Requested was merged over");
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after the union already refused"
+        );
+    }
+
+    // case 3: a gate that cannot judge refuses — an unreadable comment list
+    // is never an approval.
+    #[test]
+    fn an_unreadable_comment_list_refuses() {
+        let mut fake = Fake::clean(lgtm());
+        fake.fail_comments = true;
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 2);
+    }
+
+    // case 4: a verdict comment the union could not read refuses — the
+    // union reads `success` precisely because the blocking round is
+    // invisible to it (#917).
+    #[test]
+    fn a_malformed_verdict_comment_refuses() {
+        let mut timed = review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z");
+        timed.comment.body = format!(
+            "narration first\n## Code Review: Round 1 — PR #4242 @ {HEAD}\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)"
+        );
+        let fake = Fake::clean(vec![timed]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 1, "a malformed verdict comment was ignored");
+    }
+
+    // case 6: an unrelated open PR with no verdict refuses everything
+    // (GH-993) — before the comments read or required checks are reached.
+    #[test]
+    fn a_dirty_open_set_refuses_before_the_prs_own_checks() {
+        let mut fake = Fake::clean(lgtm());
+        fake.drift = Ok((
+            vec!["#9001 dddddddddddd main no verdict on head".into()],
+            true,
+        ));
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 1);
+        assert!(
+            !*fake.reached_comments.borrow(),
+            "the comment read was reached after drift already refused"
+        );
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after drift already refused"
+        );
+    }
+
+    // case 7: the drift walk itself failing to read also refuses — a broken
+    // read must not wave every merge through clean.
+    #[test]
+    fn a_failed_drift_read_refuses() {
+        let mut fake = Fake::clean(lgtm());
+        fake.drift = Err("pr list failed".into());
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 2);
+        assert!(!*fake.reached_comments.borrow());
+    }
+
+    // case 8's non-vacuous half: a clean drift state over a populated open
+    // set does not block.
+    #[test]
+    fn a_populated_clean_drift_state_does_not_block() {
+        let mut fake = Fake::clean(lgtm());
+        fake.drift = Ok((vec!["#9002 eeeeeeeeeeee main LGTM".into()], false));
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 0);
+    }
+
+    // ---- the per-review checks the shell carried ---------------------------
+
+    #[test]
+    fn the_latest_trusted_review_must_be_pinned_to_the_head() {
+        let fake = Fake::clean(vec![review(
+            1,
+            "1111111111111111111111111111111111111111",
+            "LGTM (P0=0, P1=0)",
+            "2026-09-08T11:00:00Z",
+        )]);
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    }
+
+    #[test]
+    fn an_edit_moves_which_review_is_latest() {
+        // Round 1 was edited after Round 2 was posted: GitHub's updated_at
+        // ordering makes Round 1 the latest trusted review, and its blocker
+        // stands even though a later round approved.
+        let fake = Fake::clean(vec![
+            review(
+                1,
+                HEAD,
+                "Changes Requested, P0=0, P1=1",
+                "2026-09-08T12:00:00Z",
+            ),
+            review(2, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+        ]);
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_provisional_verdict_never_merges() {
+        let fake = Fake::clean(vec![review(
+            1,
+            HEAD,
+            "Provisional — LGTM (P0=0, P1=0), escalation pending",
+            "2026-09-08T11:00:00Z",
+        )]);
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    }
+
+    #[test]
+    fn unresolved_escalations_refuse() {
+        let mut timed = lgtm().into_iter().next().unwrap();
+        timed.comment.body = timed
+            .comment
+            .body
+            .replace("- escalations: none", "- escalations: P2-1 pending");
+        let fake = Fake::clean(vec![timed]);
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_closed_pr_refuses() {
+        let mut fake = Fake::clean(lgtm());
+        fake.state = "MERGED";
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    }
+
+    #[test]
+    fn required_checks_not_green_refuses() {
+        let mut fake = Fake::clean(lgtm());
+        fake.checks_green = false;
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    }
+
+    // ---- GH-1100, folded in -------------------------------------------------
+
+    #[test]
+    fn the_squash_subject_is_always_the_pr_title_never_a_branch_commit() {
+        // The single-commit-PR case #1100 filed: GitHub picks the branch
+        // commit's own subject when the PR has exactly one commit. The verb
+        // pins --subject itself, so it cannot.
+        let mut fake = Fake::clean(lgtm());
+        fake.title = "fix(edda-cli): the PR title, not the branch commit".into();
+        assert_eq!(merge_inner(&args(true), &fake).unwrap(), 0);
+        let (pr, head, subject, _body) = fake.merged.borrow()[0].clone();
+        assert_eq!(pr, 4242);
+        assert_eq!(head, HEAD);
+        assert_eq!(
+            subject,
+            "fix(edda-cli): the PR title, not the branch commit"
+        );
+    }
+
+    #[test]
+    fn a_non_conforming_title_refuses_with_the_offending_string() {
+        for bad in [
+            "wip(review): GH-1003 + GH-992 in progress — uncommitted lane work",
+            "fix(): empty scope",
+            "improve: things",
+            "fix(edda-cli):",
+            "no type or scope at all",
+        ] {
+            let mut fake = Fake::clean(lgtm());
+            fake.title = bad.into();
+            let code = merge_inner(&args(false), &fake).unwrap();
+            assert_eq!(code, 1, "a non-conforming subject merged: {bad}");
+            assert!(fake.merged.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_composed_receipt_names_the_sha_round_and_ci_run() {
+        let fake = Fake::clean(lgtm());
+        merge_inner(&args(true), &fake).unwrap();
+        let body = &fake.merged.borrow()[0].3;
+        assert!(body.contains(HEAD), "receipt must name the reviewed SHA");
+        assert!(body.contains("Round 1"), "receipt must name the LGTM round");
+        assert!(
+            body.contains("https://github.com/fagemx/edda/runs/123"),
+            "receipt must name the CI run"
+        );
+    }
+
+    #[test]
+    fn subject_validation_matrix() {
+        assert!(subject_problem("fix(edda-cli): repair the gate").is_none());
+        assert!(subject_problem("chore(release): prepare v0.6.1").is_none());
+        assert!(subject_problem("docs(fleet.rules): clarify").is_none());
+        for bad in [
+            "wip(x): y",
+            "fix(x): ",
+            "fix: no scope parens",
+            "fix(): empty scope",
+            "nope(x): unknown type",
+        ] {
+            assert!(
+                subject_problem(bad).is_some(),
+                "accepted a non-conforming subject: {bad}"
+            );
+        }
+    }
+}

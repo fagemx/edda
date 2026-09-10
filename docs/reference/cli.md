@@ -1460,3 +1460,97 @@ Launching reviews (`edda review`), the trigger policy (`edda review due`,
 GH-763), verdict semantics (`edda review gate`, GH-769), and merging
 (`edda prs check-merge`; GATE-01 — deliver never merges) stay out of scope.
 
+#### `edda review drift`
+
+One line per open pull request answering the readiness signal
+`mergeStateStatus` does not provide (GH-914): ready means a trusted §7
+verdict comment pinned to the head SHA (R23/R24). It never reads
+`mergeStateStatus` itself — the ruleset protects only `main`, so a stacked
+PR reports `CLEAN` no matter what stands on its head.
+
+```bash
+edda review drift
+edda review drift --limit 50 --json
+```
+
+Each line has the shape
+`#<n> <head12> <base> <state> [ mergeable=<v> ] [ base=<branch> (...) ] [ orphan-response=Round-<N> ]`,
+where `<state>` is one of `no verdict on head`, `stale from <sha12>`,
+`SHADOW only`, `LGTM`, or `Changes Requested`. A `mergeable` value of
+`CONFLICTING` holds the PR back from ready; `UNKNOWN` is noted only. A base
+other than `main` gets the `base=<branch>` annotation, because status
+contexts are not enforced against it. When the PR's latest
+`Review Response: Round N` answers a round that was never posted, the line
+grows `orphan-response=Round-<N>` and the PR is held back (GH-993); only
+the latest response comment is judged.
+
+Trust follows deliver's rule, defined in one place (GH-1103): a §7 comment
+is a verdict only when its author is `OWNER`, `MEMBER`, or `COLLABORATOR`.
+An untrusted comment is not a verdict and blocks nothing.
+
+Enumeration is bounded — `--limit`, else `EDDA_OPEN_PR_LIMIT`, else 200 —
+and hitting the bound warns on stderr rather than silently dropping the
+tail. The verb is read-only: it posts no status, adds no label, merges
+nothing, and writes no ledger event.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Every listed PR is ready |
+| 1 | At least one PR shows drift |
+| 2 | A read failed — an unreadable answer never prints as a clean bill |
+
+`--json` emits `{"prs": [...], "not_ready": bool}` — the same lines as an
+array, plus one boolean for the set.
+
+#### `edda review merge`
+
+The product implementation of the merge preconditions (GH-1105); it
+replaces `scripts/merge-reviewed-pr.sh`, which remains as a one-line
+adapter. Without `--merge` the verb is read-only: it verifies and answers,
+writes no label and no status (that is `edda review deliver`'s job), and
+merges nothing.
+
+```bash
+edda review merge --pr 1105                  # --check is the default
+edda review merge --pr 1105 --merge --body-file .edda/merge-receipt.md
+```
+
+The conditions run in order, and the first failure rejects with exit 1:
+
+1. The drift check is clean across the entire open-PR set, not just this PR
+   (GH-993).
+2. The PR is `OPEN` and its head is a 40-hex SHA.
+3. The latest trusted §7 review — ordered by `updated_at`, so an edited
+   comment moves back to the front — is pinned to the current head, carries
+   `- escalations: none`, and its verdict is `LGTM (P0=0, P1=0)`;
+   `Provisional` does not count.
+4. The union rule (GH-769, GH-742): the §7 verdicts pinned to that SHA must
+   pass as a union — a later LGTM never overrides an earlier Changes
+   Requested.
+5. Malformed §7 comments number zero (#917 — the union reads success
+   precisely because a blocking round is invisible to it).
+6. Required checks are green.
+7. The squash subject matches the commit convention
+   `<type>(<scope>): <description>` (GH-1100): `type` is one of
+   `feat|fix|docs|refactor|test|chore`, and a violation is rejected with the
+   offending string — `wip`, an empty scope, and a missing type all block.
+
+The check-to-merge windows are deliberately not checked here:
+`--match-head-commit <head>` makes the forge itself reject a push that
+lands after the review, at merge time; a base that has fallen behind is
+rejected by branch protection; and the tree-level window belongs to
+`edda review gate <sha> --base <ref>` on the checkout side.
+
+`--merge` performs the squash. The subject always comes from the validated
+PR title, never from the branch commit's subject (the GH-1100 single-commit
+case); the body comes from `--body-file`, or is composed as a minimal
+receipt — the reviewed SHA, the LGTM round, the CI run.
+**`--merge` requires operator authorization.** `--check` is the default and
+may be passed explicitly.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Accepted — merged, when `--merge` was given |
+| 1 | A precondition failed |
+| 2 | A read failed — an unreadable answer is never an approval |
+
