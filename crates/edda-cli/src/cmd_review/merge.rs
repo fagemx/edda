@@ -821,10 +821,10 @@ mod tests {
         );
     }
 
-    // The other half of the split, on the same fixture shape: the walk
-    // carrying the subject's OWN stale verdict still refuses. The refusal is
-    // stage 4's R6 pinning check — where drift on the subject lives once the
-    // fleet-wide guard is advisory — not a surviving copy of the guard.
+    // The other half of the split: the subject's OWN stale verdict still
+    // refuses. A guard, not the fix's evidence — it holds on the pre-fix code
+    // too, and does not isolate the refusing stage. The two tests around it
+    // are where the regression evidence lives.
     #[test]
     fn the_subjects_own_stale_verdict_still_refuses() {
         let mut fake = Fake::clean(vec![review(

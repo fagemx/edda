@@ -173,10 +173,13 @@ open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit "$open_pr_limit"
 # verbatim into the digest row. This digest still only REPORTS — it has
 # always captured drift_rc without blocking on it, by design, since GH-765:
 # a digest that refused to post because the fleet was imperfect would be
-# less useful than the report itself. The caller that now BLOCKS on this
-# same check is scripts/merge-reviewed-pr.sh, run before any --check or
-# --merge; see the comment above its own call for why that entrypoint and
-# not this one.
+# less useful than the report itself. This is now the ONLY consumer that
+# treats the walk as a fleet signal: the merge entrypoint stopped blocking on
+# it in GH-1124 (`review.merge-drift-guard=advisory-not-an-r6-condition` —
+# cross-PR drift is not one of R6's conditions; `edda review merge` prints
+# the walk and decides on the subject PR's own gate), so a reader who needs
+# the fleet's drift state reads it here and in `edda review drift`, not from
+# a merge refusal.
 drift_out="$tmp/drift.txt"
 drift_rc=0
 GH_OPEN_JSON= EDDA_OPEN_PR_LIMIT="$open_pr_limit" sh "$self_dir/verdict-drift.sh" >"$drift_out" 2>"$tmp/drift.err" || drift_rc=$?
