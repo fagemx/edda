@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Merged-lane cleanup script** — `scripts/fleet/reclaim-merged.sh` reclaims merged lane worktrees and local/remote branches with dry-run-first receipts and fail-closed remote verification (GH-1009, #1091)
-- **Explicit fleet machine identity** — sessions carry `label@machine` identity through the fleet label chain and report cross-machine collisions (GH-671, #1120)
+- **Explicit fleet machine identity** — sessions carry `label@machine` identity through the fleet label chain and warn when live labels collide on the machine-local board (GH-671, #1120)
 
 ### Changed
 
