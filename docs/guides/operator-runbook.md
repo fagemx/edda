@@ -37,9 +37,10 @@
    | **B. `lane-launch.ps1` + 排程任務** | 長工、無人值守、要活過 context 耗盡 | 是 | `lane-stop.ps1`（只有這個算停，R3） |
    | **C. `edda review --pr <N>`** | 只要一份獨立判決 | 隨運輸 | 見第 5 步 |
 
-   **路徑 A（2026-09-09 整晚跑的就是這條）**：brief 寫成 `.md` 放 scratchpad，用 Agent 工具起背景
-   subagent，model 在呼叫裡指定（修復 `sonnet`、審查 `opus`——`fleet.review-engine-model`）。
-   brief 版面見 `docs/fleet/brief-template.md`。這條路有三個**只有它才有**的陷阱：
+   **路徑 A**（裁定 `review.dispatch-transport=controller-subagent-direct`，2026-09-08；
+   `REVIEW.md` §0 也走這條）：brief 寫成 `.md` 放 scratchpad，用 Agent 工具起背景 subagent，
+   model 在呼叫裡指定（修復 `sonnet`、審查 `opus`——`fleet.review-engine-model`）。
+   brief 版面見 [`brief-template.md`](brief-template.md)。這條路有三個**只有它才有**的陷阱：
 
    - **這個 build 沒有 `SendMessage`**——停掉的 lane 接不回來，transcript 也不會 flush。
      所以 `TaskStop` 是不可逆動作，不是暫停。
@@ -207,8 +208,12 @@
    gh pr checks <N> --json name,state                      # exact-head CI
    ```
 
-   **空窗檢查的方向是 `<base>..origin/main`,不是 `<head>..origin/main`。** 後者把 PR 自己
-   還沒合併的改動也算進去，永遠不會是空的。這個方向 2026-09-09 弄反過一次。
+   **這個窗——派審之前的那個——方向是 `<base>..origin/main`。** 它問的是「從分支起點到現在，
+   main 有沒有動過這張 PR 要改的檔」。寫成 `<head>..origin/main` 會把 PR 自己還沒合併的改動
+   也算進去，永遠不會是空的；2026-09-09 弄反過一次。
+   **它跟合併後那個窗不是同一個檢查**：合後查 `<審過的 SHA>..origin/main`，問的是
+   「合進去的是不是我審的那棵樹」（見第 7 步與 `.claude/CLAUDE.md` item 9）。基準不同——
+   一個是分支起點，一個是判決釘住的 commit——所以方向不能互抄。
    派審**之前**就要做，不是合併前才做——審一棵已經被 main 動過的樹是浪費一整輪。
 
    **判決回來之後，讀 PR 上貼出來的那則留言，不要讀 agent 的回報。**
@@ -238,25 +243,42 @@
 
 7. **合併**（規則閘綠即可執行，任何控制者皆可、冪等；`docs/fleet/rules.md` R6）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過；它另外會問一次聯集判決（GH-1057，經 `edda review deliver`），該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。檢查通過後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 
-   **`merge-reviewed-pr.sh` 目前不收 `--subject` 也不收 `--body-file`（#1100）**,所以自己下
-   `gh pr merge` 的控制者要走這個序列，**每一步都不能省**：
+   **`merge-reviewed-pr.sh` 收不到 squash 訊息（#1100）**——它到 `:177` 為止都是
+   `gh pr merge … --squash --match-head-commit "$head"`，沒有 `--subject`、沒有 `--body-file`。
+   所以最後那一下要自己打。**但檢查那一半不可以自己重寫**：
 
    ```bash
-   sh scripts/fleet/verdict-drift.sh                  # 判決漂移閘，非零就停
-   edda review deliver --pr <N> --sha <完整 SHA>       # 結算 label 與 status
+   sh scripts/merge-reviewed-pr.sh <N>                 # ← 閘在這裡，先過這關
+   edda review deliver --pr <N> --sha <完整 SHA>        # 結算 label 與 status
    gh pr merge <N> --repo <owner/repo> --squash \
      --match-head-commit <完整 SHA> \
      --subject '<conventional subject> (#<N>)' \
      --body-file <檔案>
-   git diff --stat <完整 SHA>..origin/main -- <那些檔>  # 合後窗：合的是不是我審的那棵
+   git diff --stat <完整 SHA>..origin/main -- <那些檔>   # 合後窗，方向見下
    ```
 
+   **不帶 `--merge` 跑 `merge-reviewed-pr.sh` 是必經的一步，不是可選的建議。** 它做了手打
+   `gh pr merge` 不會做的事：可信 LGTM 與 escalations 檢查（`:82-86`）、以及
+   **union 拒絕**（`:158-174`,要求 `union_state == success` 且 `malformed == 0`）。
+   R6 明說 union 是「merge script 擋，機器閘本身不擋」——`CI Gate` 不看 union，
+   `edda review deliver` 也不能代替（該腳本自己的註解寫明它的 exit code 刻意不是閘）。
+   **#1055 與 #570 就是從這個洞合進去的。** 跳過這一步再手打 merge，等於把那個洞重新打開。
+
    - **`--subject` 是必要的，不是選配。** 不給，GitHub 會拿唯一那個 commit 的 subject 當
-     squash subject;2026-09-09 的 `fa0d011` 因此讓 `main` 永久帶著一句
+     squash subject；2026-09-09 的 `fa0d011` 因此讓 `main` 永久帶著一句
      `wip(review): … in progress — uncommitted lane work`。R7 之下改不掉。
-   - `verdict-drift.sh` 的 rc=1 在並行 fleet 裡是常態而非例外：另一張 PR 正在輪次中，
-     就可能擋下一張乾淨的 LGTM。看清楚它印的是哪一張再決定。
-   - **合後窗檢查要做。** 空的 `git diff <審過的 SHA>..origin/main` 才證明合進去的就是審過的那棵樹。
+   - `verdict-drift.sh` 由 `merge-reviewed-pr.sh` 自己呼叫並且 **fail-closed**——它非零就
+     `die`。**不要在腳本外面自己跑一次然後決定要不要採信它。** 並行 fleet 裡 rc=1 常常來自
+     另一張 mid-round 的 PR，這是真實的限制，但處理方式是等那張收斂或修好判決，不是覆寫閘。
+   - **合併前查 GitHub 自己的 closing 連結表**,不要用 body 文字推論：
+     `gh api graphql -f query='{repository(owner:"…",name:"…"){pullRequest(number:<N>){closingIssuesReferences(first:10){nodes{number state}}}}}'`。
+     舊版 body 建立的連結可能在關鍵字被刪掉之後存活（#1112 就這樣關掉了 #1031），
+     也可能不會（#1108 刪掉就解除了）。只有這張表算數。
+   - **合後窗的方向跟派審前那個不同，不要混。** 派審前查的是 `<base>..origin/main`——
+     「main 有沒有動過這張 PR 要改的檔」；合後查的是 `<審過的 SHA>..origin/main`——
+     「合進去的是不是我審的那棵樹」。前者的比較基準是分支起點，後者是被判決釘住的那個 commit。
+     `.claude/CLAUDE.md` item 9 記的是後者，以及 `main` 曾獨立動過同一批路徑時的
+     squash-vs-diff 變體（`fleet.lgtm-merges`）。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009）：
    先看 dry-run —— `sh scripts/fleet/reclaim-merged.sh`。每個 worktree／local branch／remote
