@@ -228,6 +228,19 @@ fn open_prs_argv(limit: u64) -> Vec<String> {
     ]
 }
 
+/// The warning a saturated enumeration owes stderr, split out for the same
+/// reason [`open_prs_argv`] is: an enumeration that silently drops its tail
+/// reports every PR past the bound as clean, which is the one answer this
+/// verb must never give by accident (the shell's case 11).
+fn saturation_warning(rows: usize, limit: u64) -> Option<String> {
+    (rows as u64 >= limit).then(|| {
+        format!(
+            "edda review drift: the open-PR enumeration hit its limit of {limit}; PRs past it \
+             were not examined (raise --limit / EDDA_OPEN_PR_LIMIT)"
+        )
+    })
+}
+
 fn parse_open_prs(value: &serde_json::Value) -> Vec<PrRow> {
     value
         .as_array()
@@ -252,11 +265,8 @@ pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     let value = gh(cwd, &args).context("list open PRs")?;
     let rows = parse_open_prs(&value);
-    if rows.len() as u64 >= limit {
-        eprintln!(
-            "edda review drift: the open-PR enumeration hit its limit of {limit}; PRs past it \
-             were not examined (raise --limit / EDDA_OPEN_PR_LIMIT)"
-        );
+    if let Some(warning) = saturation_warning(rows.len(), limit) {
+        eprintln!("{warning}");
     }
     let mut lines = Vec::new();
     let mut not_ready = false;
@@ -334,9 +344,16 @@ mod tests {
         format!("## Code Review: Round 1 — PR #1 @ {sha}\n\n### Verdict\n\n{verdict}\n")
     }
 
-    // The 18 fixtures scripts/fleet/test-verdict-drift.sh carried, ported
-    // one-for-one (GH-1105 doneWhen: every rule the shell encodes is
-    // unit-tested in Rust rather than by fixture shell).
+    // Every case scripts/fleet/test-verdict-drift.sh carried has a
+    // counterpart below, named for it (GH-1105 doneWhen: every rule the
+    // shell encodes is unit-tested in Rust rather than by fixture shell).
+    //
+    // Not a transliteration, and the difference is worth stating: the shell
+    // drove a stubbed `gh` end to end, while these assert at the seam each
+    // rule lives on — case 7 at `evaluate`, case 10 at `open_prs_argv` and
+    // `effective_limit`, case 11 at `saturation_warning`. Cases whose shell
+    // fixture bundled two markers are split where that made the marker
+    // explicit (case 4 / 4b).
 
     #[test]
     fn case1_verdict_pinned_to_head_lgtm_is_ready() {
@@ -473,6 +490,30 @@ mod tests {
         );
         assert_eq!(effective_limit(Some(7)), 7);
         assert_eq!(effective_limit(None), 200);
+    }
+
+    #[test]
+    fn case11_a_saturated_enumeration_says_so_instead_of_dropping_the_tail() {
+        // The shell's fixture set EDDA_OPEN_PR_LIMIT=1 against a two-PR
+        // stub and grepped stderr for `hit its limit`. What it was
+        // protecting: a bounded enumeration that fills its bound has almost
+        // certainly left PRs unexamined, and reporting those as clean is
+        // the one answer this verb must never give by accident. Asserted at
+        // the seam `evaluate` prints from — the message text included,
+        // since `hit its limit` is what the shell fixture matched and
+        // docs/reference/cli.md documents.
+        let warning = saturation_warning(1, 1).expect("a full page is a saturated enumeration");
+        assert!(
+            warning.contains("hit its limit"),
+            "the saturation warning no longer says so: {warning}"
+        );
+        assert!(warning.contains("EDDA_OPEN_PR_LIMIT"), "{warning}");
+        assert_eq!(saturation_warning(6, 7), None, "an unfilled page is quiet");
+        assert_eq!(
+            saturation_warning(0, 200),
+            None,
+            "an empty open set is quiet"
+        );
     }
 
     #[test]
