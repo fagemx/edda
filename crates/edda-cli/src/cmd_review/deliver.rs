@@ -111,26 +111,60 @@ pub(crate) struct Extracted {
 /// line (the #917 trim contract). Accepting it here is what makes a SHADOW
 /// round *well-formed*; [`pinned_to`] is what keeps it out of the union.
 fn is_heading(line: &str) -> bool {
-    let rest = match line.strip_prefix("## Code Review: Round ") {
-        Some(rest) => rest,
-        None => return false,
-    };
+    heading_parts(line).is_some()
+}
+
+/// Does this line have the *shape* of a §7 heading, whether or not it parses?
+///
+/// The shell's candidate rule verbatim — `test("(?m)^## Code Review: Round
+/// [0-9]+")` (`scripts/merge-reviewed-pr.sh`, pre-adapter blob) — and
+/// deliberately looser than [`is_heading`], which also demands the `— PR #N @
+/// <40 lowercase hex>` tail.
+///
+/// The looseness is the point (GH-1105 review round 1). Judging *candidacy* by
+/// the full grammar made a round whose heading SHA is truncated, typo'd or
+/// uppercase invisible three ways at once: it was no longer the latest trusted
+/// review, it never reached [`Extracted::malformed`], and the union at
+/// `super::merge` never saw it — so a blocking round vanished and an older LGTM
+/// merged in its place. A heading-shaped line that does not parse is malformed;
+/// it is never "no round at all".
+pub(crate) fn heading_shaped(line: &str) -> bool {
+    line.strip_prefix("## Code Review: Round ")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// The §7 heading, decomposed: `(round, sha, shadow)` (GH-1105).
+///
+/// One grammar, every reader: [`extract`] above and the drift and merge
+/// readers in [`super::drift`] / [`super::merge`] parse the same heading
+/// through this function rather than carrying a second regex for the same
+/// rule. `shadow` is true when the heading self-declares ` (SHADOW)` in
+/// either recorded position.
+pub(crate) fn heading_parts(line: &str) -> Option<(String, String, bool)> {
+    let rest = line.strip_prefix("## Code Review: Round ")?;
     let after_round = rest.trim_start_matches(|c: char| c.is_ascii_digit());
     if after_round.len() == rest.len() {
-        return false; // "Round " with no round number is not the R23 shape
+        return None; // "Round " with no round number is not the R23 shape
     }
+    let round = &rest[..rest.len() - after_round.len()];
+    let round_shadow = after_round.starts_with(" (SHADOW)");
     let rest = after_round.strip_prefix(" (SHADOW)").unwrap_or(after_round);
-    let rest = match rest.strip_prefix(" — PR #") {
-        Some(rest) => rest,
-        None => return false,
-    };
-    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-    let rest = match rest.strip_prefix(" @ ") {
-        Some(rest) => rest,
-        None => return false,
-    };
-    let rest = rest.strip_suffix(" (SHADOW)").unwrap_or(rest);
-    is_full_sha(rest)
+    let rest = rest.strip_prefix(" — PR #")?;
+    let after_pr = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    if after_pr.len() == rest.len() {
+        return None; // "PR #" with no number is not the R23 shape
+    }
+    let rest = after_pr.strip_prefix(" @ ")?;
+    let tail_shadow = rest.ends_with(" (SHADOW)");
+    let sha = rest.strip_suffix(" (SHADOW)").unwrap_or(rest);
+    if !is_full_sha(sha) {
+        return None;
+    }
+    Some((
+        round.to_owned(),
+        sha.to_owned(),
+        round_shadow || tail_shadow,
+    ))
 }
 
 /// Exactly 40 lowercase hex characters — the shape REVIEW.md R5 requires of a
@@ -197,7 +231,7 @@ fn shadow_pinned_to(line: &str, sha: &str) -> bool {
 /// `Changes Requested, P0=0, P1=1` also contains no LGTM, but one reading
 /// `Provisional — LGTM pending escalation` contains both words and must not be
 /// read as a pass.
-fn verdict_line(lines: &[&str]) -> Option<String> {
+pub(crate) fn verdict_line(lines: &[&str]) -> Option<String> {
     let mut in_verdict = false;
     for line in lines.iter().skip(1) {
         let trimmed = line.trim_start_matches('#');
@@ -261,9 +295,13 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
         }
         if !is_heading(first) {
             // A §7 heading anywhere but line 1 is a transcript dump (#867),
-            // not a verdict: no status, no label, no round. It earns one
-            // notice so the round is not silently lost (#917).
-            if normalized.iter().any(|line| is_heading(line)) {
+            // not a verdict: no status, no label, no round. So is a
+            // heading-shaped line that does not parse — a truncated, typo'd
+            // or uppercase SHA — wherever it sits, including line 1
+            // ([`heading_shaped`]). Both earn one notice so the round is not
+            // silently lost (#917), which is the whole reason that refusal
+            // exists.
+            if normalized.iter().any(|line| heading_shaped(line)) {
                 out.malformed.push(comment.id.clone());
             }
             continue;
@@ -311,7 +349,10 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
 /// value rather than a second, independent literal, a revert has nowhere to
 /// hide: either it changes what this returns (the test below goes red), or
 /// it leaves `comments` not calling this at all (dead code, `-D warnings`).
-fn comments_argv(pr: u64) -> Vec<String> {
+///
+/// GH-1105 shares this one definition with `edda review merge`'s comment
+/// read — the same paginated REST endpoint, never a second literal.
+pub(crate) fn comments_argv(pr: u64) -> Vec<String> {
     vec![
         "api".to_owned(),
         "--paginate".to_owned(),
@@ -862,13 +903,18 @@ mod tests {
     }
 
     #[test]
-    fn an_uppercase_or_short_sha_in_the_heading_is_not_a_heading() {
+    fn an_uppercase_or_short_sha_in_the_heading_is_malformed_not_invisible() {
+        // The heading does not parse, so it is no verdict — but it is still a
+        // review round somebody posted, and dropping it whole is what let a
+        // blocking round vanish from the merge gate (GH-1105 review round 1).
+        // Heading-shaped and unparseable earns the #917 notice.
         for bad in ["0123456789ABCDEF0123456789abcdef01234567", "0123456"] {
             let body = format!(
                 "## Code Review: Round 1 — PR #1030 @ {bad}\n\n### Verdict\n\nLGTM (P0=0, P1=0)\n"
             );
             let got = extract(bad, &[comment("1", &body)]);
             assert!(got.lines.is_empty(), "accepted a malformed sha: {bad}");
+            assert_eq!(got.malformed, vec!["1"], "lost the round entirely: {bad}");
         }
     }
 

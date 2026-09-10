@@ -6,12 +6,25 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
+/// Set `GH_REPO` for one `gh` invocation from `EDDA_REPO`, when present.
+///
+/// The verbs that replaced the review shell (GH-1105) keep that shell's
+/// `repo=${EDDA_REPO:-…}` door: a caller outside any checkout of the target
+/// repository names it once, and every `gh` call — including the
+/// `{owner}/{repo}` REST templates — resolves against it, exactly as
+/// `gh --repo` would. `gh` itself honors `GH_REPO`; unset means ordinary
+/// cwd resolution, so running from a checkout keeps working untouched.
+fn command(repo: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("gh");
+    command.args(args).current_dir(repo);
+    if let Some(name) = std::env::var_os("EDDA_REPO") {
+        command.env("GH_REPO", name);
+    }
+    command
+}
+
 pub(crate) fn gh(repo: &Path, args: &[&str]) -> Result<Value> {
-    let output = Command::new("gh")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .context("run gh")?;
+    let output = command(repo, args).output().context("run gh")?;
     if !output.status.success() {
         bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
     }
@@ -23,11 +36,29 @@ pub(crate) fn gh(repo: &Path, args: &[&str]) -> Result<Value> {
 /// none of them can go through [`gh`], which parses stdout as JSON. Only
 /// the exit status is meaningful here; stdout is discarded.
 pub(crate) fn gh_write(repo: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("gh")
-        .args(args)
-        .current_dir(repo)
-        .output()
+    let output = command(repo, args).output().context("run gh")?;
+    if !output.status.success() {
+        bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(())
+}
+
+/// Run `gh` for a write whose stdout is not JSON, feeding `stdin` to it —
+/// `--body-file -` reads the merge body from stdin (GH-1105), so no
+/// temporary file is staged and no cleanup can race the call.
+pub(crate) fn gh_write_stdin(repo: &Path, args: &[&str], stdin: &str) -> Result<()> {
+    use std::io::Write;
+    let mut child = command(repo, args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
         .context("run gh")?;
+    child
+        .stdin
+        .take()
+        .context("gh stdin")?
+        .write_all(stdin.as_bytes())
+        .context("write gh stdin")?;
+    let output = child.wait_with_output().context("run gh")?;
     if !output.status.success() {
         bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
     }

@@ -33,9 +33,8 @@ cat >"$STUBBIN/gh" <<'EOF'
 #!/bin/sh
 echo "gh $*" >>"$GH_STUB_LOG"
 echo "gh $*" >>"$ORDER_LOG"
-# GH-958: apply the caller's --jq when the fixture is raw JSON, the way
-# scripts/fleet/test-verdict-drift.sh already does. With the old cat-the-TSV
-# stub the script's own --jq never ran, so restoring a
+# GH-958: apply the caller's --jq when the fixture is raw JSON. With the old
+# cat-the-TSV stub the script's own --jq never ran, so restoring a
 # `select(.mergeStateStatus …)` to the open-PR query would have dropped PRs
 # from the digest with every fixture still green — the #914 defect exactly.
 # TSV fixtures are passed through untouched, so the older cases still read.
@@ -62,22 +61,11 @@ case "$1" in
       list)
         case "$*" in
           *"--state merged"*) emit "${GH_MERGED_JSON:-}" ; exit 0 ;;
-          # The digest clears GH_OPEN_JSON for the verdict-drift subprocess,
-          # so an empty one means this call came from the drift check.
-          *"--state open"*)
-            if [ -n "${GH_OPEN_JSON:-}" ]; then emit "$GH_OPEN_JSON"
-            else emit "${GH_DRIFT_OPEN_JSON:-}"
-            fi
-            exit 0 ;;
+          *"--state open"*) emit "${GH_OPEN_JSON:-}" ; exit 0 ;;
         esac
         exit 0
         ;;
-      view)
-        if [ -n "${GH_OPEN_JSON:-}" ]; then emit "${GH_COMMENTS_FILE:-}"
-        else emit "${GH_DRIFT_COMMENTS_JSON:-${GH_COMMENTS_FILE:-}}"
-        fi
-        exit 0
-        ;;
+      view) emit "${GH_COMMENTS_FILE:-}" ; exit 0 ;;
     esac
     exit 0
     ;;
@@ -118,6 +106,15 @@ case "$1 $2" in
     exit 0
     ;;
 esac
+# GH-1105: verdict-drift.sh is a one-line adapter, so the digest's drift
+# subprocess arrives HERE, as `edda review drift`. The canned lines stand in
+# for the verb's own walk (its rules are unit-tested in Rust); exit 2
+# (cannot judge) is simulable with EDDA_DRIFT_RC, the shape the digest must
+# treat as a failed read.
+if [ "$1 $2" = "review drift" ]; then
+    [ -n "${EDDA_DRIFT_OUT:-}" ] && cat "$EDDA_DRIFT_OUT"
+    exit "${EDDA_DRIFT_RC:-0}"
+fi
 exit 0
 EOF
 chmod +x "$STUBBIN/gh" "$STUBBIN/edda"
@@ -132,7 +129,8 @@ reset_stubs() {
     : >"$GH_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$ORDER_LOG"
     unset GH_MERGED_JSON GH_OPEN_JSON GH_STATUS_JSON GH_CHECK_RUNS_JSON GH_COMMENTS_FILE \
           GH_BOARD_FILE GH_READY_JSON EDDA_RECAP_FILE \
-          GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON 2>/dev/null || true
+          GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON EDDA_DRIFT_OUT EDDA_DRIFT_RC \
+          2>/dev/null || true
 }
 
 # canned recap digest (the three ledger blocks, exactly as edda recap --digest prints)
@@ -246,56 +244,51 @@ printf '%s\n' "$out" | grep -qF -- '- #78 Check run thing — Independent Review
     || fail "case 3b: check-run CI Gate should be accepted, got: $(printf '%s' "$out" | grep '#78' || true)"
 
 # --- case 3c: a CLEAN PR that the drift check calls not-ready still gets a row -
-# GH-958. Two things are proven only with the jq-applying stub above:
-#   * the open-PR query's own --jq runs, so restoring a
-#     `select(.mergeStateStatus …)` would drop #79 and fail here (the #914
-#     defect: the blocked-PR filter skipped a CLEAN PR and #899 was reported
-#     complete on a stale SHA);
-#   * both enumerations use the same --limit, so no PR gets a drift line it
-#     can never turn into a digest row.
+# GH-958. Since GH-1105 the drift subprocess is `edda review drift` (through
+# the adapter), so the canned drift line stands in for the verb's walk; what
+# this case still proves on the digest's own side:
+#   * the open-PR query's own --jq runs (the jq-applying stub above), so
+#     restoring a `select(.mergeStateStatus …)` would drop #79 and fail here
+#     (the #914 defect: the blocked-PR filter skipped a CLEAN PR and #899
+#     was reported complete on a stale SHA);
+#   * the digest asks for exactly one open-set page size, and the drift call
+#     carries no --limit of its own — the shared value travels through
+#     EDDA_OPEN_PR_LIMIT, the contract GH-958 names.
 reset_stubs
 printf '[{"number":79,"title":"Clean but unreviewed","mergeStateStatus":"CLEAN","headRefOid":"%s"}]\n' "$SHA79" >"$tmp/open-clean.json"
-printf '[{"number":79,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$SHA79" >"$tmp/drift-open.json"
-printf '{"comments":[]}\n' >"$tmp/drift-comments.json"
+printf '#79 797979797979 main no verdict on head\n' >"$tmp/drift-out.txt"
 export GH_OPEN_JSON="$tmp/open-clean.json"
-export GH_DRIFT_OPEN_JSON="$tmp/drift-open.json"
-export GH_DRIFT_COMMENTS_JSON="$tmp/drift-comments.json"
+export EDDA_DRIFT_OUT="$tmp/drift-out.txt"
 export EDDA_RECAP_FILE="$RECAP_CANNED"
 out=$(run_digest --dry-run 2>&1) || fail 'case 3c: daily-digest.sh exited non-zero'
 printf '%s\n' "$out" | grep -qF -- '- #79 Clean but unreviewed — no verdict on head' \
     || fail "case 3c: a CLEAN drift-not-ready PR is missing from 擋住什麼, got: $(printf '%s' "$out" | grep '#79' || true)"
 printf '%s\n' "$out" | awk '/^## 擋住什麼/{f=1;next} /^## /{f=0} f' | grep -qF '#79' \
     || fail 'case 3c: the #79 row is not inside the 擋住什麼 section'
-# both enumerations request the same page size — the mismatch GH-958 names
-limits=$(grep -- '--state open' "$GH_STUB_LOG" | sed -n 's/.*--limit \([0-9]*\).*/\1/p' | sort -u)
-[ "$(printf '%s\n' "$limits" | grep -c .)" = 1 ] \
-    || fail "case 3c: digest and verdict-drift enumerate different --limit values: $(printf '%s' "$limits" | tr '\n' ' ')"
-unset GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON
+grep -q 'edda review drift' "$EDDA_STUB_LOG" \
+    || fail "case 3c: the drift subprocess never ran: $(cat "$EDDA_STUB_LOG")"
+case $(grep -c -- '--limit' "$EDDA_STUB_LOG") in
+    0) : ;; # the shared limit travels through EDDA_OPEN_PR_LIMIT, not argv
+    *) fail 'case 3c: the drift call carried its own --limit instead of the shared env' ;;
+esac
 
 # --- case 3d: an orphan Review Response (GH-993) passes through unchanged -----
-# verdict-drift.sh may append `orphan-response=Round-<N>` to a drift line.
+# The drift output may append `orphan-response=Round-<N>` to a drift line.
 # This proves the digest needs no parsing change for it: it is only more
 # trailing text on the same line, and the awk pass-through above already
-# forwards $5..$NF verbatim into the 擋住什麼 row.
-#
-# `authorAssociation":"OWNER"` is required since Round 1 review's P1 fix:
-# verdict-drift.sh now trusts only OWNER/MEMBER/COLLABORATOR comments, so an
-# unannotated comment here would read as invisible rather than orphan —
-# see scripts/fleet/test-verdict-drift.sh cases 16-18 for the trust-filter
-# fixtures themselves.
+# forwards $5..$NF verbatim into the 擋住什麼 row. (The trust-filter rule
+# that decides WHEN that annotation appears is unit-tested in Rust —
+# cmd_review::drift, cases 16-18 ported there by GH-1105.)
 reset_stubs
 SHA80=8080808080808080808080808080808080808080
 printf '[{"number":80,"title":"Orphan response","mergeStateStatus":"CLEAN","headRefOid":"%s"}]\n' "$SHA80" >"$tmp/open-orphan.json"
-printf '[{"number":80,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$SHA80" >"$tmp/drift-open-orphan.json"
-printf '{"comments":[{"body":"## Review Response: Round 1\\n\\nNew head: %s","authorAssociation":"OWNER"}]}\n' "$SHA80" >"$tmp/drift-comments-orphan.json"
+printf '#80 808080808080 main no verdict on head orphan-response=Round-1\n' >"$tmp/drift-out-orphan.txt"
 export GH_OPEN_JSON="$tmp/open-orphan.json"
-export GH_DRIFT_OPEN_JSON="$tmp/drift-open-orphan.json"
-export GH_DRIFT_COMMENTS_JSON="$tmp/drift-comments-orphan.json"
+export EDDA_DRIFT_OUT="$tmp/drift-out-orphan.txt"
 export EDDA_RECAP_FILE="$RECAP_CANNED"
 out=$(run_digest --dry-run 2>&1) || fail 'case 3d: daily-digest.sh exited non-zero'
 printf '%s\n' "$out" | grep -qF -- '- #80 Orphan response — no verdict on head orphan-response=Round-1' \
     || fail "case 3d: orphan-response annotation missing from 擋住什麼, got: $(printf '%s' "$out" | grep '#80' || true)"
-unset GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON
 
 # --- case 4: board comment with needs-operator lands under 例外 ----------------
 reset_stubs
