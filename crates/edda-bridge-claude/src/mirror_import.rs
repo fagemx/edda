@@ -17,12 +17,13 @@
 //!    ledger is opened, so the steady-state cost is one `is_file` plus two
 //!    small reads. A project with no `docs/decisions/INDEX.md` — every
 //!    single-machine project — pays only the `is_file`.
-//! 3. **Never fails or delays session start.** Every fallible step degrades to
-//!    `None`. A broken mirror must not cost anyone a session; the import is
-//!    convenience, and the manual `edda sync --from-mirror` still reports the
-//!    real error.
+//! 3. **Never fails or delays session start.** Every fallible step degrades —
+//!    the locating steps to `None`, the import itself to a warning line. A
+//!    broken mirror must not cost anyone a session; the import is convenience.
 //! 4. **Visible.** An import that happened silently is indistinguishable from
 //!    one that did not, so the caller injects the returned line into the pack.
+//!    A mirror file the importer *refuses* is the sharper case (GH-1044): it
+//!    recurs every session and no other reader reports it, so it renders too.
 
 use edda_ledger::sync::{sync_from_mirror, MirrorSource};
 use std::path::{Path, PathBuf};
@@ -33,8 +34,9 @@ use std::path::{Path, PathBuf};
 const MIRROR_DIR: &str = "docs/decisions";
 
 /// Import the committed mirror if it moved since the last session, and return
-/// the line describing what happened. `None` means nothing to say: no mirror
-/// in this repo, an unchanged stamp, or a failure that must stay silent.
+/// the line describing what happened. `None` means there was nothing to do —
+/// no mirror in this repo, an unchanged stamp, or a peer session already
+/// importing. A mirror that *failed* is never `None`; it is a warning line.
 pub fn import_on_session_start(cwd: &str, project_id: &str) -> Option<String> {
     let root = edda_ledger::EddaPaths::find_root(Path::new(cwd))?;
     let mirror_dir = root.join(MIRROR_DIR);
@@ -59,7 +61,20 @@ pub fn import_on_session_start(cwd: &str, project_id: &str) -> Option<String> {
     let _claim = Claim::take(&state.with_extension("lock"))?;
 
     let ledger = edda_ledger::Ledger::open(&root).ok()?;
-    let result = sync_from_mirror(&ledger, &MirrorSource { mirror_dir }, false).ok()?;
+    let result = match sync_from_mirror(&ledger, &MirrorSource { mirror_dir }, false) {
+        Ok(result) => result,
+        // GH-1044: this used to be `.ok()?`. Property 3 still holds — the
+        // session starts either way — but a whole-mirror failure discarded
+        // here reaches nobody: no line is rendered, the stamp is not written,
+        // and every later session repeats the same failure just as quietly.
+        // Cross-machine sync is then dead and no one is told. Say it instead.
+        Err(e) => {
+            let hint = format!("run `edda sync --from-mirror {MIRROR_DIR}`");
+            return Some(format!(
+                "## Cross-machine mirror\n\n⚠ Mirror import FAILED, nothing imported: {e} — {hint}."
+            ));
+        }
+    };
 
     // Recorded only after a successful import: a failed run must retry next
     // session rather than mark the stamp seen and go quiet forever.
@@ -148,7 +163,7 @@ fn write_state(path: &Path, stamp: &str) {
 /// stamp moved but carried no decision this ledger did not already have, and
 /// a line saying "imported 0" every morning is how a signal stops being read.
 fn render_line(result: &edda_ledger::sync::SyncResult, stamp: &str) -> Option<String> {
-    if result.imported.is_empty() && result.conflicts.is_empty() {
+    if result.imported.is_empty() && result.conflicts.is_empty() && result.errors.is_empty() {
         return None;
     }
     let machine = result
@@ -167,6 +182,22 @@ fn render_line(result: &edda_ledger::sync::SyncResult, stamp: &str) -> Option<St
         line.push_str(&format!(
             " {} conflicted with a local decision and were imported **inactive** — resolve with `edda ask <key>`.",
             result.conflicts.len()
+        ));
+    }
+    if !result.errors.is_empty() {
+        // GH-1044: the importer refuses a file it cannot classify rather than
+        // guess at it. That refusal reaches nobody unless it is said here —
+        // `edda sync --from-mirror` prints it, but nobody runs it to find out
+        // a hook went quiet, so an unheard refusal is sync silently dead.
+        let files: Vec<&str> = result
+            .errors
+            .iter()
+            .map(|e| e.project_name.as_str())
+            .collect();
+        line.push_str(&format!(
+            " ⚠ {} mirror file(s) refused and NOT imported ({}) — run `edda sync --from-mirror {MIRROR_DIR}` for the reason.",
+            result.errors.len(),
+            files.join(", ")
         ));
     }
     if result
@@ -293,6 +324,23 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_mirror_file_is_named_even_when_nothing_else_happened() {
+        // The whole point of GH-1044 F13: `import_on_session_start` discards
+        // the importer's error with `.ok()?`, so if `render_line` also stays
+        // quiet, a mirror file that never imports is reported by nobody, ever.
+        let mut r = SyncResult::default();
+        r.errors.push(edda_ledger::sync::SourceError {
+            project_name: "legacy".to_string(),
+            error: "malformed mirror heading: ## `legacy".to_string(),
+        });
+        r.mirror = Some(meta(Some("2026-09-07T03:00:00Z"), Some(1.0)));
+        let line = render_line(&r, "2026-09-07T03:00:00Z").expect("a refusal must be visible");
+        assert!(line.contains("1 mirror file(s) refused"), "{line}");
+        assert!(line.contains("legacy"), "{line}");
+        assert!(line.contains("edda sync --from-mirror"), "{line}");
+    }
+
+    #[test]
     fn a_stale_mirror_says_so_even_when_the_import_worked() {
         let mut r = SyncResult::default();
         r.imported.push(imported("db.engine"));
@@ -404,17 +452,43 @@ mod tests {
         )
         .expect("index");
         // A decision section with no `event_id` line — `finish_mirror_decision`
-        // rejects the whole run.
+        // rejects this file.
         std::fs::write(
             decisions.join("fleet.md"),
             "# Domain: `fleet`\n\n## `fleet.broken`\n\n- **Value**: `x`\n",
         )
         .expect("domain file");
 
-        assert_eq!(
-            import_on_session_start(repo.to_str().expect("utf-8 path"), project_id),
-            None,
-            "a broken mirror is silence, never a failed session start"
-        );
+        // This assertion used to demand `None`. That was the GH-1044 F13
+        // defect written down as a requirement: the session does not fail
+        // (still asserted — we got a value back, not a panic or an `Err`), but
+        // "does not fail" was being met by saying nothing at all, forever.
+        let line = import_on_session_start(repo.to_str().expect("utf-8 path"), project_id)
+            .expect("a broken mirror is reported, never silent");
+        assert!(line.contains("refused"), "{line}");
+        assert!(line.contains("fleet"), "{line}");
+    }
+
+    #[test]
+    fn a_mirror_that_fails_outright_is_reported_not_swallowed() {
+        // The residual swallow F13 named: `sync_from_mirror` failing as a
+        // whole (here: an INDEX.md with no `decisions/` beside it) was
+        // discarded by `.ok()?`, so the hook went quiet and stayed quiet.
+        let _store = crate::isolated_store();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("docs").join("decisions")).expect("mirror dir");
+        edda_ledger::Ledger::open_or_init(&repo).expect("ledger");
+        std::fs::write(
+            repo.join("docs").join("decisions").join("INDEX.md"),
+            "# Ledger\n\n- **Exported at**: 2026-09-07T02:00:00Z\n",
+        )
+        .expect("index");
+
+        let line =
+            import_on_session_start(repo.to_str().expect("utf-8 path"), "mirror_import_dead")
+                .expect("a failed import is reported, never silent");
+        assert!(line.contains("FAILED"), "{line}");
+        assert!(line.contains("edda sync --from-mirror"), "{line}");
     }
 }
