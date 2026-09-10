@@ -185,6 +185,29 @@ pub(crate) fn merge_subject(title: &str, pr: u64) -> String {
     }
 }
 
+/// Is this comment a SHADOW round by the gate's own marker — the heading
+/// suffix (`REVIEW.md` §8: "the suffix is the only marker, this field never
+/// substitutes for it")?
+///
+/// A calibration round is not a verdict, so it is never the review that
+/// decides a merge: it cannot approve one, and — pinned to an older SHA — it
+/// cannot refuse one either (#1124 Round 8). The marker is read off the FIRST
+/// heading-shaped line, the same line [`latest_review_round`] parses. A body
+/// whose heading does not PARSE is not a SHADOW round and stays a candidate:
+/// it has to block the gate rather than disappear from it (#917).
+fn is_shadow_round(body: &str) -> bool {
+    let lines: Vec<&str> = body
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    lines
+        .iter()
+        .copied()
+        .find(|line| heading_shaped(line))
+        .and_then(heading_parts)
+        .is_some_and(|(_, _, shadow)| shadow)
+}
+
 /// Is this the §7 `- escalations: none` line the merge gate requires?
 fn escalations_none(line: &str) -> bool {
     line.trim_end() == "- escalations: none"
@@ -293,6 +316,10 @@ fn subject_hold_refusal(pr: u64, head: &str, comments: &[Comment]) -> Result<(),
 /// id)` — GitHub's edit ordering, so an edited round returns to newest the
 /// way the shell's `sort_by([.updated_at, .id])` sorted it.
 ///
+/// A SHADOW round ([`is_shadow_round`]) is never a candidate: it is not a
+/// verdict, so it decides nothing — neither approving nor, pinned to an older
+/// SHA, refusing (#1124 Round 8).
+///
 /// `Ok(round)` on every check passing; `Err(exit_code)` after printing the
 /// refusal, mirroring `merge_inner`'s own stages.
 fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<String, i32> {
@@ -306,6 +333,7 @@ fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<St
                 .body
                 .lines()
                 .any(|line| heading_shaped(line.trim_end_matches('\r')))
+            && !is_shadow_round(&t.comment.body)
     }) {
         // Fail closed on the REST keys this ordering is built from, as the
         // shell did: `error("trusted review lacks REST updated_at or numeric
@@ -983,6 +1011,26 @@ mod tests {
         ]);
         let code = merge_inner(&args(false), &fake).unwrap();
         assert_eq!(code, 0, "a SHADOW round held the subject");
+        assert!(*fake.reached_checks.borrow());
+    }
+
+    // Round 8's P1: a SHADOW round is not a verdict, so it can never be the
+    // review that decides a merge — including when it is the newest by
+    // `updated_at`, where stage 4 used to select it and then refuse its older
+    // pin. The authoritative round decides instead, and the gate accepts.
+    #[test]
+    fn a_shadow_round_is_never_the_deciding_review() {
+        let mut shadow = review(2, OLDER, "LGTM (P0=0, P1=0)", "2026-09-08T12:00:00Z");
+        shadow.comment.body = format!(
+            "## Code Review: Round 2 (SHADOW) — PR #4242 @ {OLDER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)\n"
+        );
+        let fake = Fake::clean(vec![
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+            shadow,
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 0, "a SHADOW round decided the merge");
         assert!(*fake.reached_checks.borrow());
     }
 

@@ -1550,7 +1550,10 @@ reading stale from an older SHA is a refusal of its own: an older head-pinned
 LGTM edited after a later verdict is newest to the gate and stale to the walk,
 and two readings of the subject that disagree are not a green (#1124). SHADOW
 rounds are not verdicts (R18) and never enter the union, so one pinned to an
-older SHA cannot hold the subject.
+older SHA cannot hold the subject — and it is the heading suffix ` (SHADOW)`
+alone that marks one (`REVIEW.md` §8), so a round marked only by a
+`shadow: true` body line is a verdict to every reader here and is judged as
+one.
 
 The check-to-merge windows are deliberately not checked here:
 `--match-head-commit <head>` makes the forge itself reject a push that

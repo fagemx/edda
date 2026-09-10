@@ -186,9 +186,15 @@ pub(crate) fn reduce(head: &str, comments: &[Comment]) -> (PrState, Option<Strin
 /// to become `newest`: a SHADOW round is not a verdict (`docs/fleet/rules.md`
 /// R18) and never enters the union, so one pinned to an older SHA cannot hold
 /// a subject that carries an authoritative head-pinned LGTM (#1124 Round 7).
-/// The walk's own line still counts them, because that line reports what is on
-/// the PR rather than what the gate may act on (GH-1134 tracks the walk's own
-/// ordering).
+///
+/// SHADOW here is the heading suffix ALONE — `REVIEW.md` §8's rule, the one
+/// every other reader in the gate uses. [`reduce`] additionally honours a
+/// `- shadow: true` body line because the shell it ports did, but a round
+/// marked only in the body is still a verdict to `latest_review_round` and to
+/// the union, so skipping it here would let the gate merge under a stale round
+/// its own readers treat as authoritative (#1124 Round 8). The walk's line
+/// counts both markers, because it reports what is on the PR rather than what
+/// the gate may act on (GH-1134 tracks the walk's own ordering).
 pub(crate) fn stale_authoritative(head: &str, comments: &[Comment]) -> Option<String> {
     let mut newest: Option<String> = None;
     for comment in comments {
@@ -203,10 +209,9 @@ pub(crate) fn stale_authoritative(head: &str, comments: &[Comment]) -> Option<St
         let Some(first) = lines.first().copied() else {
             continue;
         };
-        let Some((_round, sha, mut shadow)) = heading_parts(first) else {
+        let Some((_round, sha, shadow)) = heading_parts(first) else {
             continue;
         };
-        shadow = shadow || lines.iter().any(|line| line.trim_end() == "- shadow: true");
         if shadow {
             continue;
         }
@@ -493,6 +498,37 @@ mod tests {
         );
         let (state, _) = reduce(SHA, &[comment(&body, "OWNER")]);
         assert_eq!(state, PrState::ShadowOnly);
+    }
+
+    // Round 8's P0. `reduce` honours both SHADOW markers because the shell it
+    // ports did, and `case4b` above pins that. The merge gate does not: every
+    // other reader in it keys on the heading suffix (`REVIEW.md` §8 — "the
+    // suffix is the only marker, this field never substitutes for it"), so a
+    // round marked only in the body is a verdict to `latest_review_round` and
+    // the union. Skipping it here would let a subject merge under a stale
+    // round those readers treat as authoritative, which is the fail-open this
+    // test is named for.
+    #[test]
+    fn a_body_only_shadow_marker_is_still_an_authoritative_round() {
+        let body = format!(
+            "## Code Review: Round 2 — PR #1 @ {OTHER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)"
+        );
+        assert_eq!(
+            stale_authoritative(SHA, &[comment(&body, "OWNER")]),
+            Some(OTHER.to_owned())
+        );
+    }
+
+    // A guard rather than regression evidence: the suffix-marked round was
+    // already skipped before this round's fix.
+    #[test]
+    fn a_suffixed_shadow_round_is_not_a_stale_authoritative_round() {
+        let body = format!(
+            "## Code Review: Round 2 (SHADOW) — PR #1 @ {OTHER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)"
+        );
+        assert_eq!(stale_authoritative(SHA, &[comment(&body, "OWNER")]), None);
     }
 
     #[test]
