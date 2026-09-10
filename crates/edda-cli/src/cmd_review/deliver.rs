@@ -24,6 +24,12 @@
 //! `Independent Review` commit status, and the malformed-comment notice —
 //! see that module's own doc comment for what it deliberately does not do
 //! (post the primary verdict comment) and why.
+//!
+//! Since GH-1103, the read half is also the trust boundary: a §7 comment
+//! counts only from an author whose `author_association` GitHub vouches
+//! for ([`TRUSTED_ASSOCIATIONS`]), and this module is where that set is
+//! stated — the drift and merge readers GH-1105 adds read it from here
+//! rather than carrying a second definition.
 
 use super::delivery;
 use super::gate;
@@ -52,6 +58,26 @@ pub(crate) struct Comment {
     /// can name the comment it is about.
     pub id: String,
     pub body: String,
+    /// The author's `author_association` as GitHub reports it (`OWNER`,
+    /// `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE`, …); `None` when the
+    /// field is absent or not a string — which reads as untrusted, never as
+    /// trusted (GH-1103's fail-closed direction).
+    pub author_association: Option<String>,
+}
+
+/// The author associations a §7 comment is accepted from, stated once for
+/// every reader of verdict comments (GH-1103; the drift and merge readers
+/// GH-1105 adds share this). Matches the set `merge-reviewed-pr.sh` and
+/// `verdict-drift.sh` filter on: this repository is PUBLIC, so a §7 heading
+/// any GitHub account can post is not a verdict.
+pub(crate) const TRUSTED_ASSOCIATIONS: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+/// Is this author association one [`TRUSTED_ASSOCIATIONS`] names?
+///
+/// A missing association is untrusted: GitHub not vouching for anyone is
+/// not GitHub vouching for everyone.
+pub(crate) fn trusted_association(association: Option<&str>) -> bool {
+    association.is_some_and(|value| TRUSTED_ASSOCIATIONS.contains(&value))
 }
 
 /// What §7 comments on one SHA amount to.
@@ -69,6 +95,13 @@ pub(crate) struct Extracted {
     /// writing the `error` state [`super::gate::Union::None`] means for an
     /// unreviewed SHA.
     pub shadow: Vec<String>,
+    /// `(id, association)` of §7-shaped comments from authors outside
+    /// [`TRUSTED_ASSOCIATIONS`] (or whose association GitHub did not report,
+    /// the `None` arm). Not verdicts, not malformed, not SHADOW — but not
+    /// silently dropped either: the delivery report names them, because a
+    /// comment that looks exactly like a verdict and was refused for who
+    /// wrote it is a fact the operator needs, not noise (GH-1103).
+    pub untrusted: Vec<(String, Option<String>)>,
 }
 
 /// Does this line open a §7 verdict comment?
@@ -198,6 +231,13 @@ fn count(line: &str, key: &str) -> String {
 }
 
 /// Reduce §7 comments to the verdict facts standing on `sha`.
+///
+/// The trust gate runs **first** (GH-1103): a §7-shaped comment from an
+/// author outside [`TRUSTED_ASSOCIATIONS`] is refused whole — no verdict
+/// line, no malformed notice, no SHADOW signal — and is recorded in
+/// [`Extracted::untrusted`] so the report says so. The malformed-notice
+/// contract (#917) is therefore unchanged for trusted authors and
+/// unreachable for untrusted ones, exactly as the issue requires.
 pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
     let mut out = Extracted::default();
     for comment in comments {
@@ -209,6 +249,16 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
         let Some(first) = normalized.first() else {
             continue;
         };
+        if !trusted_association(comment.author_association.as_deref()) {
+            // Either position counts — line 1 or a transcript dump below it
+            // — because both are "a §7 shape from someone untrusted", which
+            // is the fact worth reporting; neither earns the #917 notice.
+            if normalized.iter().any(|line| is_heading(line)) {
+                out.untrusted
+                    .push((comment.id.clone(), comment.author_association.clone()));
+            }
+            continue;
+        }
         if !is_heading(first) {
             // A §7 heading anywhere but line 1 is a transcript dump (#867),
             // not a verdict: no status, no label, no round. It earns one
@@ -277,9 +327,9 @@ pub(crate) fn comments(repo: &Path, pr: u64) -> Result<Vec<Comment>> {
     Ok(parse_comments(&value))
 }
 
-/// Map REST issue-comment JSON (a numeric `id`, a string `body`) to
-/// [`Comment`]. Split out from [`comments`] so the mapping is testable
-/// without shelling out to `gh`.
+/// Map REST issue-comment JSON (a numeric `id`, a string `body`, a string
+/// `author_association`) to [`Comment`]. Split out from [`comments`] so the
+/// mapping is testable without shelling out to `gh`.
 fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
     value
         .as_array()
@@ -292,6 +342,7 @@ fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
                 .map(|id| id.to_string())
                 .unwrap_or_default(),
             body: entry["body"].as_str().unwrap_or_default().to_owned(),
+            author_association: entry["author_association"].as_str().map(str::to_owned),
         })
         .collect()
 }
@@ -437,6 +488,12 @@ fn deliver_inner_with(
                 "verdicts": extracted.lines,
                 "malformed": extracted.malformed,
                 "shadow": extracted.shadow,
+                "untrusted": extracted.untrusted.iter().map(|(id, association)| {
+                    serde_json::json!({
+                        "comment_id": id,
+                        "author_association": association,
+                    })
+                }).collect::<Vec<_>>(),
                 "notices": result.notices.iter().map(|(id, w)| serde_json::json!({
                     "comment_id": id, "outcome": w.tag(), "reason": w.reason(),
                 })).collect::<Vec<_>>(),
@@ -456,6 +513,12 @@ fn deliver_inner_with(
         println!("{state} {sha} verdicts={}", extracted.lines.len());
         for id in &extracted.malformed {
             println!("malformed {id}");
+        }
+        for (id, association) in &extracted.untrusted {
+            println!(
+                "untrusted {id} {}",
+                association.as_deref().unwrap_or("missing")
+            );
         }
         for (id, outcome) in &result.notices {
             println!(
@@ -509,10 +572,37 @@ mod tests {
     const OTHER: &str = "89abcdef0123456789abcdef0123456789abcdef";
 
     fn comment(id: &str, body: &str) -> Comment {
+        // OWNER: the fixture author is the repository owner, so every test
+        // written before GH-1103's trust gate keeps meaning what it meant.
         Comment {
             id: id.into(),
             body: body.into(),
+            author_association: Some("OWNER".into()),
         }
+    }
+
+    /// The same comment from an author GitHub vouches for in one of the
+    /// other two recorded ways — GH-1103's trusted set is three wide, not
+    /// one, and a test that only ever passes OWNER proves nothing about the
+    /// other two.
+    fn as_collaborator(mut comment: Comment) -> Comment {
+        comment.author_association = Some("COLLABORATOR".into());
+        comment
+    }
+
+    fn as_member(mut comment: Comment) -> Comment {
+        comment.author_association = Some("MEMBER".into());
+        comment
+    }
+
+    fn as_untrusted(mut comment: Comment) -> Comment {
+        comment.author_association = Some("NONE".into());
+        comment
+    }
+
+    fn as_unattributed(mut comment: Comment) -> Comment {
+        comment.author_association = None;
+        comment
     }
 
     fn round(sha: &str, verdict: &str) -> String {
@@ -521,9 +611,142 @@ mod tests {
 
     #[test]
     fn a_clean_lgtm_pinned_to_the_sha_is_one_verdict_line() {
-        let got = extract(SHA, &[comment("1", &round(SHA, "LGTM (P0=0, P1=0)"))]);
-        assert_eq!(got.lines, vec!["LGTM\t0\t0"]);
+        let base = comment("1", &round(SHA, "LGTM (P0=0, P1=0)"));
+        // All three trusted associations read identically (GH-1103): a
+        // MEMBER's round and a COLLABORATOR's round are the same verdict
+        // an OWNER's is.
+        for variant in [base.clone(), as_member(base.clone()), as_collaborator(base)] {
+            let got = extract(SHA, &[variant]);
+            assert_eq!(got.lines, vec!["LGTM\t0\t0"]);
+            assert!(got.malformed.is_empty());
+            assert!(got.untrusted.is_empty());
+        }
+    }
+
+    // ---- GH-1103: an untrusted author's §7 comment is not a verdict -------
+
+    #[test]
+    fn a_well_formed_lgtm_from_an_untrusted_author_is_no_verdict_gh1103() {
+        // The forged-verdict direction: on a PUBLIC repo this comment is
+        // one `gh api` call away from any account. It must not reach the
+        // union, so it can never deliver a `success` status or a
+        // `review:lgtm` label — with no verdict standing at all, the union
+        // reads None (the `error` status of an unreviewed SHA), which is
+        // the refusal this test pins.
+        let got = extract(
+            SHA,
+            &[as_untrusted(comment("5", &round(SHA, "LGTM (P0=0, P1=0)")))],
+        );
+        assert!(got.lines.is_empty(), "an untrusted LGTM joined the union");
         assert!(got.malformed.is_empty());
+        assert!(got.shadow.is_empty());
+        assert_eq!(
+            got.untrusted,
+            vec![("5".to_owned(), Some("NONE".to_owned()))],
+            "the refusal must be reported, not silent"
+        );
+    }
+
+    #[test]
+    fn a_changes_requested_from_an_untrusted_author_is_not_held_gh1103() {
+        // The hold-the-fleet direction (R18's union): an outsider's blocker
+        // must not keep a SHA's status at `failure` either. Untrusted reads
+        // the same in both directions: nothing standing, union None.
+        let got = extract(
+            SHA,
+            &[as_untrusted(comment(
+                "5",
+                &round(SHA, "Changes Requested, P0=0, P1=1"),
+            ))],
+        );
+        assert!(got.lines.is_empty());
+        assert_eq!(
+            got.untrusted,
+            vec![("5".to_owned(), Some("NONE".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn a_comment_whose_association_is_missing_reads_untrusted_gh1103() {
+        // Fail closed: GitHub not vouching for anyone is not GitHub
+        // vouching for everyone. The report says `missing` (the None arm),
+        // not a made-up association.
+        let got = extract(
+            SHA,
+            &[as_unattributed(comment(
+                "5",
+                &round(SHA, "LGTM (P0=0, P1=0)"),
+            ))],
+        );
+        assert!(got.lines.is_empty());
+        assert_eq!(got.untrusted, vec![("5".to_owned(), None)]);
+    }
+
+    #[test]
+    fn an_untrusted_malformed_comment_earns_no_notice_and_no_verdict_gh1103() {
+        // #917's one-shot notice is for trusted authors only: an
+        // untrusted transcript dump is simply not a verdict, and reporting
+        // it as malformed would let any account mint a notice comment
+        // through the delivery's own writer.
+        let body = format!(
+            "Here is the transcript of the round:\n\n{}",
+            round(SHA, "LGTM (P0=0, P1=0)")
+        );
+        let got = extract(SHA, &[as_untrusted(comment("42", &body))]);
+        assert!(got.malformed.is_empty(), "untrusted cannot earn a notice");
+        assert!(got.lines.is_empty());
+        assert_eq!(
+            got.untrusted,
+            vec![("42".to_owned(), Some("NONE".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn an_untrusted_shadow_round_is_no_shadow_signal_gh1103() {
+        // R22's "zero writes on SHADOW-only" is for rounds the fleet
+        // posted; an outsider's (SHADOW) heading must not suppress the
+        // `error` status an unreviewed SHA would otherwise get.
+        let body = format!(
+            "## Code Review: Round 2 (SHADOW) — PR #1030 @ {SHA}\n\n### Verdict\n\nLGTM (P0=0, P1=0)\n"
+        );
+        let got = extract(SHA, &[as_untrusted(comment("9", &body))]);
+        assert!(got.shadow.is_empty());
+        assert!(got.lines.is_empty());
+        assert_eq!(
+            got.untrusted,
+            vec![("9".to_owned(), Some("NONE".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn an_untrusted_ordinary_comment_is_not_even_reported_gh1103() {
+        // Only §7-shaped comments are worth naming: an outsider saying
+        // "looks good" is background noise, not a refused verdict.
+        let got = extract(
+            SHA,
+            &[as_untrusted(comment(
+                "7",
+                "Rebased onto main, CI is green.",
+            ))],
+        );
+        assert_eq!(got, Extracted::default());
+    }
+
+    #[test]
+    fn a_trusted_verdict_stands_unchanged_alongside_an_untrusted_one_gh1103() {
+        // Mixed comment list: the gate refuses exactly the untrusted half.
+        let got = extract(
+            SHA,
+            &[
+                as_untrusted(comment("5", &round(SHA, "Changes Requested, P0=0, P1=1"))),
+                comment("6", &round(SHA, "LGTM (P0=0, P1=0)")),
+            ],
+        );
+        assert_eq!(got.lines, vec!["LGTM\t0\t0"]);
+        assert_eq!(
+            got.untrusted,
+            vec![("5".to_owned(), Some("NONE".to_owned()))]
+        );
     }
 
     #[test]
@@ -657,14 +880,30 @@ mod tests {
         // malformed-notice contract cannot use. 5573431960 is the id from
         // this PR's own worked example (`malformed 5573431960`).
         let value = serde_json::json!([
-            {"id": 5573431960u64, "body": "## Code Review: Round 1 — PR #1030 @ 0123"},
+            {"id": 5573431960u64, "body": "## Code Review: Round 1 — PR #1030 @ 0123", "author_association": "OWNER"},
             {"id": 5579340504u64, "body": "another comment"},
         ]);
         let got = parse_comments(&value);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].id, "5573431960");
         assert_eq!(got[0].body, "## Code Review: Round 1 — PR #1030 @ 0123");
+        assert_eq!(
+            got[0].author_association.as_deref(),
+            Some("OWNER"),
+            "GH-1103: the REST association must survive the parse"
+        );
         assert_eq!(got[1].id, "5579340504");
+        // The REST shape carries the association on every comment; a
+        // fixture without it (or a non-string value) maps to None, which
+        // extract reads as untrusted — the fail-closed arm.
+        let stripped = serde_json::json!([
+            {"id": 1u64, "body": "b"},
+            {"id": 2u64, "body": "b", "author_association": null},
+            {"id": 3u64, "body": "b", "author_association": 7},
+        ]);
+        for entry in parse_comments(&stripped) {
+            assert_eq!(entry.author_association, None);
+        }
     }
 
     #[test]
