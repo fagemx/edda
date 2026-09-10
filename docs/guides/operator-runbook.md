@@ -29,7 +29,30 @@
    也會在派發前做同一套認領。認領、釋放與已交付歷史的正典是帳本
    `fleet.cross-machine-claim`（`edda ask fleet.cross-machine-claim`）；本 runbook 不重述該協定。
    實作入口、`--check` 的 exit code 與身分格式見 `docs/fleet/rules.md` R21（#782）。
-3. **派 lane**（開 worktree 後）：
+3. **派 lane**（開 worktree 後）。**先選路徑——有三條，失敗模式不同，不要照抄別人的**：
+
+   | 路徑 | 用在 | 活過 controller session? | 停法 |
+   |---|---|---|---|
+   | **A. Agent 背景 subagent** | 同一輪要來回幾次的修復／審查；控制者全程在線 | **否**——host 程序死，lane 一起死 | `TaskStop`（不可逆，見下） |
+   | **B. `lane-launch.ps1` + 排程任務** | 長工、無人值守、要活過 context 耗盡 | 是 | `lane-stop.ps1`（只有這個算停，R3） |
+   | **C. `edda review --pr <N>`** | 只要一份獨立判決 | 隨運輸 | 見第 5 步 |
+
+   **路徑 A**（裁定 `review.dispatch-transport=controller-subagent-direct`，2026-09-08；
+   `REVIEW.md` §0 也走這條）：brief 寫成 `.md` 放 scratchpad，用 Agent 工具起背景 subagent，
+   model 在呼叫裡指定（修復 `sonnet`、審查 `opus`——`fleet.review-engine-model`）。
+   brief 版面見 [`brief-template.md`](brief-template.md)。這條路有三個**只有它才有**的陷阱：
+
+   - **這個 build 沒有 `SendMessage`**——停掉的 lane 接不回來，transcript 也不會 flush。
+     所以 `TaskStop` 是不可逆動作，不是暫停。
+   - **`.output` 檔是 0 bytes 不代表卡住。** 它在結束時才寫。2026-09-09 控制者用
+     「output 0 bytes ＋ worktree 乾淨」判定一條 lane 卡住而殺掉，它被殺前最後一句是
+     「機制已經弄清楚，準備動手改」。判死一律看 worktree 的 `git status` 加 PowerShell
+     程序表（memory `liveness-signals-lie-by-tool`），而且判死門檻要跟動作的可逆性掛鉤：
+     查一下成本近零，殺掉成本是整條 lane。
+   - **lane 停在 pre-commit hook 的冷建上是常態，不是紀律問題**（#1099）。brief 要給
+     `SKIP_CLIPPY=1`，見 brief 範本。
+
+   **路徑 B**：
    ```bash
    pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree> -Owns "<repo-path>[,<repo-path>...]"
    ```
@@ -171,7 +194,55 @@
    `--exclude-tools` 結構性保證了。
 
    **合併不在這一步**——仍在第 7 步、依規則閘執行（`docs/fleet/rules.md` R6）。
-6. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。走第 4 步直審路徑時不需要 driver：判決與修正在同一個 session 內來回。
+6. **收斂 —— lane 開了 PR 之後，控制者的迴圈**。`/fleet-pr-loop` 的 bash driver 吐
+   `ACTION: REVIEW | FIX | DONE | BLOCKED`,照做到 LGTM；driver 不合併。走第 4 步直審路徑時
+   不需要 driver：判決與修正在同一個 session 內來回。
+
+   **不論走哪條，派審之前控制者自己先驗這五項**——lane 的回報不算證據：
+
+   ```bash
+   gh pr view <N> --json headRefOid,state,baseRefName      # head 凍結
+   gh pr diff <N> --name-only                              # 實際動到的檔
+   git merge-base origin/main <head-sha>                   # 分支真正的 parent
+   git diff --stat <base-sha>..origin/main -- <那些檔>      # 空窗檢查
+   gh pr checks <N> --json name,state                      # exact-head CI
+   ```
+
+   **這個窗——派審之前的那個——方向是 `<base>..origin/main`。** 它問的是「從分支起點到現在，
+   main 有沒有動過這張 PR 要改的檔」。寫成 `<head>..origin/main` 會把 PR 自己還沒合併的改動
+   也算進去，永遠不會是空的；2026-09-09 弄反過一次。
+   **這是本 runbook 加的一道，不是 R6 那道。** R6 與 `.claude/CLAUDE.md` item 9 列的窗是
+   **合併前置條件**：`<審過的 SHA>..origin/main`，問「判決釘住的那棵樹跟 main 之間是不是空的」，
+   由合併的 session 自己執行並記進 PR——`edda review merge` 刻意不做這一步（GH-1105 把閘
+   收進這個動詞之後仍然如此：R6 的窗紀錄是 checkout 側的動作）。兩者基準不同——一個是分支起點，一個是判決
+   釘住的 commit——時間點也不同，所以方向與時機都不能互抄。
+   這一道要在派審**之前**做：審一棵已經被 main 動過的樹是浪費一整輪。
+
+   **判決回來之後，讀 PR 上貼出來的那則留言，不要讀 agent 的回報。**
+   兩者會不一致，而且以留言為準（R23：第一行不是 `## Code Review: Round <N> — PR #<n> @ <完整 SHA>`
+   的留言不是判決）。這個 repo 是 **PUBLIC**,所以連 `authorAssociation` 一起看——
+   只有 `OWNER`／`MEMBER`／`COLLABORATOR` 算數（GH-993 修的就是這個洞）。
+
+   ```bash
+   gh pr view <N> --json comments --jq '.comments[]
+     | select(.body | test("(?m)^## Code Review: Round [0-9]+"))
+     | "author=\(.author.login) assoc=\(.authorAssociation)"'
+   ```
+
+   **同一個 SHA 上可能有不只一則判決。** 2026-09-09 的 PR #1108 就有兩則 Round 3——一則
+   sol、一則 Opus,不同 session 派的。依 R18 的 union 規則結算：只要還有一則非 LGTM 站著，
+   後來的 LGTM 蓋不過。兩則都是 Changes Requested 時，阻擋集合是**兩者的聯集**。
+
+   **後續輪次**：修復 brief 要明寫**什麼已經定案、不可重開**(審查契約第 2 條：後輪的 blocker
+   必須是 fix 造成的或先前不可觀測的),否則 replacement verifier 會從頭再審一遍。
+   走路徑 A 時原審查 session 接不回來(沒有 `SendMessage`),所以下一輪一定是 replacement——
+   brief 要叫它**先讀 receipts**：前幾輪的判決留言、`Review Response`、exact-head CI。
+
+   **什麼時候停**：審查契約第 6 條——兩輪沒有實質進展就停，把發現分類、路由，不要硬推。
+   判準是「這一輪有沒有找到新的真缺陷」，不是輪數。真的要停時**把 PR 開著**,貼一則控制者
+   handoff：現在的狀態、什麼已定案不要重審、下一手具體做什麼，並**把 `Closes #NNN` 從 PR body
+   拿掉**,免得有人事後合併時關掉一張判決已經否掉的單。
+
 7. **合併**（規則閘綠即可執行，任何控制者皆可、冪等；`docs/fleet/rules.md` R6）：先執行 `edda review merge --pr <N>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過；它另外會問一次聯集判決（GH-1057），該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。檢查通過後使用 `edda review merge --pr <N> --merge`（--merge 需 operator authority）；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。它也把 squash subject 永遠釘在 PR 標題上（GH-1100）：合併一律帶 `--subject`——單 commit 的 PR 若讓 GitHub 自選 subject，會原封抄用該 commit 的標題，fa0d011 那次就是這樣把 `wip(review): ...` 寫進 main——且標題先按 conventional commit 格式驗證（REVIEW.md §5 U4），`wip(...)`、空 scope、缺 type 一律當場拒絕、不執行合併（`--check` 也驗，早一步給訊號）。GitHub 只會替「自己挑的」subject 補上 ` (#N)` 這個 PR 回指，帶了 `--subject` 就原文照用、不補；所以這個動詞自己接上 `<PR 標題> (#<PR 編號>)`，squash commit 才不會從此在 main 上失去 PR 指標（U4 驗的仍是純標題，不含後綴；標題若已經以「本 PR 自己的編號」結尾就不重複補，結尾是「別的 PR 編號」則照補，免得 `git log` 的回指指到無關的 PR）。合併 body 可用 `--body-file <path>` 指定（只在 `--merge` 有效，空字串或配 `--check` 都會拒絕）；沒給就自動組一張最小收據（審查 SHA、LGTM 輪號、CI run 連結）當 body。`scripts/merge-reviewed-pr.sh` 還在，是一行適配器（GH-1105）：PR 編號之後的參數原封轉發（`--check`／`--merge`／`--body-file <path>` 都穿得過去），`--help` 也直接接到動詞自己的說明，所以舊呼叫不變。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009）：

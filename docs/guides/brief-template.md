@@ -57,6 +57,16 @@ Acceptance is never restated in the brief. The template forbids copying
 doneWhen from the issue: the brief carries the issue number, and the reader
 pulls doneWhen from the issue at start.
 
+**Say what the controller already verified, and at which SHA.** Anything the
+issuer checked itself — the exact defect coordinates, whether the C5 selector is
+empty, whether a claim in the issue body still holds at head — is written as
+verified at field 5's SHA, not as narration. Without that marking the lane
+treats the issuer's account as hearsay and re-derives it, which costs a round.
+State separately anything the issuer added that the issue does not name, and say
+it was added: on 2026-09-09 an issue named one defective assertion where two
+identical ones existed, and the brief had to say the second was the controller's
+scope call so the review would not read it as the lane overreaching.
+
 ## Principles block — skill-bearing runtime only
 
 At most 6 lines. Each line is one principle plus the reason it exists:
@@ -107,6 +117,66 @@ The worked example of the evidence a PR body must carry is the description of
 PR #790: a control-group table (base vs branch, repeated runs), timestamps
 proving binary freshness, and the root cause stated before the diff. Evidence,
 not assertion.
+
+## Mechanized block — races, permissions, and machine-local cost
+
+`fleet.brief-composition` puts races and permissions on the mechanized side of
+the line and cost trade-offs on the principles side. This block is the mechanized
+half as it stands on this workstation. Every item below was paid for once; an
+item nobody has been burned by does not belong here.
+
+1. **Build lane** — name one of `worker-1|worker-2|verifier|verifier-2` as an
+   export, with *never an ad-hoc target directory, under any name, for any
+   reason*. A session that compiles nothing gets `none` in facts field 2 and no
+   such line.
+2. **Commit with `SKIP_CLIPPY=1` after running the L0 clippy warm.** *(Placeholder
+   — delete this item when #1099 lands.)* The pre-commit hook re-runs the same
+   clippy and its cargo does not inherit the lane's `CARGO_TARGET_DIR`, so every
+   commit otherwise cold-builds a stray `target/` in the worktree. The flag is the
+   hook's own and skips clippy alone; every other hook gate still runs.
+3. **Peer-claimed paths**, listed explicitly, with *do not touch*.
+4. **Never delete or prune a worktree or branch.** A stray `target/` is the one
+   deletable thing.
+5. **Foreground.** The exception is a commit that still triggers the hook's cold
+   build. Banned is manufactured work — load generators, repeated-measurement
+   loops, anything that spends the machine to produce a number.
+6. **Commit and push per coherent edit, not at the end.** This one outlives the
+   cold build: GH-748 records the cause as a scheduler kill on path B, which #1099
+   does not touch.
+7. **All GitHub text through a file and `--body-file`.** Backticks inside shell
+   double quotes become command substitution.
+8. **Closing keywords fire from prose, from `GH-N`, and through a negation** — so
+   grep the text you are about to submit, including the squash body, which does not
+   exist until the merge and which no pre-merge query can see:
+
+   ```bash
+   grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+' <file>
+   ```
+
+   `pr.closing-keyword` governs *when* a keyword is allowed; this is only how to
+   tell whether one is present. A narrative body is the dangerous case — writing
+   that a change did not fix something is the sentence shape that closes it.
+9. **R7** — no amend, rebase, or force-push on a pushed commit; add a commit.
+
+## Review briefs — state the risk as a question
+
+A review brief names where the risk is and stops there. When the issuer already
+suspects an answer, the suspicion goes out as a question, not a conclusion:
+*follow every call site to what happens on failure, and if the answer is still
+"the test fails", say so and judge whether the distinction this PR draws
+survives that.* Both blocking findings of the 2026-09-09 wave came back from
+questions posed that way, and both answers were sharper than the issuer's own
+reading — one of them supplied the half the issuer had not seen, that the same
+construction was inside one issue's acceptance and outside the other's. Writing
+the conclusion instead forfeits that half.
+
+Review briefs also carry: READ-ONLY with no checkout (`review.readonly-proof`);
+which known-flaky CI job to judge environmental rather than spend a rerun on;
+that the verdict is posted by the reviewer itself in R23's shape, with no label,
+status, or merge. On later rounds they state what is already settled and not
+reopenable — the review contract's rule that later blockers must be fix-caused
+or previously unobservable — and, when the earlier reviewer cannot be resumed,
+that the replacement reads the receipts first.
 
 ## Worked examples
 
