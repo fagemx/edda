@@ -1539,10 +1539,17 @@ it produced — each open PR's head, base, and verdict state — and it is
 cross-PR drift is not one of R6's conditions and a refusal there made every
 merge hostage to the whole open set (#1124,
 `review.merge-drift-guard=advisory-not-an-r6-condition`). The **subject PR's
-own hold still refuses**, read from the subject itself rather than from the
+own holds still refuse**, read from the subject itself rather than from the
 walk: `mergeable=CONFLICTING` (R24 forbids reporting such a PR ready), an
 orphan `Review Response` answering a round that was never posted (GH-993),
-and a verdict that does not pin the current head (condition 2 above).
+and a verdict that does not pin the current head (condition 2 above). The
+walk's own reducer is asked about the subject too, and a state it holds — no
+verdict on head, or the newest verdict stale from an older SHA — is a refusal
+of its own: the reducer orders a PR's comments by creation where this gate's
+latest-review selection orders them by GitHub's edit time, so an older
+head-pinned LGTM edited after a later stale verdict is newest to the gate and
+stale to the reducer, and two readings of the subject that disagree are not a
+green (#1124).
 
 The check-to-merge windows are deliberately not checked here:
 `--match-head-commit <head>` makes the forge itself reject a push that

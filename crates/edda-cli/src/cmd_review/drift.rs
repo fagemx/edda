@@ -73,8 +73,10 @@ pub(crate) enum PrState {
 }
 
 impl PrState {
-    /// The exact `<state>` token the shell printed — byte-compatible.
-    fn as_str(&self) -> String {
+    /// The exact `<state>` token the shell printed — byte-compatible. Read by
+    /// `merge`'s subject-hold refusal too, so the state a refusal names is the
+    /// state the walk's own line prints (#1124 Round 4).
+    pub(crate) fn as_str(&self) -> String {
         match self {
             PrState::NoVerdict => "no verdict on head".into(),
             PrState::StaleFrom(sha) => format!("stale from {}", &sha[..12]),
@@ -84,7 +86,9 @@ impl PrState {
         }
     }
 
-    fn holds(&self) -> bool {
+    /// Does this state hold its PR? The walk's own not-ready rule, applied by
+    /// the merge gate to the subject PR (#1124 Round 4).
+    pub(crate) fn holds(&self) -> bool {
         matches!(self, PrState::NoVerdict | PrState::StaleFrom(_))
     }
 }

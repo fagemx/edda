@@ -241,22 +241,43 @@ fn mergeability_refusal(pr: u64, mergeable: &str) -> Result<(), i32> {
     }
 }
 
-/// GH-993's orphan Review Response hold, decided by the walk's own reducer
-/// over the subject's own comments: a `## Review Response: Round N` answering
-/// a round that was never posted. The same rule the walk applies, without a
-/// second read and without depending on the walk completing (#1124 Round 2).
+/// The subject PR's own holds, decided by the walk's own reducer over the
+/// subject's own comments — the same rule the walk applies, without a second
+/// read and without depending on the walk completing (#1124 Rounds 2 and 4):
+///
+/// - a `## Review Response: Round N` answering a round that was never posted
+///   (GH-993);
+/// - a reduced state that holds the PR ([`drift::PrState::holds`]): no verdict
+///   on head, or the newest verdict stale from an older SHA.
+///
+/// The state half is not decoration. The walk's reducer orders a PR's comments
+/// by creation and the merge gate's own latest-review selection
+/// ([`latest_review_round`]) orders them by GitHub's edit time, so an older
+/// head-pinned LGTM edited after a later stale verdict is newest by edit —
+/// stage 4 approves it — while the reducer still reads the stale verdict,
+/// which the walk calls a hold. Two readings of the subject's own comments
+/// that disagree are not a green (Round 4's first P0).
+///
 /// `Err(1)` after printing the refusal.
-fn orphan_response_refusal(pr: u64, head: &str, comments: &[Comment]) -> Result<(), i32> {
-    match drift::reduce(head, comments).1 {
-        Some(round) => {
-            eprintln!(
-                "PR #{pr} carries an orphan Review Response for Round {round} — a response to \
-                 a round that was never posted (GH-993); refusing (#1124)"
-            );
-            Err(1)
-        }
-        None => Ok(()),
+fn subject_hold_refusal(pr: u64, head: &str, comments: &[Comment]) -> Result<(), i32> {
+    let (state, orphan) = drift::reduce(head, comments);
+    if let Some(round) = orphan {
+        eprintln!(
+            "PR #{pr} carries an orphan Review Response for Round {round} — a response to \
+             a round that was never posted (GH-993); refusing (#1124)"
+        );
+        return Err(1);
     }
+    if state.holds() {
+        eprintln!(
+            "PR #{pr}'s own reviews read {:?} to the verdict-drift walk's reducer — the walk \
+             orders these comments by creation and the merge gate orders them by edit, and two \
+             readings of the subject that disagree are not a green; refusing (#1124)",
+            state.as_str()
+        );
+        return Err(1);
+    }
+    Ok(())
 }
 
 /// The latest trusted §7 review's own four checks, in the shell's order:
@@ -436,9 +457,10 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
     };
     let comments: Vec<Comment> = timed.iter().map(|t| t.comment.clone()).collect();
 
-    // 3b. GH-993's other hold, decided over the subject's own comments
-    //     (#1124 Round 2).
-    if let Err(code) = orphan_response_refusal(args.pr, &pr.head, &comments) {
+    // 3b. The subject's own holds, decided over the subject's own comments by
+    //     the walk's own reducer — the orphan response and the states that
+    //     hold (#1124 Rounds 2 and 4).
+    if let Err(code) = subject_hold_refusal(args.pr, &pr.head, &comments) {
         return Ok(code);
     }
 
@@ -870,7 +892,10 @@ mod tests {
     // #1124's split fixture: an open set where one unrelated PR drifted, over
     // a subject whose own gate is green. The walk's lines still print
     // (`drift::advisory`'s own test pins that) and no longer refuse, so the
-    // reads the shell stopped at are all reached.
+    // reads the shell stopped at are all reached — and the subject really
+    // merges: Round 4's second P0 was that `args(false)` never reached the
+    // squash branch, so this fixture proved only acceptance, not the merge the
+    // doneWhen claims.
     #[test]
     fn a_dirty_open_set_is_advisory_and_the_green_subject_merges() {
         let mut fake = Fake::clean(lgtm());
@@ -881,7 +906,7 @@ mod tests {
             ],
             true,
         ));
-        let code = merge_inner(&args(false), &fake).unwrap();
+        let code = merge_inner(&args(true), &fake).unwrap();
         assert_eq!(code, 0, "an unrelated PR's drift refused this merge");
         assert!(
             *fake.reached_comments.borrow(),
@@ -891,14 +916,55 @@ mod tests {
             *fake.reached_checks.borrow(),
             "the subject's own required checks were never asked"
         );
+        let merged = fake.merged.borrow();
+        assert_eq!(
+            merged.len(),
+            1,
+            "the green subject never reached the squash"
+        );
+        assert_eq!(
+            (merged[0].0, merged[0].1.as_str()),
+            (4242, HEAD),
+            "the squash was not pinned to the subject's own head"
+        );
+    }
+
+    // Round 4's first P0: the walk's reducer orders the subject's comments by
+    // creation, the merge gate's latest-review selection by GitHub's edit
+    // time. An older head-pinned LGTM edited after a later stale verdict is
+    // therefore newest for stage 4 — which approves — while the reducer still
+    // reads the stale verdict, which the walk calls a hold. Two readings of
+    // the subject that disagree are not a green.
+    #[test]
+    fn an_edited_lgtm_cannot_outvote_the_stale_verdict_the_walk_still_reads() {
+        let fake = Fake::clean(vec![
+            // Created first, edited last: newest by `updated_at`, so this is
+            // the round stage 4 judges and approves.
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T12:00:00Z"),
+            // Created last, never edited: newest by comment order, and stale.
+            review(
+                2,
+                OLDER,
+                "Changes Requested, P0=0, P1=1",
+                "2026-09-08T11:00:00Z",
+            ),
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(
+            code, 1,
+            "edit order outvoted the walk's stale reading of the subject"
+        );
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after the subject's own hold already refused"
+        );
     }
 
     // The other half of the split: the subject's OWN stale verdict still
-    // refuses, and since the Round-2 P0 it refuses at stage 1 — the walk's
-    // hold list names the subject. A guard rather than regression evidence:
-    // the pre-fix code also answered 1 here, because back then ANY open PR's
-    // hold refused. `a_conflicting_subject_still_refuses` below is the
-    // fixture that fails on the code this branch replaced.
+    // refuses. A guard rather than regression evidence — a single stale
+    // verdict named by the walk's line was also refused by the code this
+    // branch replaced, because back then ANY open PR's hold refused. The
+    // fixture above is the one that fails on the replaced code.
     #[test]
     fn the_subjects_own_stale_verdict_still_refuses() {
         let mut fake = Fake::clean(vec![review(

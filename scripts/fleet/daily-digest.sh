@@ -175,11 +175,14 @@ open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit "$open_pr_limit"
 # a digest that refused to post because the fleet was imperfect would be
 # less useful than the report itself. This is now the ONLY consumer that
 # treats the walk as a fleet signal: the merge entrypoint stopped blocking on
-# it entirely in GH-1124 — it refuses nothing, and the subject PR's own hold
-# is read from the subject's own facts rather than from this walk
-# (`review.merge-drift-guard=advisory-not-an-r6-condition`) — so a reader who
-# needs the fleet's drift state reads it here and in `edda review drift`, not
-# from a merge refusal.
+# it entirely in GH-1124 — the walk's own query refuses nothing — and the
+# subject PR's own holds are read from the subject's own facts rather than
+# from this walk (`review.merge-drift-guard=advisory-not-an-r6-condition`).
+# One of those reads does run the walk's *reducer* over the subject's own
+# comments (merge.rs `subject_hold_refusal`), because that is the rule the
+# walk's lines already express; the fleet-wide query is never the deciding
+# read. So a reader who needs the fleet's drift state reads it here and in
+# `edda review drift`, not from a merge refusal.
 drift_out="$tmp/drift.txt"
 drift_rc=0
 GH_OPEN_JSON= EDDA_OPEN_PR_LIMIT="$open_pr_limit" sh "$self_dir/verdict-drift.sh" >"$drift_out" 2>"$tmp/drift.err" || drift_rc=$?
