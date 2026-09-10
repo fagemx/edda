@@ -134,7 +134,8 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("publish-crates.py verify", create)
 
     def test_workflow_enforces_portable_linux_and_lf_checksums(self):
-        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release.yml"
+        root = Path(__file__).resolve().parents[1]
+        workflow = root / ".github/workflows/release.yml"
         text = workflow.read_text()
         linux = text.split("  build-linux-release:", 1)[1].split(
             "  build-non-linux-release:", 1)[0]
@@ -150,8 +151,16 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("[System.IO.File]::WriteAllText", non_linux)
         self.assertIn('${ARCHIVE}.zip`n', non_linux)
         self.assertNotIn("Out-File", non_linux)
-        self.assertIn("uses: actions/checkout@v6", publish)
+        self.assertIn(
+            "uses: actions/checkout@v6\n        with:\n"
+            "          persist-credentials: false",
+            publish,
+        )
         self.assertIn("scripts/verify-release-checksum.sh", publish)
+        publication_check = (
+            root / ".github/workflows/publish-crates-check.yml"
+        ).read_text()
+        self.assertIn("- 'scripts/verify-release-checksum.sh'", publication_check)
         self.assertIn(
             "needs: [create-release, build-linux-release, build-non-linux-release]",
             publish,

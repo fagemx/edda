@@ -6,6 +6,7 @@ on:
       - '.github/workflows/release.yml'
       - '.github/workflows/publish-crates-check.yml'
       - 'scripts/publish-crates*'
+      - 'scripts/verify-release-checksum.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
       # Whole crate tree, not just manifests: include_str! resources, build
