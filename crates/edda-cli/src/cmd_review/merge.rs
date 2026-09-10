@@ -35,7 +35,9 @@
 //! PR after the reviewed SHA, and branch protection rejects a base the PR
 //! is behind. R6's window record stays a checkout-side act.
 
-use super::deliver::{self, comments_argv, heading_parts, trusted_association, Comment};
+use super::deliver::{
+    self, comments_argv, heading_parts, heading_shaped, trusted_association, Comment,
+};
 use super::drift;
 use super::gate;
 use super::github::{gh, gh_write, gh_write_stdin};
@@ -163,9 +165,12 @@ fn receipt_body(pr: u64, head: &str, round: &str, ci: Option<&str>) -> String {
 }
 
 /// The latest trusted §7 review's own four checks, in the shell's order:
-/// a trusted §7 comment exists at all; its FIRST §7 heading line is pinned
-/// to `head` (`grep -m1` — line 1 for a well-formed comment, any line for a
-/// transcript dump, #867); escalations resolve; the verdict approves with
+/// a trusted comment carrying a §7-*shaped* heading exists at all
+/// ([`heading_shaped`] — the shell's prefix rule, so a round whose heading
+/// does not parse blocks the gate instead of disappearing from it); its
+/// FIRST §7 heading line is pinned to `head` (`grep -m1` — line 1 for a
+/// well-formed comment, any line for a transcript dump, #867); escalations
+/// resolve; the verdict approves with
 /// P0=0/P1=0 and is not Provisional. Latest is by `(updated_at, numeric
 /// id)` — GitHub's edit ordering, so an edited round returns to newest the
 /// way the shell's `sort_by([.updated_at, .id])` sorted it.
@@ -182,7 +187,7 @@ fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<St
             && t.comment
                 .body
                 .lines()
-                .any(|line| heading_parts(line.trim_end_matches('\r')).is_some())
+                .any(|line| heading_shaped(line.trim_end_matches('\r')))
     }) {
         // Fail closed on the REST keys this ordering is built from, as the
         // shell did: `error("trusted review lacks REST updated_at or numeric
@@ -223,9 +228,20 @@ fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<St
         .lines()
         .map(|line| line.trim_end_matches('\r'))
         .collect();
-    let Some((round, pinned_to, _)) = body.iter().filter_map(|line| heading_parts(line)).next()
-    else {
+    // The shell's `grep -m1 '^## Code Review: Round '`: the FIRST
+    // heading-shaped line, then parsed — not the first line that happens to
+    // parse. Scanning for a parseable heading instead would step over a
+    // broken one and judge a well-formed heading further down the same body.
+    let Some(heading) = body.iter().copied().find(|line| heading_shaped(line)) else {
         eprintln!("latest trusted review carries no §7 heading");
+        return Err(1);
+    };
+    let Some((round, pinned_to, _)) = heading_parts(heading) else {
+        eprintln!(
+            "latest trusted review's §7 heading does not parse: {heading:?} is not \
+             `## Code Review: Round <N> — PR #<n> @ <40 lowercase hex>`, so it is not pinned to \
+             current head {head}"
+        );
         return Err(1);
     };
     if pinned_to != head {
@@ -847,6 +863,65 @@ mod tests {
                 "{label}: required checks were queried after the selection already refused"
             );
         }
+    }
+
+    /// GH-1105 review round 1: candidacy narrowed from the shell's heading
+    /// prefix to the full §7 grammar, so a blocking round whose heading SHA is
+    /// truncated, typo'd or uppercase stopped being a candidate at all — and
+    /// `deliver::extract` did not report it malformed either, because its #917
+    /// branch also asked the full grammar. Invisible to the latest-review
+    /// check, to `malformed` and to the union at once is the exact hole #917's
+    /// refusal exists to close. Widen the filter back to `heading_shaped` and
+    /// the round blocks: either as the latest review whose heading will not
+    /// parse, or through the malformed refusal.
+    #[test]
+    fn a_blocking_round_whose_heading_sha_is_malformed_still_stops_the_gate() {
+        for bad in [
+            "aaaaaaaabbbbbbbbccccccccdddddddd1111222", // truncated by one
+            "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD11112222", // uppercase
+            "aaaaaaaabbbbbbbbccccccccdddddddd1111222g", // a typo'd digit
+        ] {
+            let fake = Fake::clean(vec![
+                review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+                review(
+                    2,
+                    bad,
+                    "Changes Requested, P0=1, P1=0",
+                    "2026-09-08T12:00:00Z",
+                ),
+            ]);
+            let code = merge_inner(&args(false), &fake).unwrap();
+            assert_eq!(
+                code, 1,
+                "a blocking round headed @ {bad} was invisible to the whole gate"
+            );
+            assert!(
+                fake.merged.borrow().is_empty(),
+                "merged over a blocking round headed @ {bad}"
+            );
+        }
+    }
+
+    /// The same widening isolated at its own seam, because the end-to-end
+    /// exit code above cannot separate the two halves of the fix: the
+    /// malformed refusal at stage 5 would reach the same `1`. Here only the
+    /// candidate filter decides — narrow it back to the full grammar and the
+    /// broken round is skipped, the older LGTM is selected, and this returns
+    /// `Ok("1")`.
+    #[test]
+    fn a_malformed_heading_is_the_latest_review_not_a_skipped_one() {
+        let timed = vec![
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+            review(
+                2,
+                &HEAD.to_uppercase(),
+                "Changes Requested, P0=1, P1=0",
+                "2026-09-08T12:00:00Z",
+            ),
+        ];
+        let code = latest_review_round(&timed, 4242, HEAD)
+            .expect_err("the broken round was skipped and the older LGTM approved the merge");
+        assert_eq!(code, 1);
     }
 
     #[test]

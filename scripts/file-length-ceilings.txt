@@ -37,5 +37,6 @@ crates/edda-mcp/src/lib.rs 1199
 crates/edda-pack/src/lib.rs 1186
 crates/edda-search-fts/src/indexer.rs 1461
 crates/edda-serve/src/tests.rs 5378
-crates/edda-cli/src/cmd_review/deliver.rs 1047
+crates/edda-cli/src/cmd_review/deliver.rs 1075
+crates/edda-cli/src/cmd_review/merge.rs 1066
 crates/edda-cli/src/cmd_review/delivery.rs 1027

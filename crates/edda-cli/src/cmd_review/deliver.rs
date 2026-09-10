@@ -114,6 +114,25 @@ fn is_heading(line: &str) -> bool {
     heading_parts(line).is_some()
 }
 
+/// Does this line have the *shape* of a §7 heading, whether or not it parses?
+///
+/// The shell's candidate rule verbatim — `test("(?m)^## Code Review: Round
+/// [0-9]+")` (`scripts/merge-reviewed-pr.sh`, pre-adapter blob) — and
+/// deliberately looser than [`is_heading`], which also demands the `— PR #N @
+/// <40 lowercase hex>` tail.
+///
+/// The looseness is the point (GH-1105 review round 1). Judging *candidacy* by
+/// the full grammar made a round whose heading SHA is truncated, typo'd or
+/// uppercase invisible three ways at once: it was no longer the latest trusted
+/// review, it never reached [`Extracted::malformed`], and the union at
+/// `super::merge` never saw it — so a blocking round vanished and an older LGTM
+/// merged in its place. A heading-shaped line that does not parse is malformed;
+/// it is never "no round at all".
+pub(crate) fn heading_shaped(line: &str) -> bool {
+    line.strip_prefix("## Code Review: Round ")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// The §7 heading, decomposed: `(round, sha, shadow)` (GH-1105).
 ///
 /// One grammar, every reader: [`extract`] above and the drift and merge
@@ -276,9 +295,13 @@ pub(crate) fn extract(sha: &str, comments: &[Comment]) -> Extracted {
         }
         if !is_heading(first) {
             // A §7 heading anywhere but line 1 is a transcript dump (#867),
-            // not a verdict: no status, no label, no round. It earns one
-            // notice so the round is not silently lost (#917).
-            if normalized.iter().any(|line| is_heading(line)) {
+            // not a verdict: no status, no label, no round. So is a
+            // heading-shaped line that does not parse — a truncated, typo'd
+            // or uppercase SHA — wherever it sits, including line 1
+            // ([`heading_shaped`]). Both earn one notice so the round is not
+            // silently lost (#917), which is the whole reason that refusal
+            // exists.
+            if normalized.iter().any(|line| heading_shaped(line)) {
                 out.malformed.push(comment.id.clone());
             }
             continue;
@@ -880,13 +903,18 @@ mod tests {
     }
 
     #[test]
-    fn an_uppercase_or_short_sha_in_the_heading_is_not_a_heading() {
+    fn an_uppercase_or_short_sha_in_the_heading_is_malformed_not_invisible() {
+        // The heading does not parse, so it is no verdict — but it is still a
+        // review round somebody posted, and dropping it whole is what let a
+        // blocking round vanish from the merge gate (GH-1105 review round 1).
+        // Heading-shaped and unparseable earns the #917 notice.
         for bad in ["0123456789ABCDEF0123456789abcdef01234567", "0123456"] {
             let body = format!(
                 "## Code Review: Round 1 — PR #1030 @ {bad}\n\n### Verdict\n\nLGTM (P0=0, P1=0)\n"
             );
             let got = extract(bad, &[comment("1", &body)]);
             assert!(got.lines.is_empty(), "accepted a malformed sha: {bad}");
+            assert_eq!(got.malformed, vec!["1"], "lost the round entirely: {bad}");
         }
     }
 
