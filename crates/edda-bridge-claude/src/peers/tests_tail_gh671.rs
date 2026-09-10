@@ -5,13 +5,21 @@ use super::*;
 /// made three fleet sessions all answer to `main` are gone.
 ///
 /// Identity vars are installed through the GH-757 thread-scoped test
-/// configuration, never `std::env::set_var`. libtest runs every `#[test]` as
-/// a thread in ONE process, and four pre-existing `write_heartbeat` tests
-/// pass `label: None` (`peers/tests.rs:1650`, `:1680`, `:1715`, `:1716`), so
-/// they read `env_label()` and `fleet_session()` on exactly the chain these
-/// tests drive. A process-wide mutation here flipped two of them to the sid
-/// fallback whenever they were scheduled inside the window; a thread-local
-/// override is invisible to them, and to every other thread in the binary.
+/// configuration, never `std::env::set_var`. libtest runs every test fn as a
+/// thread in ONE process, and three pre-existing tests in `peers/tests.rs`
+/// call `write_heartbeat` with `label: None` across four call sites:
+///
+/// - `heartbeat_label_falls_back_to_git_branch_for_a_fresh_session`
+/// - `fresh_session_receives_requests_addressed_to_its_branch`
+/// - `two_fresh_sessions_on_one_branch_do_not_block_each_other`
+///
+/// They are named rather than cited by line: adding the guards below shifted
+/// those line numbers once already, and a stale citation reads as a stale
+/// warning. Each reaches `env_label()` and `fleet_session()` on exactly the
+/// chain these tests drive, so a process-wide mutation here flipped two of
+/// them to the sid fallback whenever they were scheduled inside the window.
+/// A thread-local override is invisible to them, and to every other thread
+/// in the binary.
 #[test]
 fn fleet_session_label_is_explicit_never_the_branch() {
     let _store = crate::isolated_store();
