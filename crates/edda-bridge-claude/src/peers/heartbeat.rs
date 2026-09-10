@@ -5,7 +5,7 @@ use crate::parse::now_rfc3339;
 use crate::signals::SessionSignals;
 
 use super::board::{compute_board_state, partition_requests_for_session};
-use super::helpers::{auto_label, parse_rfc3339_to_epoch, session_label_from_board};
+use super::helpers::{auto_label, fleet_session, parse_rfc3339_to_epoch, session_label_from_board};
 use super::{
     coordination_path, detect_git_branch_in, env_label, heartbeat_path, read_heartbeat, stale_secs,
     BindingConflict, CoordEvent, CoordEventType, SessionHeartbeat,
@@ -32,19 +32,7 @@ pub(crate) fn write_heartbeat(
     let derived_label = label
         .map(|s| s.to_string())
         .or_else(env_label)
-        .unwrap_or_else(|| {
-            let auto = auto_label(signals, Some(cwd));
-            if auto.is_empty() {
-                // Fresh session: no edits yet, so `auto_label` is empty. Fall back
-                // to the git branch so the peer stays identifiable in `edda watch`
-                // and can still receive `edda request` (#128). This is a presence
-                // signal on the heartbeat — never a scope claim, which is what
-                // used to block every peer under enforce_offlimits (#444).
-                branch.clone().unwrap_or_default()
-            } else {
-                auto
-            }
-        });
+        .unwrap_or_else(|| derive_label(project_id, session_id, signals, cwd, branch.as_deref()));
 
     let result = edda_store::update_heartbeat(project_id, session_id, |hb| {
         if hb.started_at.is_empty() {
@@ -83,6 +71,51 @@ pub(crate) fn write_heartbeat(
             &format!("{e:#}"),
         );
     }
+}
+
+/// The label to record when neither an explicit one nor `EDDA_SESSION_LABEL`
+/// supplied it (GH-671 identity half).
+///
+/// A fleet session (`EDDA_MACHINE` exported by the lane wrapper) owes an
+/// explicit identity: a claim label from the board counts, and past that the
+/// chain refuses to invent one — the branch/auto fallbacks are exactly what
+/// made three live fleet sessions all answer to `main`, indistinguishable to
+/// `edda request`. The last resort is the session id prefix: unique by
+/// construction, visibly derived (`sid-`), so a collision warning elsewhere
+/// in the render can stay a warning rather than a lie.
+///
+/// A bare local session keeps the permissive chain: focus-file auto label,
+/// then the git branch so the peer stays identifiable in `edda watch` and can
+/// still receive `edda request` (#128). This is a presence signal on the
+/// heartbeat — never a scope claim, which is what used to block every peer
+/// under enforce_offlimits (#444).
+fn derive_label(
+    project_id: &str,
+    session_id: &str,
+    signals: &SessionSignals,
+    cwd: &str,
+    branch: Option<&str>,
+) -> String {
+    if fleet_session() {
+        let claim = compute_board_state(project_id)
+            .claims
+            .iter()
+            .find(|c| c.session_id == session_id)
+            .map(|c| c.label.clone())
+            .filter(|l| !l.is_empty());
+        return claim.unwrap_or_else(|| sid_prefix(session_id));
+    }
+    let auto = auto_label(signals, Some(cwd));
+    if !auto.is_empty() {
+        return auto;
+    }
+    branch.unwrap_or_default().to_string()
+}
+
+/// The unambiguous fallback label: the session id's first segment, prefixed
+/// so a reader can tell a derived label from a chosen one.
+fn sid_prefix(session_id: &str) -> String {
+    format!("sid-{}", &session_id[..8.min(session_id.len())])
 }
 
 /// Lightweight heartbeat touch: only update last_heartbeat timestamp.

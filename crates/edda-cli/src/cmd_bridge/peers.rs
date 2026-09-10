@@ -1,4 +1,5 @@
 use edda_bridge_claude::peers::liveness;
+use edda_bridge_claude::peers::{colliding_labels, machine_identity, PeerSummary};
 use std::path::Path;
 
 /// JSON board snapshot for `edda peers --json`.
@@ -78,11 +79,7 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
             (None, false) => format!(" [{}]", p.claimed_paths.join(", ")),
             (None, true) => String::new(),
         };
-        let label = if p.label.is_empty() {
-            "(no label)".to_string()
-        } else {
-            p.label.clone()
-        };
+        let label = peer_display_label(p, machine_identity().as_deref());
         println!(
             "  {} — {} ({age}){scope}",
             &p.session_id[..8.min(p.session_id.len())],
@@ -111,6 +108,14 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
             }
         }
     }
+    // GH-671 identity half: a label shared by live sessions is an ambiguous
+    // `edda request` address — say so where the operator is already reading
+    // the label, with the fix in the same breath.
+    for (label, count) in colliding_labels(active.iter().copied()) {
+        println!(
+            "\n  ⚠ label \"{label}\" is shared by {count} live sessions — requests to it are ambiguous; set EDDA_SESSION_LABEL or claim a unique label"
+        );
+    }
     if !stale.is_empty() {
         println!(
             "\n  (+{} stale session{} not shown)",
@@ -119,4 +124,21 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// One session's label as `edda peers` shows it (GH-671 identity half):
+/// `label@machine`, or the bare label when no machine identity resolves.
+///
+/// Every session on this board runs on this machine — the heartbeat store is
+/// machine-local — so the machine suffix is resolved once per render rather
+/// than recorded per heartbeat. An unidentified session keeps its marker
+/// unchanged; `no label@machine` would read as a machine named "no label".
+pub(super) fn peer_display_label(peer: &PeerSummary, machine: Option<&str>) -> String {
+    if peer.label.is_empty() {
+        return "(no label)".to_string();
+    }
+    match machine {
+        Some(machine) => format!("{}@{machine}", peer.label),
+        None => peer.label.clone(),
+    }
 }

@@ -281,7 +281,9 @@ pub use heartbeat::{
     write_binding, write_claim, write_claim_with_subject, write_heartbeat_minimal, write_request,
     write_request_ack, write_unclaim,
 };
+pub use helpers::colliding_labels;
 pub use helpers::format_age;
+pub use helpers::machine_identity;
 pub(crate) use helpers::{format_peer_suffix, pending_requests_for_session};
 pub use helpers::{resolve_session_label, session_label_from_board, timestamp_at_or_after};
 pub use liveness::{

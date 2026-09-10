@@ -370,25 +370,9 @@ fn resolve_machine(explicit: Option<&str>) -> String {
             return trimmed.to_string();
         }
     }
-    if let Ok(m) = std::env::var("EDDA_MACHINE") {
-        let trimmed = m.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    if let Ok(m) = std::env::var("COMPUTERNAME") {
-        let trimmed = m.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    if let Ok(m) = std::env::var("HOSTNAME") {
-        let trimmed = m.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    "unknown".to_string()
+    // The env chain lives in one place (GH-671 identity half) so the mirror's
+    // "Exporting machine" and a session's `label@machine` cannot disagree.
+    edda_bridge_claude::peers::machine_identity().unwrap_or_else(|| "unknown".to_string())
 }
 
 fn now_rfc3339() -> String {

@@ -3543,3 +3543,6 @@ fn legacy_ackless_id_log_survives_compaction_without_swallowing_later_requests()
 
 #[path = "tests_tail_gh757.rs"]
 mod tests_tail_gh757;
+
+#[path = "tests_tail_gh671.rs"]
+mod tests_tail_gh671;

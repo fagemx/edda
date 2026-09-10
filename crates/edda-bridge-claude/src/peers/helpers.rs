@@ -1,6 +1,6 @@
 use super::board::{compute_board_state, partition_requests_for_session};
 use super::read_heartbeat;
-use super::{BoardState, RequestEntry};
+use super::{BoardState, PeerSummary, RequestEntry};
 use crate::signals::SessionSignals;
 
 /// Resolve a session's coordination label: an explicit claim wins, the
@@ -32,6 +32,63 @@ pub(crate) fn pending_requests_for_session(
 }
 
 // ── Helpers ──
+
+/// This machine's display identity (GH-671 identity half): `EDDA_MACHINE`
+/// when the fleet wrapper set it, else the OS host-name env vars, else none.
+///
+/// The chain matches `edda export md`'s provenance field so a session's
+/// `label@machine` and a mirror's "Exporting machine" cannot disagree about
+/// which machine they are on. None of this is a *credential*: the claim
+/// guard's machine identity (`--machine`/`EDDA_MACHINE`, hostname never
+/// guessed) stays explicit-only in `cmd_dispatch`; this resolver is for
+/// rendering, where a best-effort name beats silence but must never mint
+/// authority.
+pub fn machine_identity() -> Option<String> {
+    for key in ["EDDA_MACHINE", "COMPUTERNAME", "HOSTNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// A fleet-mode session (GH-671 identity half): the lane wrapper exports
+/// `EDDA_MACHINE` into the session's environment, so its presence is the
+/// opt-in that makes label discipline binding. A bare local session keeps
+/// the permissive label chain.
+pub(crate) fn fleet_session() -> bool {
+    std::env::var("EDDA_MACHINE")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Labels shared by two or more **live** sessions (GH-671 identity half),
+/// with the live count each — `(label, count)`, sorted by label.
+///
+/// Requests address peers by label, so a shared label is an ambiguous
+/// address. Only live sessions collide: a dead heartbeat's label occupies
+/// nothing. Empty labels are not addressable and never reported. One
+/// implementation feeds both render surfaces (`edda peers` and the pack's
+/// peer block) so they cannot disagree about whether a label collides.
+pub fn colliding_labels<'a>(
+    peers: impl IntoIterator<Item = &'a PeerSummary>,
+) -> Vec<(String, usize)> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<&'a str, usize> = BTreeMap::new();
+    for peer in peers.into_iter().filter(|p| p.is_live) {
+        if !peer.label.is_empty() {
+            *counts.entry(peer.label.as_str()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .map(|(label, count)| (label.to_string(), count))
+        .collect()
+}
 
 /// True if a normalized path is absolute (`/...` or `C:/...`).
 pub(super) fn is_absolute_normalized(path: &str) -> bool {
