@@ -200,6 +200,27 @@ fn holds(row: &PrRow, state: &PrState, orphan: &Option<String>) -> bool {
     state.holds() || row.mergeable == "CONFLICTING" || orphan.is_some()
 }
 
+/// The open set as `edda review merge` reports it (#1124): every line the
+/// walk produced, verbatim, and — only when some PR holds — the ruling that
+/// keeps the block from refusing. Cross-PR drift is not an R6 condition
+/// (`review.merge-drift-guard=advisory-not-an-r6-condition`), so a merge goes
+/// on to the subject PR's own gate; the walk still reaches the operator,
+/// which is the half a refusal must not be the only carrier of.
+pub(crate) fn advisory(lines: &[String], any_holds: bool) -> String {
+    let mut text = lines.join("\n");
+    if any_holds {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(
+            "verdict-drift is not clean across the open PR set — advisory only: cross-PR drift \
+             is not an R6 condition, and this merge is decided by the subject PR's own gate \
+             (#1124, GH-993)",
+        );
+    }
+    text
+}
+
 /// The `--limit` value this run uses: the flag, then EDDA_OPEN_PR_LIMIT
 /// (the variable daily-digest.sh exports so both halves of GH-958's shared
 /// enumeration see the same number), then 200.
@@ -258,8 +279,11 @@ fn parse_open_prs(value: &serde_json::Value) -> Vec<PrRow> {
 
 /// The drift query over the whole open-PR set: one output line per PR and
 /// whether any PR is not ready. Split from [`run`] so `edda review merge`
-/// consults the same walk without a subprocess (GH-993's blocking scope is
-/// the whole open set, not the one PR being merged).
+/// consults the same walk without a subprocess. The walk's scope is the whole
+/// open set, which was never the subject of an R6 condition: since #1124
+/// `merge` reads it through [`advisory`] and the subject PR's own gate
+/// decides, where the shell this replaced refused every merge while any
+/// unrelated PR had drifted.
 pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
     let argv = open_prs_argv(limit);
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -665,5 +689,36 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].mergeable, "CONFLICTING");
         assert_eq!(rows[1].mergeable, "", "absent mergeable annotates nothing");
+    }
+
+    // #1124's fixture at the block's own seam: the walked lines survive into
+    // the merge's report verbatim, and only a hold adds the ruling. Whether
+    // the merge then refuses is `merge.rs`'s test — this pins that nothing
+    // the walk found stops being printed.
+    #[test]
+    fn the_advisory_keeps_every_line_and_names_the_ruling_only_on_a_hold() {
+        let lines = vec![
+            "#1122 bb06f359bd6e main stale from b800044d86fc".to_string(),
+            "#1114 52c540c0937b main LGTM".to_string(),
+        ];
+        let text = advisory(&lines, true);
+        assert!(
+            text.contains(&lines[0]) && text.contains(&lines[1]),
+            "the drifted or the clean PR's own line was dropped: {text}"
+        );
+        assert!(
+            text.contains("advisory only") && text.contains("#1124"),
+            "the hold does not name the ruling that keeps it advisory: {text}"
+        );
+        assert_eq!(
+            advisory(&lines, false),
+            lines.join("\n"),
+            "a walk with nothing holding must print its lines alone"
+        );
+        assert_eq!(advisory(&[], false), "", "an empty walk prints nothing");
+        assert!(
+            advisory(&[], true).starts_with("verdict-drift is not clean"),
+            "a hold with no lines must still not print a blank block"
+        );
     }
 }

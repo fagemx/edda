@@ -1517,23 +1517,30 @@ edda review merge --pr 1105 --merge --body-file .edda/merge-receipt.md
 
 The conditions run in order, and the first failure rejects with exit 1:
 
-1. The drift check is clean across the entire open-PR set, not just this PR
-   (GH-993).
-2. The PR is `OPEN` and its head is a 40-hex SHA.
-3. The latest trusted §7 review — ordered by `updated_at`, so an edited
+1. The PR is `OPEN` and its head is a 40-hex SHA.
+2. The latest trusted §7 review — ordered by `updated_at`, so an edited
    comment moves back to the front — is pinned to the current head, carries
    `- escalations: none`, and its verdict is `LGTM (P0=0, P1=0)`;
    `Provisional` does not count.
-4. The union rule (GH-769, GH-742): the §7 verdicts pinned to that SHA must
+3. The union rule (GH-769, GH-742): the §7 verdicts pinned to that SHA must
    pass as a union — a later LGTM never overrides an earlier Changes
    Requested.
-5. Malformed §7 comments number zero (#917 — the union reads success
+4. Malformed §7 comments number zero (#917 — the union reads success
    precisely because a blocking round is invisible to it).
-6. Required checks are green.
-7. The squash subject matches the commit convention
+5. Required checks are green.
+6. The squash subject matches the commit convention
    `<type>(<scope>): <description>` (GH-1100): `type` is one of
    `feat|fix|docs|refactor|test|chore`, and a violation is rejected with the
    offending string — `wip`, an empty scope, and a missing type all block.
+
+Before those, the fleet-wide drift walk (GH-993) runs and prints every line
+it produced — each open PR's head, base, and verdict state — but it is
+**advisory**: drift on other open PRs no longer refuses, because cross-PR
+drift is not one of R6's conditions and a refusal there made every merge
+hostage to the whole open set (#1124,
+`review.merge-drift-guard=advisory-not-an-r6-condition`). Drift on *this*
+PR is not lost by that: a verdict that does not pin the current head is
+condition 2 above, and stops the merge there.
 
 The check-to-merge windows are deliberately not checked here:
 `--match-head-commit <head>` makes the forge itself reject a push that

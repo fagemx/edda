@@ -3,8 +3,9 @@
 //!
 //! `scripts/merge-reviewed-pr.sh` — now a one-line adapter over this verb —
 //! decided whether a PR may merge entirely in shell: the fleet-wide drift
-//! gate (GH-993), the trusted-review checks, the union rule (GH-769,
-//! GH-742), the malformed-comment refusal (#917), and required checks.
+//! gate (GH-993, advisory since #1124), the trusted-review checks, the union
+//! rule (GH-769, GH-742), the malformed-comment refusal (#917), and required
+//! checks.
 //! That is control flow, parsing, and a trust boundary — three for three
 //! against `mechanism.shell-role=one-line-adapter-only`. Every rule moves
 //! here, unit-tested in Rust rather than by fixture shell, and the merge
@@ -20,6 +21,12 @@
 //!   `review:*` label and the `Independent Review` status are `edda review
 //!   deliver`'s to write, which the reviewing session runs when it
 //!   delivers its own round.
+//! - **Cross-PR drift is advisory (#1124).** The walk still runs and every
+//!   line it produced still prints, but it no longer refuses: coupling one
+//!   merge to the whole open set made every PR hostage to unrelated ones, and
+//!   drift across the open set is not among R6's conditions. The subject PR's
+//!   own verdict pinned to its head is a different check, and stage 4 keeps
+//!   it — as do the union and the required checks behind it.
 //! - **#1100 is folded in.** The squash subject is always the PR title —
 //!   never the branch commit's own subject on a single-commit PR — and it
 //!   is validated against the commit convention before any merge executes,
@@ -81,7 +88,8 @@ pub(crate) trait Reads {
     fn pr(&self, pr: u64) -> Result<Pr>;
     /// The REST issue comments, newest-last, each with its `updated_at`.
     fn comments(&self, pr: u64) -> Result<Vec<TimedComment>>;
-    /// The fleet-wide drift walk (`edda review drift`'s own query).
+    /// The fleet-wide drift walk (`edda review drift`'s own query) — stage
+    /// 1's report, advisory since #1124.
     fn drift(&self) -> Result<(Vec<String>, bool)>;
     /// Do the ruleset's required checks pass? (`gh pr checks --required`)
     fn checks_green(&self, pr: u64) -> Result<bool>;
@@ -189,7 +197,7 @@ fn receipt_body(pr: u64, head: &str, round: &str, ci: Option<&str>) -> String {
         "Squash merge of PR #{pr}, reviewed at {head}.\n\n\
          - verdict: LGTM (P0=0, P1=0), Round {round} (§7 comment, trusted author)\n\
          - union: pass over every §7 verdict pinned to this SHA (GH-769)\n\
-         - drift: clean across the open PR set (GH-993)\n\
+         - drift: advisory, not an R6 condition — the subject PR's own gate decides (#1124)\n\
          - required checks: green\n\
          - CI Gate: {}\n",
         ci.unwrap_or("run id not resolved"),
@@ -295,8 +303,9 @@ fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<St
 
 /// The whole merge decision, one enumerated order (R6). Fail-fast on the
 /// same stages the shell refused at, for the same reasons and in the same
-/// order: drift (whole open set, GH-993) before the PR's own facts before
-/// the review's own facts before the forge's required checks.
+/// order: the drift walk (stage 1, reported since #1124 and no longer a
+/// refusal stage) before the PR's own facts before the review's own facts
+/// before the forge's required checks.
 pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
     if args.merge && args.check {
         anyhow::bail!("--merge and --check are mutually exclusive; --check is the default");
@@ -322,24 +331,22 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
             anyhow::bail!("body file not found: {path}");
         }
     }
-    // 1. Fleet-wide drift (GH-993): the whole open set, not just this PR —
-    //    the same scope pi-controller-runbook named by policy.
+    // 1. Fleet-wide drift (GH-993) — reported, never a refusal (#1124):
+    //    cross-PR drift is not an R6 condition, and while it refused, every
+    //    merge was hostage to the whole open set. The subject PR's own
+    //    verdict pinning is stage 4; a walk that cannot read is reported as
+    //    unavailable for the same reason it no longer decides anything.
     match reads.drift() {
-        Err(error) => {
-            eprintln!("verdict-drift could not read PR state ({error:#}) — refusing until it can");
-            return Ok(2);
-        }
-        Ok((lines, not_ready)) if not_ready => {
-            for line in &lines {
-                eprintln!("{line}");
+        Ok((lines, any_holds)) => {
+            let block = drift::advisory(&lines, any_holds);
+            if !block.is_empty() {
+                eprintln!("{block}");
             }
-            eprintln!(
-                "verdict-drift is not clean across the open PR set — refusing until every \
-                 open PR carries a verdict on its head (output above)"
-            );
-            return Ok(1);
         }
-        Ok(_) => {}
+        Err(error) => eprintln!(
+            "verdict-drift could not read PR state ({error:#}) — advisory unavailable; the \
+             subject PR's own gate still decides (#1124)"
+        ),
     }
     // 2. The PR's own facts.
     let pr = match reads.pr(args.pr) {
@@ -788,36 +795,69 @@ mod tests {
         assert_eq!(code, 1, "a malformed verdict comment was ignored");
     }
 
-    // case 6: an unrelated open PR with no verdict refuses everything
-    // (GH-993) — before the comments read or required checks are reached.
+    // #1124's split fixture: an open set where one unrelated PR drifted, over
+    // a subject whose own gate is green. The walk's lines still print
+    // (`drift::advisory`'s own test pins that) and no longer refuse, so the
+    // reads the shell stopped at are all reached.
     #[test]
-    fn a_dirty_open_set_refuses_before_the_prs_own_checks() {
+    fn a_dirty_open_set_is_advisory_and_the_green_subject_merges() {
         let mut fake = Fake::clean(lgtm());
         fake.drift = Ok((
-            vec!["#9001 dddddddddddd main no verdict on head".into()],
+            vec![
+                "#9001 dddddddddddd main no verdict on head".into(),
+                "#9002 eeeeeeeeeeee main LGTM".into(),
+            ],
             true,
         ));
         let code = merge_inner(&args(false), &fake).unwrap();
-        assert_eq!(code, 1);
+        assert_eq!(code, 0, "an unrelated PR's drift refused this merge");
         assert!(
-            !*fake.reached_comments.borrow(),
-            "the comment read was reached after drift already refused"
+            *fake.reached_comments.borrow(),
+            "the subject's own review was never read"
         );
         assert!(
-            !*fake.reached_checks.borrow(),
-            "required checks were queried after drift already refused"
+            *fake.reached_checks.borrow(),
+            "the subject's own required checks were never asked"
         );
     }
 
-    // case 7: the drift walk itself failing to read also refuses — a broken
-    // read must not wave every merge through clean.
+    // The other half of the split, on the same fixture shape: the walk
+    // carrying the subject's OWN stale verdict still refuses. The refusal is
+    // stage 4's R6 pinning check — where drift on the subject lives once the
+    // fleet-wide guard is advisory — not a surviving copy of the guard.
     #[test]
-    fn a_failed_drift_read_refuses() {
+    fn the_subjects_own_stale_verdict_still_refuses() {
+        let mut fake = Fake::clean(vec![review(
+            1,
+            OLDER,
+            "LGTM (P0=0, P1=0)",
+            "2026-09-08T11:00:00Z",
+        )]);
+        fake.drift = Ok((
+            vec![format!(
+                "#4242 {} main stale from {}",
+                &HEAD[..12],
+                &OLDER[..12]
+            )],
+            true,
+        ));
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 1, "the subject's own drifted verdict was merged");
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after the pinning check already refused"
+        );
+    }
+
+    // case 7: the drift walk failing to read is advisory like the walk itself
+    // (#1124) — a fleet-wide read was never the subject's R6 gate, and making
+    // it a refusal put every merge behind one unrelated PR's readability.
+    #[test]
+    fn a_failed_drift_read_is_advisory() {
         let mut fake = Fake::clean(lgtm());
         fake.drift = Err("pr list failed".into());
-        let code = merge_inner(&args(false), &fake).unwrap();
-        assert_eq!(code, 2);
-        assert!(!*fake.reached_comments.borrow());
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 0);
+        assert!(*fake.reached_checks.borrow());
     }
 
     // case 8's non-vacuous half: a clean drift state over a populated open
