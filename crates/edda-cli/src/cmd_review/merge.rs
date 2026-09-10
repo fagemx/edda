@@ -68,8 +68,12 @@ pub struct MergeArgs {
 /// precondition order is testable without the network (the same shape
 /// `delivery::Gh` took for GH-1030's "injectable gh, no network").
 pub(crate) trait Reads {
-    /// The PR's head SHA, state, and title (`gh pr view --json`).
-    fn pr(&self) -> Result<Pr>;
+    /// The PR's head SHA, state, and title (`gh pr view <pr> --json`).
+    ///
+    /// `pr` is not decoration: without it `gh` resolves the pull request of
+    /// whatever branch the cwd is on, so the gate would judge one PR and
+    /// squash another. See [`pr_argv`].
+    fn pr(&self, pr: u64) -> Result<Pr>;
     /// The REST issue comments, newest-last, each with its `updated_at`.
     fn comments(&self, pr: u64) -> Result<Vec<TimedComment>>;
     /// The fleet-wide drift walk (`edda review drift`'s own query).
@@ -250,7 +254,7 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
         Ok(_) => {}
     }
     // 2. The PR's own facts.
-    let pr = match reads.pr() {
+    let pr = match reads.pr(args.pr) {
         Ok(pr) => pr,
         Err(error) => {
             eprintln!("cannot read PR head: {error:#}");
@@ -392,17 +396,45 @@ pub fn run(args: MergeArgs, cwd: &Path) -> Result<()> {
     }
 }
 
+/// The exact `gh pr view` argv [`GhReads::pr`] shells out with, split out —
+/// and actually consumed below — for the same reason [`comments_argv`] and
+/// `drift::open_prs_argv` are (GH-1079): the argv is asserted directly.
+///
+/// The shell this replaced named the PR explicitly — the pre-adapter blob of
+/// `scripts/merge-reviewed-pr.sh` read
+/// `gh pr view "$pr" --repo "$repo" --json headRefOid,state`. Dropping the
+/// selector does not fail loudly — `gh` falls back to the pull request of the
+/// **current branch**, so from a checkout on `main` the verb exits 2, and from
+/// a worktree carrying its own PR it evaluates every precondition, and derives
+/// the squash subject (GH-1100), from a PR nobody asked about. The `Reads`
+/// seam that keeps the other 17 tests offline is exactly what hid it: a `Fake`
+/// answers whatever the fixture holds no matter what was requested. Hence this
+/// function and the test that pins its shape.
+///
+/// The repository is not a flag here: `github::command` puts `EDDA_REPO` on
+/// every `gh` child as `GH_REPO`, which `gh` honors identically to `--repo`
+/// (`github.rs:9-24`) — the same one door `comments_argv`'s `{owner}/{repo}`
+/// templates already go through.
+pub(crate) fn pr_argv(pr: u64) -> Vec<String> {
+    vec![
+        "pr".to_owned(),
+        "view".to_owned(),
+        pr.to_string(),
+        "--json".to_owned(),
+        "headRefOid,state,title".to_owned(),
+    ]
+}
+
 /// The real `gh`-backed [`Reads`].
 struct GhReads<'a> {
     cwd: &'a Path,
 }
 
 impl Reads for GhReads<'_> {
-    fn pr(&self) -> Result<Pr> {
-        let value = gh(
-            self.cwd,
-            &["pr", "view", "--json", "headRefOid,state,title"],
-        )?;
+    fn pr(&self, pr: u64) -> Result<Pr> {
+        let argv = pr_argv(pr);
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let value = gh(self.cwd, &args).with_context(|| format!("read PR #{pr}"))?;
         Ok(Pr {
             head: value["headRefOid"].as_str().unwrap_or_default().to_owned(),
             state: value["state"].as_str().unwrap_or_default().to_owned(),
@@ -537,6 +569,10 @@ mod tests {
         fail_comments: bool,
         checks_green: bool,
         merged: RefCell<Vec<(u64, String, String, String)>>,
+        /// Which PR each read was asked for — a `Fake` that shrugs at the
+        /// argument is how the missing `--pr` selector stayed invisible to
+        /// all 17 tests before it.
+        asked: RefCell<Vec<(&'static str, u64)>>,
         reached_comments: RefCell<bool>,
         reached_checks: RefCell<bool>,
     }
@@ -552,6 +588,7 @@ mod tests {
                 fail_comments: false,
                 checks_green: true,
                 merged: RefCell::new(Vec::new()),
+                asked: RefCell::new(Vec::new()),
                 reached_comments: RefCell::new(false),
                 reached_checks: RefCell::new(false),
             }
@@ -559,14 +596,16 @@ mod tests {
     }
 
     impl Reads for Fake {
-        fn pr(&self) -> Result<Pr> {
+        fn pr(&self, pr: u64) -> Result<Pr> {
+            self.asked.borrow_mut().push(("pr", pr));
             Ok(Pr {
                 head: self.head.into(),
                 state: self.state.into(),
                 title: self.title.clone(),
             })
         }
-        fn comments(&self, _pr: u64) -> Result<Vec<TimedComment>> {
+        fn comments(&self, pr: u64) -> Result<Vec<TimedComment>> {
+            self.asked.borrow_mut().push(("comments", pr));
             *self.reached_comments.borrow_mut() = true;
             if self.fail_comments {
                 return Err(anyhow::anyhow!("gh: not authenticated"));
@@ -576,7 +615,8 @@ mod tests {
         fn drift(&self) -> Result<(Vec<String>, bool)> {
             self.drift.clone().map_err(anyhow::Error::msg)
         }
-        fn checks_green(&self, _pr: u64) -> Result<bool> {
+        fn checks_green(&self, pr: u64) -> Result<bool> {
+            self.asked.borrow_mut().push(("checks", pr));
             *self.reached_checks.borrow_mut() = true;
             Ok(self.checks_green)
         }
@@ -806,6 +846,42 @@ mod tests {
             body.contains("https://github.com/fagemx/edda/runs/123"),
             "receipt must name the CI run"
         );
+    }
+
+    // ---- the PR selector every read must carry --------------------------
+
+    /// The argv itself, asserted the way `comments_argv` and `open_prs_argv`
+    /// are (GH-1079). Round 1's P0: `gh pr view --json headRefOid,state,title`
+    /// with no selector resolves the pull request of the current branch, so
+    /// the head, the OPEN state and the squash subject came from whichever PR
+    /// the cwd happened to be on.
+    #[test]
+    fn pr_argv_names_the_pull_request_it_reads() {
+        assert_eq!(
+            pr_argv(4242),
+            vec!["pr", "view", "4242", "--json", "headRefOid,state,title"]
+        );
+        // Stated separately from the equality above so the regression this
+        // guards is named where it fails: a selector-less argv is the defect,
+        // not merely a different argv.
+        assert!(
+            pr_argv(4242).contains(&"4242".to_owned()),
+            "gh would resolve the current branch's PR, not #4242"
+        );
+    }
+
+    /// …and that argv is built from the `--pr` the operator gave, not from a
+    /// constant: every read in the enumerated order is asked for the same PR.
+    #[test]
+    fn every_read_is_asked_for_the_requested_pr() {
+        let fake = Fake::clean(lgtm());
+        assert_eq!(merge_inner(&args(true), &fake).unwrap(), 0);
+        assert_eq!(
+            *fake.asked.borrow(),
+            vec![("pr", 4242), ("comments", 4242), ("checks", 4242)],
+            "a precondition was evaluated against a PR other than --pr"
+        );
+        assert_eq!(fake.merged.borrow()[0].0, 4242, "squashed the wrong PR");
     }
 
     #[test]
