@@ -19,7 +19,9 @@ if [ "${1:-}" = --help ]; then
   echo '  --check (default) validates only. --merge squash-merges with the subject'
   echo '  ALWAYS pinned to the PR title via --subject (GH-1100), validated against the'
   echo '  conventional commit rule (REVIEW.md §5 U4) before any merge: a wip(...),'
-  echo '  empty-scope, or missing-type title refuses. The merge body comes from'
+  echo '  empty-scope, or missing-type title refuses. The " (#N)" PR back-reference'
+  echo '  GitHub only adds to a subject it picks itself is appended here instead, so'
+  echo '  the squash commit keeps its PR pointer. The merge body comes from'
   echo '  --body-file, or is composed as a receipt (reviewed SHA, review round, CI run).'
   exit 0
 fi
@@ -37,6 +39,10 @@ while [ "$#" -gt 0 ]; do
     --check|--merge) action=$1 ;;
     --body-file)
       [ "$#" -ge 2 ] || die '--body-file requires a path'
+      # An empty operand used to slip through as "no body file": the -z test
+      # below short-circuits on it, so `--body-file ''` silently composed a
+      # receipt while every other malformed operand refused. Refuse here too.
+      [ -n "$2" ] || die '--body-file requires a non-empty path'
       body_file=$2
       shift
       ;;
@@ -45,6 +51,9 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 [ -z "$body_file" ] || [ -f "$body_file" ] || die "body file not found: $body_file"
+# --body-file only has a reader on the merge path. Accepting it under --check
+# and then ignoring it tells the caller their body was taken when it was not.
+[ -z "$body_file" ] || [ "$action" = --merge ] || die '--body-file applies to --merge only'
 repo=${EDDA_REPO:-fagemx/edda}
 printf '%s\n' "$repo" | grep -qE '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$' || die 'invalid repository'
 # GH-993: a completed review round must reach the PR regardless of transport
@@ -219,7 +228,7 @@ if [ "$action" = --merge ]; then
     ci_link=$(printf '%s\n' "$checks_json" | jq -r 'map(.link // empty) | map(select(length > 0)) | (first // "")') || ci_link=''
     [ -n "$ci_link" ] || die 'no check run link found for the merge body'
     merge_body=$(mktemp "${TMPDIR:-/tmp}/merge-reviewed-pr-body.XXXXXX") || die 'cannot create the merge body file'
-    trap 'rm -f "$merge_body"' 0
+    trap 'rm -f "$merge_body"' 0 HUP INT TERM
     {
       printf 'Squash merge via scripts/merge-reviewed-pr.sh.\n\n'
       printf '%s\n' "- Reviewed SHA: $head"
@@ -227,5 +236,27 @@ if [ "$action" = --merge ]; then
       printf '%s\n' "- CI: $ci_link"
     } >"$merge_body"
   fi
-  gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$head" --subject "$subject" --body-file "$merge_body"
+  # GH-1100 Round 2: GitHub appends the ` (#N)` PR back-reference only to a
+  # squash subject IT chooses; a subject supplied through --subject is used
+  # verbatim, with no suffix. Pinning the title without re-adding the suffix
+  # would therefore strip the PR pointer from every future squash commit on
+  # main — measured, not theorised: of the last 60 subjects on main, 58 carry
+  # ` (#N)` and the only two that do not are exactly the two merged by hand
+  # with an explicit --subject. R7 forbids rewriting main, so each such commit
+  # would stay pointer-less forever. Compose what GitHub would have written.
+  #
+  # $subject stays the bare title: the U4 check above judges the title alone,
+  # never the title-plus-suffix, so a trailing ` (#N)` can neither rescue a
+  # bad title nor break a good one.
+  #
+  # The suffix is skipped only when the title already ends in THIS PR's own
+  # number — the one case where appending would duplicate it. A title ending
+  # in some OTHER PR's number still gets ` (#$pr)` appended: leaving a foreign
+  # number as the trailing back-reference would point `git log` at an
+  # unrelated PR, which is worse than a title that reads `… (#999) (#$pr)`.
+  merge_subject="$subject (#$pr)"
+  case "$subject" in
+    *" (#$pr)") merge_subject=$subject ;;
+  esac
+  gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$head" --subject "$merge_subject" --body-file "$merge_body"
 fi
