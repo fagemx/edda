@@ -244,7 +244,8 @@
 
 7. **合併**（規則閘綠即可執行，任何控制者皆可、冪等；`docs/fleet/rules.md` R6）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過；它另外會問一次聯集判決（GH-1057，經 `edda review deliver`），該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。檢查通過後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 
-   **`merge-reviewed-pr.sh` 收不到 squash 訊息（#1100）**——它到 `:177` 為止都是
+   **`merge-reviewed-pr.sh` 收不到 squash 訊息（#1100）**——它到
+   `scripts/merge-reviewed-pr.sh:177` 為止都是
    `gh pr merge … --squash --match-head-commit "$head"`，沒有 `--subject`、沒有 `--body-file`。
    所以最後那一下要自己打。**但檢查那一半不可以自己重寫**：
 
@@ -260,8 +261,8 @@
    ```
 
    **不帶 `--merge` 跑 `merge-reviewed-pr.sh` 是必經的一步，不是可選的建議。** 它做了手打
-   `gh pr merge` 不會做的事：可信 LGTM 與 escalations 檢查（`:82-86`）、以及
-   **union 拒絕**（`:158-174`,要求 `union_state == success` 且 `malformed == 0`）。
+   `gh pr merge` 不會做的事：可信 LGTM 與 escalations 檢查（`scripts/merge-reviewed-pr.sh:82-86`）、以及
+   **union 拒絕**（`scripts/merge-reviewed-pr.sh:158-174`，要求 `union_state == success` 且 `malformed == 0`）。
    R6 明說 union 是「merge script 擋，機器閘本身不擋」——`CI Gate` 不看 union，
    `edda review deliver` 也不能代替（該腳本自己的註解寫明它的 exit code 刻意不是閘）。
    **#1055 與 #570 就是從這個洞合進去的。** 跳過這一步再手打 merge，等於把那個洞重新打開。
@@ -277,7 +278,8 @@
      那張表只反映**已經存在**的連結（多半來自 PR body）。實例：#1112 合併時 #1031 被關掉，
      GitHub 的 `ClosedEvent.closer` 指的是 **Commit `3fbf08a`**（squash 訊息）而不是 PR，
      開槍的字串是控制者敘事裡的一句 **`can fix GH-1031`**——而那句話的意思是「**不能**修好它」。
-     **否定沒有用，`GH-N` 形式跟 `#N` 一樣算數**（本專案早在 #488 就記過這條）。
+     **否定沒有用，而且 `GH-N` 形式跟 `#N` 一樣算數。** 前半這個專案踩過——一句「does not
+     close #488」把 #488 關掉了；後半是 2026-09-09 在 PR #1112 上量到的，先前沒有記錄。
      所以掃的樣式要涵蓋兩種形式、不分大小寫、不錨行首，而且要掃散文中間：
      `grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+'`。
      敘事型的 merge body 特別危險——「Round 1 證明它**不能** fix GH-N」這種句子正中解析器。
@@ -288,9 +290,13 @@
      **合併前**查 `<審過的 SHA>..origin/main`——「判決釘住的那棵樹跟 main 之間是不是空的」，
      這是 R6 與 `.claude/CLAUDE.md` item 9 列的**合併前置條件之一**，合併的 session 要把結果
      記進 PR；`main` 曾獨立動過同一批路徑時改用 `fleet.lgtm-merges` 的 squash-vs-diff 形式。
-     **`merge-reviewed-pr.sh` 刻意不做這一步**（`:5-12` 的註解寫明「The window step is
+     **`merge-reviewed-pr.sh` 刻意不做這一步**（`scripts/merge-reviewed-pr.sh:119-127` 的註解寫明「The window step is
      deliberately NOT wired here」），所以手打 merge 的人自己補，而且要補在 `gh pr merge`
      **之前**。合併後再跑一次同一條 diff 是確認，不是那個前置條件。
+     **而且這條 diff 會假陽性**：`main` 可能在分支之後獨立動過同一批路徑——PR #915 就報過
+     6 行差異，實際是別張 PR 的文字在它分支之後落地（`fleet.lgtm-merges`）。非空時不要
+     直接判定漂移，改比 squash 自己的 diff 與從 merge base 起的審查 diff：
+     `git show <squash>` 對 `git diff <merge-base>..<審過的 SHA>`。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009）：
    先看 dry-run —— `sh scripts/fleet/reclaim-merged.sh`。每個 worktree／local branch／remote

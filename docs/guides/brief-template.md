@@ -158,7 +158,9 @@ item nobody has been burned by does not belong here.
    `ClosedEvent.closer` names `Commit 3fbf08a` for it and `PullRequest 1112` for the
    other — and the string that fired was `can fix GH-1031`, inside a sentence saying
    a change did **not** fix it. Negation does not disarm the parser and `GH-N` counts
-   exactly as `#N` does; this repository recorded that once already, from #488.
+   exactly as `#N` does. The first half this project has met before — a sentence reading
+   "does not close #488" closed #488. The second half was measured on PR #1112 on
+   2026-09-09 and was not recorded anywhere before that.
 
    So scan both forms, unanchored, case-insensitive, in running prose rather than
    trailer lines only:
