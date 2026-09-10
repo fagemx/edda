@@ -66,10 +66,12 @@ pub fn machine_identity() -> Option<String> {
 /// the permissive label chain.
 ///
 /// Reads through [`crate::env_var`] for the same reason as
-/// [`machine_identity`], and one more: four pre-existing `write_heartbeat`
-/// tests pass `label: None` and so reach this predicate, while libtest runs
-/// every `#[test]` as a thread in one process — a test that set
-/// `EDDA_MACHINE` process-wide would flip their labels out from under them.
+/// [`machine_identity`], and one more: three pre-existing tests in
+/// `peers::tests` call `write_heartbeat` with no label, across four call
+/// sites, and so reach this predicate — while libtest runs every test fn as
+/// a thread in one process, so a test that set `EDDA_MACHINE` process-wide
+/// would flip their labels out from under them. They are named in
+/// `tests_tail_gh671`'s first test, which is where that history is kept.
 pub(crate) fn fleet_session() -> bool {
     crate::env_var("EDDA_MACHINE").is_some_and(|v| !v.trim().is_empty())
 }

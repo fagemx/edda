@@ -13,11 +13,12 @@ use super::*;
 /// - `fresh_session_receives_requests_addressed_to_its_branch`
 /// - `two_fresh_sessions_on_one_branch_do_not_block_each_other`
 ///
-/// They are named rather than cited by line: adding the guards below shifted
-/// those line numbers once already, and a stale citation reads as a stale
-/// warning. Each reaches `env_label()` and `fleet_session()` on exactly the
-/// chain these tests drive, so a process-wide mutation here flipped two of
-/// them to the sid fallback whenever they were scheduled inside the window.
+/// They are named rather than cited by line: adding their guards in
+/// `peers/tests.rs` shifted those line numbers once already, and a stale
+/// citation reads as a stale warning. Each reaches `env_label()` and
+/// `fleet_session()` on exactly the chain these tests drive, so a
+/// process-wide mutation here flipped two of them to the sid fallback
+/// whenever they were scheduled inside the window.
 /// A thread-local override is invisible to them, and to every other thread
 /// in the binary.
 #[test]
