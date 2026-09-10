@@ -91,9 +91,9 @@ pub(crate) trait Reads {
     fn pr(&self, pr: u64) -> Result<Pr>;
     /// The REST issue comments, newest-last, each with its `updated_at`.
     fn comments(&self, pr: u64) -> Result<Vec<TimedComment>>;
-    /// The fleet-wide drift walk (`edda review drift`'s own query) — stage
-    /// 1's report: every line prints, and `Report::holds(subject)` decides
-    /// the one refusal left in it (#1124).
+    /// The fleet-wide drift walk (`edda review drift`'s own query). Stage 1
+    /// prints every line of it and refuses on none of it (#1124): the subject
+    /// PR's own hold is read from the subject, further down the stages.
     fn drift(&self) -> Result<drift::Report>;
     /// Do the ruleset's required checks pass? (`gh pr checks --required`)
     fn checks_green(&self, pr: u64) -> Result<bool>;
@@ -211,6 +211,52 @@ fn receipt_body(pr: u64, head: &str, round: &str, ci: Option<&str>) -> String {
          - CI Gate: {}\n",
         ci.unwrap_or("run id not resolved"),
     )
+}
+
+/// R24's mergeability condition on the subject (GH-1124 Rounds 2-3): a
+/// `CONFLICTING` PR must not be reported ready — `--check` is that report —
+/// and an unreadable answer is never a green one. The match is exhaustive
+/// over the three values GitHub returns; everything else, including a missing
+/// or non-string field (both parse as an empty string), is exit 2. `UNKNOWN`,
+/// returned before GitHub has computed mergeability, is not a hold, matching
+/// the walk's own rule. Read on the subject, so a fleet walk that cannot read
+/// cannot hide it. `Err(exit_code)` after printing the refusal.
+fn mergeability_refusal(pr: u64, mergeable: &str) -> Result<(), i32> {
+    match mergeable {
+        "MERGEABLE" | "UNKNOWN" => Ok(()),
+        "CONFLICTING" => {
+            eprintln!(
+                "PR #{pr} is CONFLICTING — R24 requires mergeable != CONFLICTING before a PR \
+                 is reported ready; refusing (#1124)"
+            );
+            Err(1)
+        }
+        other => {
+            eprintln!(
+                "cannot read PR #{pr}'s mergeability (gh reported {other:?}) — an unread \
+                 answer is never a green one; refusing (#1124, R24)"
+            );
+            Err(2)
+        }
+    }
+}
+
+/// GH-993's orphan Review Response hold, decided by the walk's own reducer
+/// over the subject's own comments: a `## Review Response: Round N` answering
+/// a round that was never posted. The same rule the walk applies, without a
+/// second read and without depending on the walk completing (#1124 Round 2).
+/// `Err(1)` after printing the refusal.
+fn orphan_response_refusal(pr: u64, head: &str, comments: &[Comment]) -> Result<(), i32> {
+    match drift::reduce(head, comments).1 {
+        Some(round) => {
+            eprintln!(
+                "PR #{pr} carries an orphan Review Response for Round {round} — a response to \
+                 a round that was never posted (GH-993); refusing (#1124)"
+            );
+            Err(1)
+        }
+        None => Ok(()),
+    }
 }
 
 /// The latest trusted §7 review's own four checks, in the shell's order:
@@ -375,18 +421,10 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
         eprintln!("invalid PR head {}", pr.head);
         return Ok(2);
     }
-    // R24: `mergeable` must not be CONFLICTING when a PR is reported ready,
-    // and `--check` is that report. Read on the subject, not inferred from
-    // the fleet walk, whose unreadability must not be able to hide it
-    // (#1124 Round 2). `UNKNOWN` — GitHub has not computed it yet — is not a
-    // hold, matching the walk's own rule (`drift::holds`).
-    if pr.mergeable == "CONFLICTING" {
-        eprintln!(
-            "PR #{} is CONFLICTING — R24 requires mergeable != CONFLICTING before a PR is \
-             reported ready; refusing (#1124)",
-            args.pr
-        );
-        return Ok(1);
+    // R24's mergeability condition, read on the subject rather than inferred
+    // from the fleet walk (#1124 Rounds 2-3).
+    if let Err(code) = mergeability_refusal(args.pr, &pr.mergeable) {
+        return Ok(code);
     }
     // 3. The verdict comments the union and the review checks read.
     let timed = match reads.comments(args.pr) {
@@ -398,18 +436,10 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
     };
     let comments: Vec<Comment> = timed.iter().map(|t| t.comment.clone()).collect();
 
-    // 3b. The subject's own orphan Review Response — GH-993's other hold: a
-    //     response answering a round that was never posted. Decided by the
-    //     walk's own reducer over the subject's own comments, so the rule is
-    //     the same one the walk applies and it needs no second read
+    // 3b. GH-993's other hold, decided over the subject's own comments
     //     (#1124 Round 2).
-    if let Some(round) = drift::reduce(&pr.head, &comments).1 {
-        eprintln!(
-            "PR #{} carries an orphan Review Response for Round {round} — a response to a \
-             round that was never posted (GH-993); refusing (#1124)",
-            args.pr
-        );
-        return Ok(1);
+    if let Err(code) = orphan_response_refusal(args.pr, &pr.head, &comments) {
+        return Ok(code);
     }
 
     // 4. The latest trusted §7 review's own checks.
@@ -891,6 +921,32 @@ mod tests {
             !*fake.reached_checks.borrow(),
             "required checks were queried after the subject's own hold already refused"
         );
+    }
+
+    // Round 3's P0: a missing or non-string `mergeable` parses as an empty
+    // string, which is not the string CONFLICTING — so an exact comparison
+    // let an unread answer through. Anything outside GitHub's three values is
+    // now exit 2, and `UNKNOWN` stays a non-conflict.
+    #[test]
+    fn an_unreadable_mergeability_refuses() {
+        let mut fake = Fake::clean(lgtm());
+        fake.mergeable = "";
+        assert_eq!(
+            merge_inner(&args(false), &fake).unwrap(),
+            2,
+            "an unread mergeability answer was treated as green"
+        );
+        assert!(
+            !*fake.reached_comments.borrow(),
+            "the refusal came after the review reads"
+        );
+    }
+
+    #[test]
+    fn an_unknown_mergeability_is_not_a_conflict() {
+        let mut fake = Fake::clean(lgtm());
+        fake.mergeable = "UNKNOWN";
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 0);
     }
 
     // Round 1's P0 (a CONFLICTING subject must not be reported ready) fixed
