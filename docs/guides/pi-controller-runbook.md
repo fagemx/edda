@@ -122,7 +122,7 @@ verdict on the SHA. Anything else waits for the operator.
 ## 回報
 
 - 給操作者的報告是 `sh scripts/fleet/daily-digest.sh --board 888` 的輸出，不是手寫摘要（rules.md R24）。
-- 宣稱任何一張 PR 完成之前先跑 `sh scripts/fleet/verdict-drift.sh`；它 exit 1 就沒有一張 PR 可以被稱作完成。
+- 宣稱任何一張 PR 完成之前先跑 `edda review drift`；它 exit 1 就沒有一張 PR 可以被稱作完成。`scripts/fleet/verdict-drift.sh` 還在，是一行適配器（GH-1105），舊呼叫不變。
 - `mergeStateStatus` 不是就緒訊號：ruleset 只保護 `main`，base 不是 `main` 的 PR 在零判決時回報 CLEAN（來源 #914）。
 
 ## Pointers

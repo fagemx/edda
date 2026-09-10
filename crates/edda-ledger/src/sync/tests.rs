@@ -437,6 +437,151 @@ fn mirror_parse_unescapes_value_and_reason() {
     );
 }
 
+#[test]
+fn mirror_parse_preserves_raw_pre_1017_literal_backslash_backtick() {
+    // b10c392 unescaped these bytes and returned `literal`tick`, losing `\`.
+    let raw = concat!(
+        "## `legacy.raw`\n",
+        "- **Value**: `literal\\`tick`\n",
+        "- **event_id**: `evt_legacy`\n",
+    );
+    let parsed = parse_domain_markdown("legacy", raw).unwrap();
+    assert_eq!(parsed[0].row.value, "literal\\`tick");
+}
+
+#[test]
+fn mirror_parse_preserves_raw_pre_1017_trailing_backslash_list_item() {
+    // b10c392's escape-aware split returned one merged item: `` a`, `b ``.
+    let raw = concat!(
+        "## `legacy.raw`\n",
+        "- **Value**: `raw`\n",
+        "- **Affected paths**: `a\\`, `b`\n",
+        "- **event_id**: `evt_legacy`\n",
+    );
+    let parsed = parse_domain_markdown("legacy", raw).unwrap();
+    let paths: Vec<String> = serde_json::from_str(&parsed[0].row.affected_paths).unwrap();
+    assert_eq!(paths, vec!["a\\".to_string(), "b".to_string()]);
+}
+
+#[test]
+fn mirror_parse_uses_shape_to_disambiguate_the_same_field_bytes() {
+    // In an escaped-era file these bytes encode a content backtick. The
+    // required post-#1017 fields distinguish this from the raw fixture above,
+    // where the same bytes mean a literal backslash followed by a backtick.
+    let escaped = concat!(
+        "## `escaped`\n\n",
+        "- **Value**: `literal\\`tick`\n",
+        "- **Scope**: local\n",
+        "- **Authority**: agent\n",
+        "- **event_id**: `evt_escaped`\n",
+    );
+    let parsed = parse_domain_markdown("escaped", escaped).unwrap();
+    assert_eq!(parsed[0].row.value, "literal`tick");
+}
+
+#[test]
+fn mirror_parse_ignores_prose_when_detecting_encoding() {
+    let raw = concat!(
+        "## Prose about `mirror fields`\n",
+        "- **Scope**: prose, not a decision field\n",
+        "- **Authority**: prose, not a decision field\n",
+        "## `legacy.raw`\n",
+        "- **Value**: `literal\\`tick`\n",
+        "- **event_id**: `evt_legacy`\n",
+    );
+    assert_eq!(
+        parse_domain_markdown("legacy", raw).unwrap()[0].row.value,
+        "literal\\`tick"
+    );
+}
+
+#[test]
+fn mirror_parse_rejects_malformed_headings() {
+    for malformed in [
+        "# Domain: `broken\n## `key`\n- **Value**: `v`\n- **event_id**: `e`\n",
+        "## `broken\n- **Value**: `v`\n- **event_id**: `e`\n",
+    ] {
+        let error = parse_domain_markdown("legacy", malformed)
+            .err()
+            .expect("malformed heading must fail closed");
+        assert!(error.to_string().contains("malformed mirror heading"));
+    }
+}
+
+#[test]
+fn mirror_import_fails_closed_on_partial_or_mixed_encoding_before_writes() {
+    let shapes = [
+        concat!(
+            "## `partial`\n- **Value**: `v`\n- **Scope**: local\n",
+            "- **event_id**: `evt_partial`\n",
+        ),
+        concat!(
+            "## `raw`\n- **Value**: `v`\n- **event_id**: `evt_raw`\n",
+            "## `escaped`\n- **Value**: `v`\n- **Scope**: local\n",
+            "- **Authority**: agent\n- **event_id**: `evt_escaped`\n",
+        ),
+    ];
+    for (n, text) in shapes.into_iter().enumerate() {
+        let (tmp, target) = setup_workspace();
+        let mirror = tmp.join(format!("mixed-{n}"));
+        std::fs::create_dir_all(mirror.join("decisions")).unwrap();
+        std::fs::write(mirror.join("INDEX.md"), "- **Exporting machine**: test\n").unwrap();
+        std::fs::write(mirror.join("decisions/test.md"), text).unwrap();
+
+        let source = MirrorSource { mirror_dir: mirror };
+        // The refusal is now contained to the file and reported (GH-1044 F13)
+        // rather than aborting the import — but it is still a refusal: not one
+        // row of an unclassifiable shape reaches the ledger.
+        let r = sync_from_mirror(&target, &source, false).unwrap();
+        assert_eq!(r.errors.len(), 1, "the refusal is reported, not swallowed");
+        assert!(r.errors[0].error.contains("ambiguous mirror encoding"));
+        assert!(r.imported.is_empty());
+        assert!(target
+            .active_decisions(None, None, None, None)
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+}
+
+#[test]
+fn mirror_import_contains_one_unparseable_file_instead_of_aborting_the_mirror() {
+    // The raw (pre-#1017) writer rendered the heading as `## `{key}`` with the
+    // key verbatim (`3306c1a^:crates/edda-cli/src/cmd_export.rs:125`), so a
+    // legacy key holding a newline emits a heading with no closing backtick.
+    // Before this fix `parse_mirror`'s `?` let that one file abort every other
+    // domain in the mirror, and SessionStart's `.ok()?` swallowed the error —
+    // cross-machine sync died silently and retried identically forever.
+    let (tmp, target) = setup_workspace();
+    let index = index_body_with_stamp("2026-09-09T00:00:00Z", "4090");
+    let mirror = write_mirror_tree(&tmp.join("_mirror"), &index);
+    // Sorts before `fleet.md`, so the refusal is reached first.
+    std::fs::write(
+        mirror.join("decisions/aaa-legacy.md"),
+        "## `legacy\nkey`\n- **Value**: `v`\n- **event_id**: `evt_legacy`\n",
+    )
+    .unwrap();
+
+    let source = MirrorSource { mirror_dir: mirror };
+    let r = sync_from_mirror(&target, &source, false).unwrap();
+
+    assert_eq!(r.imported.len(), 2, "the parseable domain still imports");
+    assert_eq!(r.errors.len(), 1, "the refusal is reported, not swallowed");
+    assert_eq!(r.errors[0].project_name, "aaa-legacy");
+    assert!(r.errors[0].error.contains("malformed mirror heading"));
+    // Base read this heading as `strip_suffix('`').unwrap_or(rest)` and would
+    // have imported the truncated key. Refusing means refusing, not guessing.
+    assert!(
+        target
+            .sqlite
+            .find_active_decision("main", "legacy")
+            .unwrap()
+            .is_none(),
+        "nothing from the refused file is imported as if it parsed"
+    );
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
 /// Every caller-supplied field in its escaped form (GH-671 R5) — not only
 /// Value and Reason. `\n` here is the two-character escape the export writes,
 /// never a real line break; a real one would make the line below it a
@@ -681,4 +826,164 @@ fn mirror_dry_run_writes_nothing() {
     assert!(decisions.is_empty(), "dry run must not write");
 
     let _ = std::fs::remove_dir_all(&tmp_tgt);
+}
+
+// ── GH-1044: `backtick_list` / `unescape_field` backtick handling ──────
+//
+// `edda-ledger` cannot call the real `cmd_export::escape_field` (it lives in
+// `edda-cli`, which depends on `edda-ledger`, not the reverse), so
+// `mirror_escape` below is a deliberate, documented duplicate of it, used
+// only to CONSTRUCT test input the same way the real writer would — every
+// assertion is still against `backtick_list`/`unescape_field`, the read
+// side. Building `rendered` with this helper (rather than hand-encoded
+// string literals) keeps each test's intent checkable by inspection instead
+// of by counting backslashes. The full write-then-read pipeline is
+// exercised end-to-end by `export_import_round_trip_is_total_for_backticks`
+// in `edda-cli::cmd_export`; these pin the read side alone, in isolation, so
+// a failure here points at `backtick_list`/`unescape_field` directly rather
+// than somewhere in the round trip.
+
+/// Duplicate of `edda-cli::cmd_export::escape_field` — see the module
+/// comment above for why this crate cannot call the original directly. Keep
+/// in sync with it by hand; a divergence here would make these tests assert
+/// against a writer the real code no longer has.
+fn mirror_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('`', "\\`")
+}
+
+/// `["a", "b", ...]` → the exact `` `a`, `b` `` markdown `backtick_list`
+/// reads, each item escaped and wrapped the way `render_domain` does.
+fn mirror_list(items: &[&str]) -> String {
+    items
+        .iter()
+        .map(|it| format!("`{}`", mirror_escape(it)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[test]
+fn backtick_list_ordinary_items_unchanged() {
+    // Regression: no backticks involved, must split exactly as before.
+    assert_eq!(
+        backtick_list(
+            &mirror_list(&["sqlite", "postgres"]),
+            MirrorEncoding::Escaped,
+        ),
+        vec!["sqlite".to_string(), "postgres".to_string()]
+    );
+    assert_eq!(
+        backtick_list(&mirror_list(&["solo"]), MirrorEncoding::Escaped),
+        vec!["solo".to_string()]
+    );
+    assert_eq!(
+        backtick_list("", MirrorEncoding::Escaped),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn backtick_list_does_not_split_on_embedded_separator_sequence() {
+    // GH-1044, the exact reported defect: a single tag whose value is
+    // `a`, `b` — i.e. it contains the raw four-byte sequence "`, `" that
+    // `backtick_list` splits list items on. One item in, one item out.
+    let item = "a`, `b";
+    assert_eq!(
+        backtick_list(&mirror_list(&[item]), MirrorEncoding::Escaped),
+        vec![item.to_string()]
+    );
+}
+
+#[test]
+fn backtick_list_recovers_leading_and_trailing_backtick_items() {
+    // GH-1044's secondary hole: once backticks are escaped, an item whose
+    // escaped form is adjacent to the list's own wrapping delimiter must not
+    // have that delimiter's greedy removal eat the escaped backtick's bare
+    // half too.
+    assert_eq!(
+        backtick_list(&mirror_list(&["`leading"]), MirrorEncoding::Escaped),
+        vec!["`leading".to_string()]
+    );
+    assert_eq!(
+        backtick_list(&mirror_list(&["trailing`"]), MirrorEncoding::Escaped),
+        vec!["trailing`".to_string()]
+    );
+}
+
+#[test]
+fn backtick_list_multi_item_mixes_edge_and_embedded_backticks() {
+    // Four items in one list, each exercising a different edge of the
+    // GH-1044 hole: embedded separator-lookalike, leading backtick, trailing
+    // backtick, and one plain item as a control.
+    let items = ["a`, `b", "`leading", "trailing`", "plain"];
+    assert_eq!(
+        backtick_list(&mirror_list(&items), MirrorEncoding::Escaped),
+        items.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn backtick_list_item_ending_in_backtick_comma_space_does_not_corrupt_the_next_item() {
+    // GH-1044 Round 1 P0 (re-derived independently from the review, not
+    // copied): escaping a content backtick makes it distinguishable *to
+    // `unescape_field`* — it is preceded by a backslash — but does nothing
+    // for a plain `split`, which matches four literal bytes and never looks
+    // at what precedes them. An item whose value ends in exactly backtick,
+    // comma, space renders (escaped) as `` a\`,  `` — so the escaped
+    // backtick's own bare half sits immediately before that same item's
+    // trailing ", " and the wrapper's closing backtick, and a leftmost,
+    // non-overlapping `split("`, `")` matches one byte too early, starting
+    // at the *content* backtick instead of the wrapper one.
+    //
+    // Two items, `` a`, `` (a, backtick, comma, space) and `b` — rendered:
+    //
+    //   ` a \ ` ,  ` , ` b `
+    //   0 1 2 3 4 5 6 7 8 9 10 11        (12 bytes)
+    //         ^wrap-open(3=esc.bt)  ^wrap-close(6)   ^wrap-open(9)
+    //
+    // After the outer strip, `inner = a \ ` , ␣ ` , ␣ ` b`. The leftmost
+    // `` `,  ` `` match starts at inner[2] (the escaped content backtick),
+    // consuming inner[2..6] — the item's own ", " *and* the wrapper's
+    // closing backtick — before the genuine delimiter at inner[5..9] is
+    // ever reached. Pre-fix this produced `["a\\", ", `b"]`: item 1 loses
+    // its trailing comma and gains a dangling backslash, item 2 gains a
+    // leading ", `" stolen from item 1. Both values land corrupted in the
+    // ledger import payload — silently, since `backtick_list` cannot fail.
+    //
+    // The expected value below is `"a`,"`, not `"a`, "`: `backtick_list`'s
+    // own `.trim()` drops the trailing space regardless of this fix — a
+    // separate, pre-existing whitespace-loss limitation tracked outside
+    // GH-1044 (see the reviewer's FOLLOW-UP ISSUE on PR #1108 Round 1), not
+    // something this test conflates with the split corruption above.
+    let items = ["a`, ", "b"];
+    assert_eq!(
+        backtick_list(&mirror_list(&items), MirrorEncoding::Escaped),
+        vec!["a`,".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
+fn unescape_field_inverts_escaped_backtick() {
+    for original in ["a`b", "`lead", "trail`", "``double``"] {
+        assert_eq!(
+            unescape_field(&mirror_escape(original)),
+            original,
+            "round trip for {original:?}"
+        );
+    }
+    // Backslash-first ordering (matches `escape_field`): a real backslash
+    // immediately before a real backtick — `mirror_escape` doubles the
+    // backslash before it escapes the backtick — must round-trip whole, not
+    // be misread as one already-escaped unit that swallows the backtick.
+    let original = "a\\`b"; // a, backslash, backtick, b
+    assert_eq!(unescape_field(&mirror_escape(original)), original);
+}
+
+#[test]
+fn unescape_field_unknown_escape_passes_through_unchanged() {
+    // Escaped-era back-compat (doneWhen #3): an unrelated unknown escape
+    // must still pass through unchanged. Raw-era fields bypass unescaping
+    // entirely, as the direct legacy fixture above verifies.
+    assert_eq!(unescape_field("\\p"), "\\p");
 }

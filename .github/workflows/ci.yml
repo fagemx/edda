@@ -113,7 +113,7 @@ jobs:
       # installs it and prints it, so the log records which compiler ran.
       - run: rustup show
       - run: cargo fmt --check
-      - run: sh -n install.sh scripts/lint-markdown-content.sh
+      - run: sh -n install.sh scripts/lint-markdown-content.sh scripts/merge-reviewed-pr.sh scripts/fleet/verdict-drift.sh
       - run: bash -n scripts/lint-file-length.sh
       - name: Lint file length (GH-779)
         run: bash scripts/lint-file-length.sh --tree
