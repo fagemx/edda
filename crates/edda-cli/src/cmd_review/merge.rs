@@ -22,8 +22,11 @@
 //!   delivers its own round.
 //! - **#1100 is folded in.** The squash subject is always the PR title —
 //!   never the branch commit's own subject on a single-commit PR — and it
-//!   is validated against the commit convention before any merge executes.
-//!   The merge body comes from `--body-file`, or a minimal gate receipt is
+//!   is validated against the commit convention before any merge executes,
+//!   then carries the ` (#N)` back-reference GitHub suppresses whenever
+//!   `--subject` is supplied ([`merge_subject`]). The merge body comes from
+//!   `--body-file` — which refuses an empty operand and refuses outside
+//!   `--merge`, the only path that reads it — or a minimal gate receipt is
 //!   composed naming the reviewed SHA, the LGTM round and the CI run.
 //!
 //! ## The window step
@@ -134,6 +137,35 @@ pub(crate) fn subject_problem(title: &str) -> Option<String> {
         return Some("the description after ': ' is empty".into());
     }
     None
+}
+
+/// The squash subject GitHub itself would have written (GH-1100 Round 2).
+///
+/// GitHub appends the ` (#N)` PR back-reference only to a squash subject IT
+/// chooses; a subject handed to `gh pr merge --subject` is used verbatim,
+/// with no suffix. Pinning the title through `--subject` and stopping there
+/// therefore strips the PR pointer from every squash commit that lands on
+/// `main` — measured on #1118, not theorised: of the last 60 subjects on
+/// `main`, 58 carry ` (#N)`, and the only two that do not are exactly the two
+/// merged by hand with an explicit `--subject`. R7 forbids rewriting `main`,
+/// so each such commit would stay pointer-less forever. Compose what GitHub
+/// would have written instead.
+///
+/// The append is skipped only when the title already ends in THIS PR's own
+/// number — the one case where appending would duplicate it. A title ending
+/// in some OTHER PR's number still gets ` (#pr)` appended: leaving a foreign
+/// number standing as the trailing back-reference would point `git log` at an
+/// unrelated PR, which is worse than a subject reading `… (#999) (#pr)`.
+///
+/// [`subject_problem`] judges the bare title, never this: a trailing ` (#N)`
+/// can neither rescue a bad title nor break a good one.
+pub(crate) fn merge_subject(title: &str, pr: u64) -> String {
+    let back_reference = format!(" (#{pr})");
+    if title.ends_with(&back_reference) {
+        title.to_owned()
+    } else {
+        format!("{title}{back_reference}")
+    }
 }
 
 /// Is this the §7 `- escalations: none` line the merge gate requires?
@@ -269,6 +301,27 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
     if args.merge && args.check {
         anyhow::bail!("--merge and --check are mutually exclusive; --check is the default");
     }
+    // `--body-file`'s own two refusals, ported with the rest of #1100 and
+    // decided here, before any read, exactly where the shell decided them.
+    //
+    // An empty operand short-circuited the shell's `-f` test and read as "no
+    // body file", so the one malformed operand that did not refuse was the
+    // emptiest; and only the merge path ever opens the file, so accepting it
+    // under `--check` told the caller their body had been taken when nothing
+    // would ever read it. The existence check joins them because a typo'd
+    // path should cost an error message, not the whole fleet-wide drift walk
+    // that stage 1 is about to run.
+    if let Some(path) = &args.body_file {
+        if path.is_empty() {
+            anyhow::bail!("--body-file requires a non-empty path");
+        }
+        if !args.merge {
+            anyhow::bail!("--body-file applies to --merge only; --check reads no body");
+        }
+        if !Path::new(path).is_file() {
+            anyhow::bail!("body file not found: {path}");
+        }
+    }
     // 1. Fleet-wide drift (GH-993): the whole open set, not just this PR —
     //    the same scope pi-controller-runbook named by policy.
     match reads.drift() {
@@ -371,6 +424,10 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
         );
         return Ok(1);
     }
+    // …and only then composed, so the convention check above judged the bare
+    // title and this carries the back-reference `--subject` would otherwise
+    // suppress (GH-1100 Round 2).
+    let subject = merge_subject(&pr.title, args.pr);
 
     // 8. The merge body: the operator's file, or the composed receipt.
     let body_text = match &args.body_file {
@@ -390,7 +447,7 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
     };
 
     if args.merge {
-        if let Err(error) = reads.squash(args.pr, &pr.head, &pr.title, &body_text) {
+        if let Err(error) = reads.squash(args.pr, &pr.head, &subject, &body_text) {
             eprintln!("merge failed: {error:#}");
             return Ok(2);
         }
@@ -401,7 +458,7 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
             serde_json::json!({
                 "pr": args.pr,
                 "head": pr.head,
-                "subject": pr.title,
+                "subject": subject,
                 "accepted": true,
                 "merged": args.merge,
             })
@@ -538,9 +595,10 @@ impl Reads for GhReads<'_> {
     fn squash(&self, pr: u64, head: &str, subject: &str, body: &str) -> Result<()> {
         // `--match-head-commit` closes the last race (nothing may land on
         // the PR after the reviewed SHA); `--subject` pins the validated
-        // PR title so a single-commit PR can never write its branch
-        // commit's subject into main (GH-1100); the body arrives on stdin
-        // through `--body-file -`.
+        // PR title plus its ` (#N)` back-reference ([`merge_subject`]), so a
+        // single-commit PR can never write its branch commit's subject into
+        // main (GH-1100) and the squash commit keeps its PR pointer; the body
+        // arrives on stdin through `--body-file -`.
         gh_write_stdin(
             self.cwd,
             &[
@@ -975,7 +1033,200 @@ mod tests {
         assert_eq!(head, HEAD);
         assert_eq!(
             subject,
-            "fix(edda-cli): the PR title, not the branch commit"
+            "fix(edda-cli): the PR title, not the branch commit (#4242)"
+        );
+    }
+
+    // ---- GH-1100 Round 2's other half: the (#N) back-reference -------------
+
+    /// The regression this PR reintroduced against #1118 (GH-1105 Round 2's
+    /// P0). GitHub appends ` (#N)` only to a squash subject it picks itself;
+    /// handing it one through `--subject` suppresses the suffix entirely, so
+    /// pinning the title and stopping there lands every squash commit on
+    /// `main` without a PR pointer — permanently, since R7 forbids rewriting
+    /// `main`.
+    ///
+    /// The second assertion names that shape explicitly rather than leaving
+    /// it implied by the equality: drop the append in [`merge_subject`] and
+    /// the bare title is exactly what `gh` receives.
+    #[test]
+    fn the_squash_subject_keeps_its_pr_back_reference() {
+        let mut fake = Fake::clean(lgtm());
+        fake.title = "fix(edda-cli): a merge the fleet already reviewed".into();
+        assert_eq!(merge_inner(&args(true), &fake).unwrap(), 0);
+        let subject = fake.merged.borrow()[0].2.clone();
+        assert_eq!(
+            subject,
+            "fix(edda-cli): a merge the fleet already reviewed (#4242)"
+        );
+        assert_ne!(
+            subject, "fix(edda-cli): a merge the fleet already reviewed",
+            "the squash subject carries no (#4242) back-reference — GitHub adds one only to a \
+             subject it picks itself, so this commit would land on main with no PR pointer and \
+             R7 forbids ever fixing it"
+        );
+    }
+
+    /// The idempotence guard. A title copied back from a landed commit already
+    /// ends in this PR's own number; appending again would write
+    /// `… (#4242) (#4242)`.
+    #[test]
+    fn a_title_already_carrying_this_prs_number_is_not_doubled() {
+        let mut fake = Fake::clean(lgtm());
+        fake.title = "fix(edda-cli): a title that already carries its number (#4242)".into();
+        assert_eq!(merge_inner(&args(true), &fake).unwrap(), 0);
+        let subject = fake.merged.borrow()[0].2.clone();
+        assert_eq!(
+            subject,
+            "fix(edda-cli): a title that already carries its number (#4242)"
+        );
+        assert!(
+            !subject.contains("(#4242) (#4242)"),
+            "the back-reference was appended to a title that already carried it: {subject}"
+        );
+    }
+
+    /// The interesting half of that skip rule: `… (#999)` is prose — a
+    /// follow-up naming the PR it answers — not this commit's pointer.
+    /// Treating it as one would send `git log` readers to an unrelated PR.
+    #[test]
+    fn a_foreign_pr_number_in_the_title_still_gets_this_prs_back_reference() {
+        let mut fake = Fake::clean(lgtm());
+        fake.title = "fix(edda-cli): follow-up to the earlier change (#999)".into();
+        assert_eq!(merge_inner(&args(true), &fake).unwrap(), 0);
+        assert_eq!(
+            fake.merged.borrow()[0].2,
+            "fix(edda-cli): follow-up to the earlier change (#999) (#4242)"
+        );
+    }
+
+    /// The subject assembly at its own seam, including the near-misses the
+    /// end-to-end cases above do not reach: the skip is the exact ` (#N)`
+    /// tail, so a number without the separating space, a number embedded
+    /// mid-title, and a different PR's number all still get the real
+    /// back-reference appended.
+    #[test]
+    fn merge_subject_matrix() {
+        assert_eq!(merge_subject("fix(x): y", 4242), "fix(x): y (#4242)");
+        assert_eq!(
+            merge_subject("fix(x): y (#4242)", 4242),
+            "fix(x): y (#4242)"
+        );
+        assert_eq!(
+            merge_subject("fix(x): y(#4242)", 4242),
+            "fix(x): y(#4242) (#4242)"
+        );
+        assert_eq!(
+            merge_subject("fix(x): y (#4242) and more", 4242),
+            "fix(x): y (#4242) and more (#4242)"
+        );
+        assert_eq!(
+            merge_subject("fix(x): y (#42420)", 4242),
+            "fix(x): y (#42420) (#4242)"
+        );
+        assert_eq!(
+            merge_subject("fix(x): y (#999)", 4242),
+            "fix(x): y (#999) (#4242)"
+        );
+    }
+
+    /// U4 judges the bare title and the back-reference is composed after it,
+    /// so a suffix can neither rescue a bad title nor break a good one — the
+    /// two are separate values, and the composed one only ever reaches `gh`.
+    #[test]
+    fn u4_judges_the_bare_title_the_back_reference_is_composed_after() {
+        let good = "fix(edda-cli): repair the gate";
+        assert!(subject_problem(good).is_none());
+        assert!(subject_problem(&merge_subject(good, 4242)).is_none());
+        let bad = "wip(review): lane work in progress";
+        assert!(subject_problem(bad).is_some());
+        assert!(
+            subject_problem(&merge_subject(bad, 4242)).is_some(),
+            "a back-reference must not rescue a title U4 rejects"
+        );
+        // …and the refusal happens before anything is composed or merged.
+        let mut fake = Fake::clean(lgtm());
+        fake.title = bad.into();
+        assert_eq!(merge_inner(&args(true), &fake).unwrap(), 1);
+        assert!(fake.merged.borrow().is_empty());
+    }
+
+    // ---- GH-1100's two --body-file refusals ---------------------------------
+
+    /// An empty operand short-circuited the shell's `-f` test and read as "no
+    /// body file", so the one malformed operand that did not refuse was the
+    /// emptiest.
+    #[test]
+    fn an_empty_body_file_operand_refuses() {
+        let fake = Fake::clean(lgtm());
+        let mut merge = args(true);
+        merge.body_file = Some(String::new());
+        let error = merge_inner(&merge, &fake)
+            .expect_err("an empty --body-file operand was accepted as 'no body file'");
+        assert!(
+            error.to_string().contains("--body-file"),
+            "the refusal must name --body-file: {error:#}"
+        );
+        assert!(fake.merged.borrow().is_empty());
+    }
+
+    /// Only the merge path opens the file. Accepting it under `--check` told
+    /// the caller their body had been taken when nothing would ever read it.
+    #[test]
+    fn a_body_file_outside_merge_refuses_instead_of_being_ignored() {
+        let fake = Fake::clean(lgtm());
+        let mut check = args(false);
+        check.body_file = Some("some-merge-body.md".into());
+        let error = merge_inner(&check, &fake)
+            .expect_err("--body-file was accepted and silently ignored outside --merge");
+        assert!(
+            error.to_string().contains("--merge"),
+            "the refusal must say --body-file needs --merge: {error:#}"
+        );
+        assert!(
+            !*fake.reached_comments.borrow(),
+            "a rejected invocation still spent the PR reads"
+        );
+    }
+
+    /// A typo'd path costs an error message, not the fleet-wide drift walk.
+    #[test]
+    fn a_body_file_that_does_not_exist_refuses_before_any_read() {
+        let fake = Fake::clean(lgtm());
+        let mut merge = args(true);
+        merge.body_file = Some("no/such/merge-body.md".into());
+        let error = merge_inner(&merge, &fake).expect_err("a missing body file was accepted");
+        assert!(
+            error.to_string().contains("body file not found"),
+            "the refusal must name the missing file: {error:#}"
+        );
+        assert!(
+            !*fake.reached_comments.borrow(),
+            "the PR reads ran before the body file was known to exist"
+        );
+    }
+
+    /// The supplied body rides through untouched — and does not cost the
+    /// commit its back-reference, which is composed on the merge call rather
+    /// than inside the compose-a-receipt branch.
+    #[test]
+    fn a_supplied_body_file_rides_through_and_keeps_the_back_reference() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("merge-body.md");
+        std::fs::write(&path, "choreographed merge body from the operator\n").expect("write body");
+        let fake = Fake::clean(lgtm());
+        let mut merge = args(true);
+        merge.body_file = Some(path.to_string_lossy().into_owned());
+        assert_eq!(merge_inner(&merge, &fake).unwrap(), 0);
+        let (_, _, subject, body) = fake.merged.borrow()[0].clone();
+        assert_eq!(body, "choreographed merge body from the operator\n");
+        assert!(
+            !body.contains("Squash merge of PR"),
+            "a supplied body file still composed a receipt: {body}"
+        );
+        assert_eq!(
+            subject, "fix(edda-cli): a merge the fleet already reviewed (#4242)",
+            "a supplied body file dropped the (#4242) back-reference"
         );
     }
 

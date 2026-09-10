@@ -1543,8 +1543,19 @@ rejected by branch protection; and the tree-level window belongs to
 
 `--merge` performs the squash. The subject always comes from the validated
 PR title, never from the branch commit's subject (the GH-1100 single-commit
-case); the body comes from `--body-file`, or is composed as a minimal
-receipt — the reviewed SHA, the LGTM round, the CI run.
+case), and it carries the ` (#N)` PR back-reference: GitHub appends that
+only to a subject it picks itself, so pinning one through `--subject`
+without re-adding it would land every squash commit on `main` with no PR
+pointer — permanently, since R7 forbids rewriting `main`. The append is
+skipped only when the title already ends in this PR's own number; a title
+ending in another PR's number still gets its own appended, and the
+convention check above judges the bare title either way.
+
+The body comes from `--body-file`, or is composed as a minimal receipt —
+the reviewed SHA, the LGTM round, the CI run. Only the merge path reads
+that file, so an empty operand, a path that does not exist, and a
+`--body-file` supplied without `--merge` are each rejected up front rather
+than accepted and ignored.
 **`--merge` requires operator authorization.** `--check` is the default and
 may be passed explicitly.
 
@@ -1552,5 +1563,5 @@ may be passed explicitly.
 |---|---|
 | 0 | Accepted — merged, when `--merge` was given |
 | 1 | A precondition failed |
-| 2 | A read failed — an unreadable answer is never an approval |
+| 2 | A read failed, or the invocation itself is malformed — an unreadable answer is never an approval |
 
