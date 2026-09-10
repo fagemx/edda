@@ -122,7 +122,8 @@ class PublisherTests(unittest.TestCase):
         text = workflow.read_text()
         prepare = text.split("  prepare-crates:", 1)[1].split("  publish-crates:", 1)[0]
         publish = text.split("  publish-crates:", 1)[1].split("  create-release:", 1)[0]
-        create = text.split("  create-release:", 1)[1].split("  build-release:", 1)[0]
+        create = text.split("  create-release:", 1)[1].split(
+            "  build-linux-release:", 1)[0]
         self.assertIn('echo "enabled=false"', prepare)
         self.assertIn("::notice::CARGO_REGISTRY_TOKEN is absent", prepare)
         self.assertIn("needs.prepare-crates.outputs.enabled == 'true'", publish)

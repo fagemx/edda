@@ -263,8 +263,9 @@ gh run watch <RUN_ID> --exit-status
 ### Step 2: Verify every CI job did its job
 
 Require all five logical stages green — currently nine concrete jobs because
-`build-release` expands to five matrix legs. A green aggregate with a skipped
-required stage or leg is BLOCKED. Read `conclusion` and each job result; do not
+`build-linux-release` and `build-non-linux-release` expand to five legs total.
+A green aggregate with a skipped required stage or leg is BLOCKED. Read
+`conclusion` and each job result; do not
 classify arbitrary warning/error-looking lines from `gh run watch` output as a
 workflow failure:
 
