@@ -1157,3 +1157,6 @@ fn peers_json_includes_sessions_and_full_board() {
     assert_eq!(json["requests"][0]["message"], "need auth");
     assert_eq!(json["acks"][0]["from_label"], "billing");
 }
+
+#[path = "tests_tail_gh671.rs"]
+mod tests_tail_gh671;

@@ -213,7 +213,7 @@
    也算進去，永遠不會是空的；2026-09-09 弄反過一次。
    **這是本 runbook 加的一道，不是 R6 那道。** R6 與 `.claude/CLAUDE.md` item 9 列的窗是
    **合併前置條件**：`<審過的 SHA>..origin/main`，問「判決釘住的那棵樹跟 main 之間是不是空的」，
-   由合併的 session 執行並記進 PR（見第 7 步）。兩者基準不同——一個是分支起點，一個是判決
+   由合併的 session 自己執行並記進 PR——`merge-reviewed-pr.sh` 刻意不做這一步。兩者基準不同——一個是分支起點，一個是判決
    釘住的 commit——時間點也不同，所以方向與時機都不能互抄。
    這一道要在派審**之前**做：審一棵已經被 main 動過的樹是浪費一整輪。
 
@@ -242,53 +242,7 @@
    handoff：現在的狀態、什麼已定案不要重審、下一手具體做什麼，並**把 `Closes #NNN` 從 PR body
    拿掉**,免得有人事後合併時關掉一張判決已經否掉的單。
 
-7. **合併**（規則閘綠即可執行，任何控制者皆可、冪等；`docs/fleet/rules.md` R6）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過；它另外會問一次聯集判決（GH-1057，經 `edda review deliver`），該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。檢查通過後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
-
-   **`merge-reviewed-pr.sh` 收不到 squash 訊息（#1100）**——它到
-   `scripts/merge-reviewed-pr.sh:177` 為止都是
-   `gh pr merge … --squash --match-head-commit "$head"`，沒有 `--subject`、沒有 `--body-file`。
-   所以最後那一下要自己打。**但檢查那一半不可以自己重寫**：
-
-   ```bash
-   sh scripts/merge-reviewed-pr.sh <N>                 # ← 閘在這裡，先過這關
-   edda review deliver --pr <N> --sha <完整 SHA>        # 結算 label 與 status
-   git diff --stat <完整 SHA>..origin/main -- <那些檔>   # 合併前置條件，不是合後確認
-   grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+' <檔案>   # 掃自己要送的 squash 內文
-   gh pr merge <N> --repo <owner/repo> --squash \
-     --match-head-commit <完整 SHA> \
-     --subject '<conventional subject> (#<N>)' \
-     --body-file <檔案>
-   ```
-
-   **不帶 `--merge` 跑 `merge-reviewed-pr.sh` 是必經的一步，不是可選的建議。** 它做了手打
-   `gh pr merge` 不會做的事：可信 LGTM 與 escalations 檢查（`scripts/merge-reviewed-pr.sh:82-86`）、以及
-   **union 拒絕**（`scripts/merge-reviewed-pr.sh:158-174`，要求 `union_state == success` 且 `malformed == 0`）。
-   R6 明說 union 是「merge script 擋，機器閘本身不擋」——`CI Gate` 不看 union，
-   `edda review deliver` 也不能代替（該腳本自己的註解寫明它的 exit code 刻意不是閘）。
-   **#1055 與 #570 就是從這個洞合進去的。** 跳過這一步再手打 merge，等於把那個洞重新打開。
-
-   - **`--subject` 是必要的，不是選配。** 不給，GitHub 會拿唯一那個 commit 的 subject 當
-     squash subject；2026-09-09 的 `fa0d011` 因此讓 `main` 永久帶著一句
-     `wip(review): … in progress — uncommitted lane work`。R7 之下改不掉。
-   - `verdict-drift.sh` 由 `merge-reviewed-pr.sh` 自己呼叫並且 **fail-closed**——它非零就
-     `die`。**不要在腳本外面自己跑一次然後決定要不要採信它。** 並行 fleet 裡 rc=1 常常來自
-     另一張 mid-round 的 PR，這是真實的限制，但處理方式是等那張收斂或修好判決，不是覆寫閘。
-   - **你手寫的那份 squash 內文，送出前自己掃一遍**——它在合併那一刻才存在，所以任何
-     合併前的查詢都看不到它。兩種編號形式、不分大小寫、不錨行首、要掃散文中間：
-     `grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+'`。
-     敘事型的 merge body 特別危險——寫「這個改法**沒有**修好 X」正中解析器。
-   - **窗檢查有兩個，時間點和基準都不同，不要互抄。** 派審前查 `<base>..origin/main`——
-     「從分支起點到現在，main 有沒有動過這張 PR 要改的檔」，這是本 runbook 第 6 步加的。
-     **合併前**查 `<審過的 SHA>..origin/main`——「判決釘住的那棵樹跟 main 之間是不是空的」，
-     這是 R6 與 `.claude/CLAUDE.md` item 9 列的**合併前置條件之一**，合併的 session 要把結果
-     記進 PR；`main` 曾獨立動過同一批路徑時改用 `fleet.lgtm-merges` 的 squash-vs-diff 形式。
-     **`merge-reviewed-pr.sh` 刻意不做這一步**（`scripts/merge-reviewed-pr.sh:119-127` 的註解寫明「The window step is
-     deliberately NOT wired here」），所以手打 merge 的人自己補，而且要補在 `gh pr merge`
-     **之前**。合併後再跑一次同一條 diff 是確認，不是那個前置條件。
-     **而且這條 diff 會假陽性**：`main` 可能在分支之後獨立動過同一批路徑——PR #915 就報過
-     6 行差異，實際是別張 PR 的文字在它分支之後落地（`fleet.lgtm-merges`）。非空時不要
-     直接判定漂移，改比 squash 自己的 diff 與從 merge base 起的審查 diff：
-     `git show <squash>` 對 `git diff <merge-base>..<審過的 SHA>`。
+7. **合併**（規則閘綠即可執行，任何控制者皆可、冪等；`docs/fleet/rules.md` R6）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過；它另外會問一次聯集判決（GH-1057，經 `edda review deliver`），該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。檢查通過後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。它也把 squash subject 永遠釘在 PR 標題上（GH-1100）：合併一律帶 `--subject`——單 commit 的 PR 若讓 GitHub 自選 subject，會原封抄用該 commit 的標題，fa0d011 那次就是這樣把 `wip(review): ...` 寫進 main——且標題先按 REVIEW.md §5 U4 的 conventional commit 格式驗證，`wip(...)`、空 scope、缺 type 一律當場拒絕、不執行合併（`--check` 也驗，早一步給訊號）。GitHub 只會替「自己挑的」subject 補上 ` (#N)` 這個 PR 回指，帶了 `--subject` 就原文照用、不補；所以腳本自己接上 `<PR 標題> (#<PR 編號>)`，squash commit 才不會從此在 main 上失去 PR 指標（U4 驗的仍是純標題，不含後綴；標題若已經以「本 PR 自己的編號」結尾就不重複補，結尾是「別的 PR 編號」則照補，免得 `git log` 的回指指到無關的 PR）。合併 body 可用 `--body-file <path>` 指定（只在 `--merge` 有效，空字串或配 `--check` 都會拒絕）；沒給就自動組一張最小收據（審查 SHA、LGTM 輪號、CI run 連結）寫進暫存檔再傳給 gh。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009）：
    先看 dry-run —— `sh scripts/fleet/reclaim-merged.sh`。每個 worktree／local branch／remote

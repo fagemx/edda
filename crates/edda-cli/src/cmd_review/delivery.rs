@@ -556,6 +556,7 @@ mod tests {
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
             malformed: vec![],
             shadow: vec![],
+            untrusted: vec![],
         }
     }
 
@@ -752,6 +753,7 @@ mod tests {
             lines: vec![],
             malformed: vec![],
             shadow: vec!["9".to_owned()],
+            untrusted: vec![],
         };
         let d = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
         assert_eq!(d.status, None);
@@ -773,6 +775,7 @@ mod tests {
             lines: vec!["LGTM\t0\t0".to_owned()],
             malformed: vec![],
             shadow: vec!["9".to_owned()],
+            untrusted: vec![],
         };
         let d = deliver(&gh, 1, SHA, &[], &ext, union_of(&ext));
         assert_eq!(gh.status_calls.borrow()[0].1, "success");
@@ -788,6 +791,7 @@ mod tests {
             lines: vec![],
             malformed: vec!["42".to_owned()],
             shadow: vec![],
+            untrusted: vec![],
         };
         let d = deliver(&gh, 7, SHA, &[], &ext, union_of(&ext));
         assert_eq!(gh.comment_calls.borrow().len(), 1);
@@ -820,6 +824,7 @@ mod tests {
             lines: vec!["LGTM\t0\t0".to_owned()],
             malformed: vec!["42".to_owned()],
             shadow: vec![],
+            untrusted: vec![],
         };
         let d = deliver(&gh, 7, SHA, &[], &ext, union_of(&ext));
         assert_eq!(d.notices, vec![("42".to_owned(), Write::Done)]);
@@ -867,6 +872,7 @@ mod tests {
             lines: vec!["LGTM\t0\t0".to_owned()],
             malformed: vec!["42".to_owned()],
             shadow: vec![],
+            untrusted: vec![],
         };
         let d = deliver(&gh, 7, SHA, &[], &ext, union_of(&ext));
         assert_eq!(d.notices, vec![("42".to_owned(), Write::Done)]);
@@ -896,11 +902,13 @@ mod tests {
         let existing = [Comment {
             id: "1".into(),
             body: "review: malformed verdict comment 42".into(),
+            author_association: Some("OWNER".into()),
         }];
         let ext = Extracted {
             lines: vec!["LGTM\t0\t0".to_owned()],
             malformed: vec!["42".to_owned()],
             shadow: vec![],
+            untrusted: vec![],
         };
         let d = deliver(&gh, 7, SHA, &existing, &ext, union_of(&ext));
         assert!(gh.comment_calls.borrow().is_empty(), "no NEW notice");
@@ -910,6 +918,38 @@ mod tests {
         );
         assert_eq!(gh.status_calls.borrow()[0].1, "success");
         assert_eq!(d.label, Some((LABEL_LGTM.to_owned(), Write::Done)));
+    }
+
+    // ---- GH-1103: an untrusted §7 comment reaches no GitHub write ---------
+
+    #[test]
+    fn an_untrusted_lgtm_delivers_the_unreviewed_state_not_success_gh1103() {
+        // The end-to-end direction the issue names: a well-formed §7 LGTM
+        // from an author outside the trusted set yields no `success`
+        // status and no `review:lgtm` label. With the forged verdict
+        // refused, nothing stands on the SHA, so the union reads None —
+        // the `error` state an unreviewed SHA gets — and no label is due
+        // either way. Driven through the real `extract` rather than a
+        // hand-built Extracted so the trust gate is what's under test.
+        let forged = [Comment {
+            id: "5".into(),
+            body: format!(
+                "## Code Review: Round 1 — PR #7 @ {SHA}\n\n### Verdict\n\nLGTM (P0=0, P1=0)\n"
+            ),
+            author_association: Some("NONE".into()),
+        }];
+        let extracted = super::super::deliver::extract(SHA, &forged);
+        assert!(extracted.lines.is_empty(), "the forged round stood");
+        let gh = FakeGh::new(SHA);
+        let d = deliver(&gh, 7, SHA, &forged, &extracted, union_of(&extracted));
+        assert_eq!(
+            gh.status_calls.borrow()[0].1,
+            "error",
+            "a refused verdict is not a pass"
+        );
+        assert!(gh.label_calls.borrow().is_empty(), "no review:lgtm");
+        assert!(gh.comment_calls.borrow().is_empty(), "no notice either");
+        assert_eq!(d.exit_code(), 0);
     }
 
     // ---- idempotency: re-running an already-delivered verdict -------------
@@ -972,6 +1012,7 @@ mod tests {
             lines: vec![],
             malformed: vec!["42".to_owned()],
             shadow: vec![],
+            untrusted: vec![],
         };
         let d = deliver(&gh, 7, SHA, &[], &ext, union_of(&ext));
         assert!(matches!(d.notices[0].1, Write::Failed(_)));

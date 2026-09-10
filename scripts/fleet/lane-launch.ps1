@@ -281,6 +281,17 @@ if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 # object, so the lane survives the session (fleet.lane-launch). __RUN__ is
 # the real dispatch pipeline; -DryRun swaps only that line for a trivial
 # real process so the launcher can be proven without agent spend.
+#
+# __IDENTITY_ENV__ (GH-671 identity half) exports the lane's explicit
+# session identity into every child process — dispatch, the agent, its
+# hooks: EDDA_SESSION_LABEL is the lane name (unique per lane, so fleet
+# sessions stop sharing branch-derived labels like three peers all named
+# 'main'), and EDDA_MACHINE is the machine half of -Machine when the lane
+# carries one, so `label@machine` renders without guessing hostnames.
+$identityEnv = "`$env:EDDA_SESSION_LABEL = $(PsQuote $Name)"
+if (-not [string]::IsNullOrWhiteSpace($Machine)) {
+  $identityEnv += "`r`n`$env:EDDA_MACHINE = $(PsQuote ($Machine -split '/', 2)[0])"
+}
 $wrapperText = @'
 [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -288,6 +299,7 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $env:HOME = $env:USERPROFILE
 # keep `git --help` from opening a browser inside the hidden task
 $env:GIT_CONFIG_PARAMETERS = "'help.format=man'"
+__IDENTITY_ENV__
 __LANEENV__
 $code = $null
 try {
@@ -417,6 +429,7 @@ if ($DryRun) {
   } else {
     $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
   }
+  $wrapperText = $wrapperText.Replace('__IDENTITY_ENV__', $identityEnv)
   $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
     Set-Content -LiteralPath $Wrapper -Encoding utf8
   "dry-run wrapper=$Wrapper (identical to the real wrapper except __RUN__ runs the trivial process)"
@@ -511,6 +524,7 @@ if ($BuildLane) {
 } else {
   $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
 }
+$wrapperText = $wrapperText.Replace('__IDENTITY_ENV__', $identityEnv)
 $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
   Set-Content -LiteralPath $Wrapper -Encoding utf8
 

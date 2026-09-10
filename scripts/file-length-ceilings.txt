@@ -13,7 +13,7 @@ crates/edda-bridge-claude/src/dispatch/session.rs 1006
 crates/edda-bridge-claude/src/dispatch/tests.rs 3238
 crates/edda-bridge-claude/src/peers/tests.rs 3588
 crates/edda-bridge-claude/src/signals.rs 2252
-crates/edda-cli/src/cmd_bridge/tests.rs 1159
+crates/edda-cli/src/cmd_bridge/tests.rs 1162
 crates/edda-cli/src/cmd_claim.rs 1732
 crates/edda-cli/src/cmd_dispatch.rs 2106
 crates/edda-cli/src/cmd_draft.rs 1705
@@ -37,3 +37,5 @@ crates/edda-mcp/src/lib.rs 1199
 crates/edda-pack/src/lib.rs 1186
 crates/edda-search-fts/src/indexer.rs 1461
 crates/edda-serve/src/tests.rs 5378
+crates/edda-cli/src/cmd_review/deliver.rs 1029
+crates/edda-cli/src/cmd_review/delivery.rs 1027

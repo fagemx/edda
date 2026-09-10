@@ -1581,6 +1581,21 @@ fn git_repo_on_branch(branch: &str) -> tempfile::TempDir {
     tmp
 }
 
+/// Mask the two identity env vars for a test that calls `write_heartbeat`
+/// with `label: None` and then asserts on the derived label (GH-671).
+///
+/// Such a test walks the whole fallback chain, so it reads `env_label()` and
+/// `fleet_session()`. Both are ambient in this repo's own fleet lanes —
+/// `scripts/fleet/lane-launch.ps1` exports `EDDA_SESSION_LABEL` and
+/// `EDDA_MACHINE` into every lane wrapper — and an exported `EDDA_MACHINE`
+/// switches the chain to the fleet branch, where the answer is the sid prefix
+/// rather than the git branch. Masking them thread-locally (GH-757) keeps the
+/// expected label a property of the fixture instead of of the shell that
+/// happened to launch `cargo test`.
+fn fresh_session_identity_env() -> crate::test_config::Guard {
+    crate::test_config_guard(&[("EDDA_MACHINE", None), ("EDDA_SESSION_LABEL", None)])
+}
+
 #[test]
 fn auto_claim_writes_no_claim_for_a_fresh_session() {
     let _store = crate::isolated_store();
@@ -1642,6 +1657,7 @@ fn auto_claim_starts_claiming_once_files_are_edited() {
 #[test]
 fn heartbeat_label_falls_back_to_git_branch_for_a_fresh_session() {
     let _store = crate::isolated_store();
+    let _identity = fresh_session_identity_env();
     let pid = "test_hb_branch_label";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1668,6 +1684,7 @@ fn heartbeat_label_falls_back_to_git_branch_for_a_fresh_session() {
 #[test]
 fn fresh_session_receives_requests_addressed_to_its_branch() {
     let _store = crate::isolated_store();
+    let _identity = fresh_session_identity_env();
     let pid = "test_hb_branch_request";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1705,6 +1722,7 @@ fn fresh_session_receives_requests_addressed_to_its_branch() {
 #[test]
 fn two_fresh_sessions_on_one_branch_do_not_block_each_other() {
     let _store = crate::isolated_store();
+    let _identity = fresh_session_identity_env();
     let pid = "test_two_fresh_no_block";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3543,3 +3561,6 @@ fn legacy_ackless_id_log_survives_compaction_without_swallowing_later_requests()
 
 #[path = "tests_tail_gh757.rs"]
 mod tests_tail_gh757;
+
+#[path = "tests_tail_gh671.rs"]
+mod tests_tail_gh671;

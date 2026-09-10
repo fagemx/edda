@@ -59,8 +59,11 @@ pub enum ReviewCmd {
     ///
     /// Writes the `review:*` label and the `Independent Review` commit
     /// status by the union rule (`edda review gate`, GH-769); a malformed
-    /// verdict comment gets a one-shot notice instead. Exit: 0 delivered,
-    /// 1 partially delivered, 2 failed or cannot judge.
+    /// verdict comment gets a one-shot notice instead. A §7 comment counts
+    /// only from an author GitHub vouches for — OWNER, MEMBER or
+    /// COLLABORATOR (GH-1103); anything else is reported `untrusted` and
+    /// refused as a verdict, fail closed. Exit: 0 delivered, 1 partially
+    /// delivered, 2 failed or cannot judge.
     Deliver {
         #[command(flatten)]
         args: DeliverArgs,

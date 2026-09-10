@@ -140,8 +140,9 @@ item nobody has been burned by does not belong here.
 5. **Foreground.** The exception is a commit that still triggers the hook's cold
    build. Banned is manufactured work — load generators, repeated-measurement
    loops, anything that spends the machine to produce a number.
-6. **Commit and push per coherent edit, not at the end.** *(Placeholder — the
-   reason lanes stop mid-work is the cold build; revisit when #1099 lands.)*
+6. **Commit and push per coherent edit, not at the end.** This one outlives the
+   cold build: GH-748 records the cause as a scheduler kill on path B, which #1099
+   does not touch.
 7. **All GitHub text through a file and `--body-file`.** Backticks inside shell
    double quotes become command substitution.
 8. **Closing keywords fire from prose, from `GH-N`, and through a negation** — so
