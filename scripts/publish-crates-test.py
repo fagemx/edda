@@ -5,9 +5,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
+import tempfile
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -148,12 +150,59 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("[System.IO.File]::WriteAllText", non_linux)
         self.assertIn('${ARCHIVE}.zip`n', non_linux)
         self.assertNotIn("Out-File", non_linux)
-        self.assertIn("Checksum sidecar contains CRLF", publish)
-        self.assertIn("Checksum sidecar must be one exact ASCII LF line", publish)
+        self.assertIn("uses: actions/checkout@v6", publish)
+        self.assertIn("scripts/verify-release-checksum.sh", publish)
         self.assertIn(
             "needs: [create-release, build-linux-release, build-non-linux-release]",
             publish,
         )
+
+    def test_release_checksum_helper_rejects_non_exact_bytes(self):
+        script = Path(__file__).with_name("verify-release-checksum.sh")
+        bash = "bash"
+        if os.name == "nt":
+            bash = str(Path(os.environ["PROGRAMFILES"]) / "Git/bin/bash.exe")
+            if not Path(bash).is_file():
+                self.skipTest("Git Bash is unavailable")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            archive_path = temp / "edda-v1.2.3-test.tar.gz"
+            checksum_path = temp / f"{archive_path.name}.sha256"
+            archive_path.write_bytes(b"release archive")
+            digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+            valid = f"{digest}  {archive_path.name}\n".encode("ascii")
+            malformed = {
+                "empty": b"",
+                "wrong-digest": b"0" * 64 + valid[64:],
+                "wrong-spacing": valid.replace(b"  ", b" ", 1),
+                "nul": valid[:-1] + b"\0\n",
+                "crlf": valid[:-1] + b"\r\n",
+                "missing-final-lf": valid[:-1],
+                "extra-line": valid + b"unexpected\n",
+                "bom": b"\xef\xbb\xbf" + valid,
+                "non-ascii": valid[:-1] + b"\xc3\xa9\n",
+            }
+
+            checksum_path.write_bytes(valid)
+            accepted = subprocess.run(
+                [bash, script.as_posix(), archive_path.name, checksum_path.name],
+                cwd=temp,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+            for name, contents in malformed.items():
+                with self.subTest(name=name):
+                    checksum_path.write_bytes(contents)
+                    rejected = subprocess.run(
+                        [bash, script.as_posix(), archive_path.name, checksum_path.name],
+                        cwd=temp,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("::error::Checksum sidecar", rejected.stderr)
 
 
 if __name__ == "__main__":

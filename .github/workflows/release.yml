@@ -280,6 +280,7 @@ jobs:
     needs: [create-release, build-linux-release, build-non-linux-release]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
       - name: Verify release assets
         shell: bash
         run: |
@@ -325,20 +326,8 @@ jobs:
             cd "$asset_dir"
             for checksum in *.sha256; do
               archive="${checksum%.sha256}"
-              actual_hash="$(sha256sum "$archive" | awk '{ print $1 }')"
-              expected_line="$actual_hash  $archive"
-              actual_line="$(cat "$checksum")"
-              line_count="$(awk 'END { print NR }' "$checksum")"
-              final_byte="$(tail -c 1 "$checksum" | od -An -t u1 | tr -d '[:space:]')"
-              if grep -q $'\r' "$checksum"; then
-                echo "::error::Checksum sidecar contains CRLF: $checksum"
-                exit 1
-              fi
-              if [ "$line_count" != "1" ] || [ "$final_byte" != "10" ] \
-                || [ "$actual_line" != "$expected_line" ]; then
-                echo "::error::Checksum sidecar must be one exact ASCII LF line: $checksum"
-                exit 1
-              fi
+              "$GITHUB_WORKSPACE/scripts/verify-release-checksum.sh" \
+                "$archive" "$checksum"
             done
           )
         env:
