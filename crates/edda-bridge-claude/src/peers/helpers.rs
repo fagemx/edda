@@ -43,9 +43,14 @@ pub(crate) fn pending_requests_for_session(
 /// guessed) stays explicit-only in `cmd_dispatch`; this resolver is for
 /// rendering, where a best-effort name beats silence but must never mint
 /// authority.
+///
+/// Reads through [`crate::env_var`], this crate's single production read path
+/// for every env var a test configures (GH-757): in production that is a plain
+/// `std::env::var`, and in test builds a thread-scoped override map, so no
+/// test has to mutate the process environment to exercise these tiers.
 pub fn machine_identity() -> Option<String> {
     for key in ["EDDA_MACHINE", "COMPUTERNAME", "HOSTNAME"] {
-        if let Ok(value) = std::env::var(key) {
+        if let Some(value) = crate::env_var(key) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
@@ -59,10 +64,14 @@ pub fn machine_identity() -> Option<String> {
 /// `EDDA_MACHINE` into the session's environment, so its presence is the
 /// opt-in that makes label discipline binding. A bare local session keeps
 /// the permissive label chain.
+///
+/// Reads through [`crate::env_var`] for the same reason as
+/// [`machine_identity`], and one more: four pre-existing `write_heartbeat`
+/// tests pass `label: None` and so reach this predicate, while libtest runs
+/// every `#[test]` as a thread in one process — a test that set
+/// `EDDA_MACHINE` process-wide would flip their labels out from under them.
 pub(crate) fn fleet_session() -> bool {
-    std::env::var("EDDA_MACHINE")
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
+    crate::env_var("EDDA_MACHINE").is_some_and(|v| !v.trim().is_empty())
 }
 
 /// Labels shared by two or more **live** sessions (GH-671 identity half),

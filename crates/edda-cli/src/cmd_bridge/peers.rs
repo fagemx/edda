@@ -70,6 +70,10 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Every session on this board runs on this machine, so `peer_display_label`
+    // is documented to resolve the suffix once per render — do that literally,
+    // rather than re-reading the env chain for each peer.
+    let machine = machine_identity();
     println!("Active sessions ({}):\n", active.len());
     for p in &active {
         let age = edda_bridge_claude::peers::format_age(p.age_secs);
@@ -79,7 +83,7 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
             (None, false) => format!(" [{}]", p.claimed_paths.join(", ")),
             (None, true) => String::new(),
         };
-        let label = peer_display_label(p, machine_identity().as_deref());
+        let label = peer_display_label(p, machine.as_deref());
         println!(
             "  {} — {} ({age}){scope}",
             &p.session_id[..8.min(p.session_id.len())],

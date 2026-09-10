@@ -1,14 +1,17 @@
 use super::*;
-/// A fleet session (EDDA_MACHINE set) owes an explicit label: the chain is
+
+/// A fleet session (`EDDA_MACHINE` set) owes an explicit label: the chain is
 /// env label → claim label → sid prefix, and the branch/auto fallbacks that
-/// made three fleet sessions all answer to `main` are gone. The same fn
-/// covers `machine_identity` resolution — every tier runs inside ONE test
-/// because they all mutate EDDA_MACHINE, and separate #[test] fns doing
-/// that race each other in this binary (measured: a remove_var in one
-/// landed between set_var and write_heartbeat in the other, flipping the
-/// fleet chain to the branch fallback). Every pre-existing write_heartbeat
-/// test passes Some(label), which short-circuits before fleet_session() is
-/// ever read, so they cannot see these mutations.
+/// made three fleet sessions all answer to `main` are gone.
+///
+/// Identity vars are installed through the GH-757 thread-scoped test
+/// configuration, never `std::env::set_var`. libtest runs every `#[test]` as
+/// a thread in ONE process, and four pre-existing `write_heartbeat` tests
+/// pass `label: None` (`peers/tests.rs:1650`, `:1680`, `:1715`, `:1716`), so
+/// they read `env_label()` and `fleet_session()` on exactly the chain these
+/// tests drive. A process-wide mutation here flipped two of them to the sid
+/// fallback whenever they were scheduled inside the window; a thread-local
+/// override is invisible to them, and to every other thread in the binary.
 #[test]
 fn fleet_session_label_is_explicit_never_the_branch() {
     let _store = crate::isolated_store();
@@ -17,7 +20,11 @@ fn fleet_session_label_is_explicit_never_the_branch() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    std::env::set_var("EDDA_MACHINE", "gh671-test-machine");
+    let _fleet = crate::test_config_guard(&[
+        ("EDDA_MACHINE", Some("gh671-test-machine")),
+        ("EDDA_SESSION_LABEL", None),
+    ]);
+
     // No edits yet (auto label empty), cwd inside this git worktree — so the
     // pre-fix chain would have written the branch name. The fleet chain must
     // refuse it and fall back to the sid prefix instead.
@@ -36,52 +43,80 @@ fn fleet_session_label_is_explicit_never_the_branch() {
     assert_eq!(hb.label, "gh671-claimant");
 
     // EDDA_SESSION_LABEL outranks the claim, matching the non-fleet chain.
-    std::env::set_var("EDDA_SESSION_LABEL", "gh671-env-label");
-    write_heartbeat(pid, sid, &SessionSignals::default(), None, ".");
-    let hb = read_heartbeat(pid, sid).expect("heartbeat written");
-    assert_eq!(hb.label, "gh671-env-label");
+    {
+        let _env_label =
+            crate::test_config_guard(&[("EDDA_SESSION_LABEL", Some("gh671-env-label"))]);
+        write_heartbeat(pid, sid, &SessionSignals::default(), None, ".");
+        let hb = read_heartbeat(pid, sid).expect("heartbeat written");
+        assert_eq!(hb.label, "gh671-env-label");
+    }
 
-    std::env::remove_var("EDDA_SESSION_LABEL");
-    std::env::remove_var("EDDA_MACHINE");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
 
-    // The bare local session keeps the permissive chain: same inputs, no
-    // EDDA_MACHINE, and the branch fallback returns.
+/// The bare local session keeps the permissive chain: no `EDDA_MACHINE`, no
+/// edits, so the git branch still carries the identity (#128) and the fleet
+/// sid fallback stays out of its way.
+#[test]
+fn local_session_without_machine_keeps_the_branch_label() {
+    let _store = crate::isolated_store();
+    let pid = "test_gh671_local_label";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    let _local = crate::test_config_guard(&[("EDDA_MACHINE", None), ("EDDA_SESSION_LABEL", None)]);
+
+    let repo = git_repo_on_branch("gh671-local-branch");
     write_heartbeat(
         pid,
         "local-session-1",
         &SessionSignals::default(),
         None,
-        ".",
+        repo.path().to_str().unwrap(),
     );
     let hb = read_heartbeat(pid, "local-session-1").expect("heartbeat written");
-    assert_ne!(hb.label, "sid-local-", "local sessions keep the old chain");
-
-    // machine_identity: EDDA_MACHINE first, OS host name as the display
-    // fallback, and no guess past them — display identity, not a credential.
-    // The original host vars are saved and restored: they are ambient, and
-    // later readers in this binary deserve the machine they started with.
-    let real_computername = std::env::var("COMPUTERNAME").ok();
-    let real_hostname = std::env::var("HOSTNAME").ok();
-    std::env::set_var("EDDA_MACHINE", "gh671-m");
-    std::env::set_var("COMPUTERNAME", "gh671-c");
-    assert_eq!(machine_identity().as_deref(), Some("gh671-m"));
-    std::env::remove_var("EDDA_MACHINE");
     assert_eq!(
-        machine_identity().as_deref(),
-        Some("gh671-c"),
-        "OS host name is the display fallback"
+        hb.label, "gh671-local-branch",
+        "a local session keeps the branch fallback, not the fleet sid prefix"
     );
-    std::env::remove_var("COMPUTERNAME");
-    std::env::remove_var("HOSTNAME");
-    assert_eq!(machine_identity(), None, "nothing resolves: no guess");
-    if let Some(name) = real_computername {
-        std::env::set_var("COMPUTERNAME", name);
-    }
-    if let Some(name) = real_hostname {
-        std::env::set_var("HOSTNAME", name);
-    }
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+/// `machine_identity` resolves `EDDA_MACHINE` first, the OS host name as the
+/// display fallback, and refuses to guess past them — display identity, not a
+/// credential.
+///
+/// Same thread-scoped configuration, and here it also removes a save/restore
+/// dance: `COMPUTERNAME`/`HOSTNAME` are ambient, so mutating them
+/// process-wide handed every concurrent thread in the binary the wrong
+/// machine — or none — for the length of this test.
+#[test]
+fn machine_identity_prefers_edda_machine_then_host_then_nothing() {
+    {
+        let _cfg = crate::test_config_guard(&[
+            ("EDDA_MACHINE", Some("gh671-m")),
+            ("COMPUTERNAME", Some("gh671-c")),
+        ]);
+        assert_eq!(machine_identity().as_deref(), Some("gh671-m"));
+    }
+    {
+        let _cfg =
+            crate::test_config_guard(&[("EDDA_MACHINE", None), ("COMPUTERNAME", Some("gh671-c"))]);
+        assert_eq!(
+            machine_identity().as_deref(),
+            Some("gh671-c"),
+            "OS host name is the display fallback"
+        );
+    }
+    {
+        let _cfg = crate::test_config_guard(&[
+            ("EDDA_MACHINE", None),
+            ("COMPUTERNAME", None),
+            ("HOSTNAME", None),
+        ]);
+        assert_eq!(machine_identity(), None, "nothing resolves: no guess");
+    }
 }
 
 /// Only a label shared by two or more LIVE sessions collides: dead

@@ -58,10 +58,12 @@ fn protocol_budget() -> usize {
 const PEER_UPDATES_BUDGET: usize = 500;
 
 /// Session label from env var (set before launching Claude Code).
+///
+/// Through [`crate::env_var`] (GH-757): every `write_heartbeat` caller that
+/// passes `label: None` reads this, so a test exercising the tier must be able
+/// to configure it thread-locally rather than process-wide.
 fn env_label() -> Option<String> {
-    std::env::var("EDDA_SESSION_LABEL")
-        .ok()
-        .filter(|v| !v.is_empty())
+    crate::env_var("EDDA_SESSION_LABEL").filter(|v| !v.is_empty())
 }
 
 /// Detect git branch in a specific directory.
