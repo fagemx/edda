@@ -277,32 +277,21 @@ fn parse_open_prs(value: &serde_json::Value) -> Vec<PrRow> {
         .collect()
 }
 
-/// The drift walk's result: the lines the fleet report prints, whether any
-/// open PR holds, and which PR numbers do (#1124). `edda review merge` reads
-/// the last two separately: another PR's hold is advisory, the subject's own
-/// is still a refusal — including a subject that is `CONFLICTING`, which
-/// [`holds`] counts and R24 forbids reporting ready.
+/// The drift walk's result: the lines the fleet report prints, and whether
+/// any open PR holds. `edda review merge` prints all of it and refuses on
+/// none of it (#1124): the subject PR's own hold is read from the subject —
+/// its mergeability, its own verdicts and its own orphan responses — so a
+/// walk that cannot read, or another PR's unreadable comments, cannot hide
+/// it (#1132 Round 2).
 #[derive(Debug, Clone)]
 pub(crate) struct Report {
     pub lines: Vec<String>,
     pub any_holds: bool,
-    pub holding: Vec<u64>,
 }
 
 impl Report {
-    /// The report-shaped constructor: `any_holds` follows from the hold set,
-    /// so no caller can state one without the other.
-    pub(crate) fn new(lines: Vec<String>, holding: Vec<u64>) -> Self {
-        Self {
-            any_holds: !holding.is_empty(),
-            lines,
-            holding,
-        }
-    }
-
-    /// Does this PR hold? The question stage 1 asks about the subject.
-    pub(crate) fn holds(&self, pr: u64) -> bool {
-        self.holding.contains(&pr)
+    pub(crate) fn new(lines: Vec<String>, any_holds: bool) -> Self {
+        Self { lines, any_holds }
     }
 }
 
@@ -322,17 +311,17 @@ pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<Report> {
         eprintln!("{warning}");
     }
     let mut lines = Vec::new();
-    let mut holding = Vec::new();
+    let mut any_holds = false;
     for row in &rows {
         let list = comments(cwd, row.number)
             .with_context(|| format!("read comments of PR #{}", row.number))?;
         let (state, orphan) = reduce(&row.head, &list);
         if holds(row, &state, &orphan) {
-            holding.push(row.number);
+            any_holds = true;
         }
         lines.push(line_for(row, &state, &orphan));
     }
-    Ok(Report::new(lines, holding))
+    Ok(Report::new(lines, any_holds))
 }
 
 /// CLI entry point. Exit: 0 every open PR is ready, 1 drift found, 2 cannot
@@ -726,15 +715,10 @@ mod tests {
     // (R24), so a subject that is CONFLICTING lands in `holding`.
     #[test]
     fn the_report_separates_the_subject_from_the_open_set() {
-        let report = Report::new(vec!["#1 a main LGTM".into()], vec![2, 3]);
-        assert!(report.any_holds);
-        assert!(
-            report.holds(2) && report.holds(3),
-            "a holding PR was dropped from the set"
-        );
-        assert!(!report.holds(1), "a clean PR read as holding");
-        let empty = Report::new(vec![], vec![]);
-        assert!(!empty.any_holds && !empty.holds(1));
+        let held = Report::new(vec!["#1 a main LGTM".into()], true);
+        assert!(held.any_holds && held.lines.len() == 1);
+        let clean = Report::new(vec![], false);
+        assert!(!clean.any_holds && clean.lines.is_empty());
     }
 
     #[test]
@@ -746,8 +730,10 @@ mod tests {
         )];
         let (state, orphan) = reduce(SHA, &list);
         assert!(holds(&rows[0], &state, &orphan));
-        let conflict = Report::new(vec![line_for(&rows[0], &state, &orphan)], vec![7]);
-        assert!(conflict.holds(7) && conflict.any_holds);
+        assert_eq!(
+            line_for(&rows[0], &state, &orphan),
+            "#7 111111111111 main LGTM mergeable=CONFLICTING"
+        );
     }
 
     // #1124's fixture at the block's own seam: the walked lines survive into

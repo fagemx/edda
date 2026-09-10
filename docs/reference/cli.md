@@ -1539,10 +1539,10 @@ it produced — each open PR's head, base, and verdict state — and it is
 cross-PR drift is not one of R6's conditions and a refusal there made every
 merge hostage to the whole open set (#1124,
 `review.merge-drift-guard=advisory-not-an-r6-condition`). The **subject PR's
-own hold still refuses** — a verdict that does not pin the current head is
-condition 2 above, and a subject whose own line is held (for instance
-`mergeable=CONFLICTING`, which R24 forbids reporting ready) stops the merge
-at this stage with exit 1.
+own hold still refuses**, read from the subject itself rather than from the
+walk: `mergeable=CONFLICTING` (R24 forbids reporting such a PR ready), an
+orphan `Review Response` answering a round that was never posted (GH-993),
+and a verdict that does not pin the current head (condition 2 above).
 
 The check-to-merge windows are deliberately not checked here:
 `--match-head-commit <head>` makes the forge itself reject a push that
