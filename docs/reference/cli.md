@@ -1442,8 +1442,8 @@ the comments already present, before writing anything, so re-running deliver
 for an already-delivered verdict performs zero new GitHub calls.
 
 Stdout is one line — the union state, the SHA, and the number of verdicts
-standing — followed by one `untrusted <id> <association>` line per untrusted
-§7 comment, one `malformed <id>` line per malformed comment, one
+standing — followed by one `malformed <id>` line per malformed comment, one
+`untrusted <id> <association>` line per untrusted §7 comment, one
 `notice <id> <outcome>` line per notice attempted, and a `status`/`label`/
 `label_removed` line for each of those writes. `--json` emits the same as an
 object, with an `outcome` of `done`, `skipped`, `withheld`, or `failed` (with
