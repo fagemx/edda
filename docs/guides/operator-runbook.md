@@ -211,10 +211,11 @@
    **這個窗——派審之前的那個——方向是 `<base>..origin/main`。** 它問的是「從分支起點到現在，
    main 有沒有動過這張 PR 要改的檔」。寫成 `<head>..origin/main` 會把 PR 自己還沒合併的改動
    也算進去，永遠不會是空的；2026-09-09 弄反過一次。
-   **它跟合併後那個窗不是同一個檢查**：合後查 `<審過的 SHA>..origin/main`，問的是
-   「合進去的是不是我審的那棵樹」（見第 7 步與 `.claude/CLAUDE.md` item 9）。基準不同——
-   一個是分支起點，一個是判決釘住的 commit——所以方向不能互抄。
-   派審**之前**就要做，不是合併前才做——審一棵已經被 main 動過的樹是浪費一整輪。
+   **這是本 runbook 加的一道，不是 R6 那道。** R6 與 `.claude/CLAUDE.md` item 9 列的窗是
+   **合併前置條件**：`<審過的 SHA>..origin/main`，問「判決釘住的那棵樹跟 main 之間是不是空的」，
+   由合併的 session 執行並記進 PR（見第 7 步）。兩者基準不同——一個是分支起點，一個是判決
+   釘住的 commit——時間點也不同，所以方向與時機都不能互抄。
+   這一道要在派審**之前**做：審一棵已經被 main 動過的樹是浪費一整輪。
 
    **判決回來之後，讀 PR 上貼出來的那則留言，不要讀 agent 的回報。**
    兩者會不一致，而且以留言為準（R23：第一行不是 `## Code Review: Round <N> — PR #<n> @ <完整 SHA>`
@@ -250,11 +251,12 @@
    ```bash
    sh scripts/merge-reviewed-pr.sh <N>                 # ← 閘在這裡，先過這關
    edda review deliver --pr <N> --sha <完整 SHA>        # 結算 label 與 status
+   git diff --stat <完整 SHA>..origin/main -- <那些檔>   # 合併前置條件，不是合後確認
+   grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+' <檔案>   # 掃自己要送的 squash 內文
    gh pr merge <N> --repo <owner/repo> --squash \
      --match-head-commit <完整 SHA> \
      --subject '<conventional subject> (#<N>)' \
      --body-file <檔案>
-   git diff --stat <完整 SHA>..origin/main -- <那些檔>   # 合後窗，方向見下
    ```
 
    **不帶 `--merge` 跑 `merge-reviewed-pr.sh` 是必經的一步，不是可選的建議。** 它做了手打
@@ -270,15 +272,25 @@
    - `verdict-drift.sh` 由 `merge-reviewed-pr.sh` 自己呼叫並且 **fail-closed**——它非零就
      `die`。**不要在腳本外面自己跑一次然後決定要不要採信它。** 並行 fleet 裡 rc=1 常常來自
      另一張 mid-round 的 PR，這是真實的限制，但處理方式是等那張收斂或修好判決，不是覆寫閘。
-   - **合併前查 GitHub 自己的 closing 連結表**,不要用 body 文字推論：
+   - **你手寫的那份 squash 內文，送出前自己掃一遍。** 這是 `--body-file` 這條路獨有的風險：
+     squash 訊息在合併那一刻才存在，所以**合併前查 `closingIssuesReferences` 查不到它**——
+     那張表只反映**已經存在**的連結（多半來自 PR body）。實例：#1112 合併時 #1031 被關掉，
+     GitHub 的 `ClosedEvent.closer` 指的是 **Commit `3fbf08a`**（squash 訊息）而不是 PR，
+     開槍的字串是控制者敘事裡的一句 **`can fix GH-1031`**——而那句話的意思是「**不能**修好它」。
+     **否定沒有用，`GH-N` 形式跟 `#N` 一樣算數**（本專案早在 #488 就記過這條）。
+     所以掃的樣式要涵蓋兩種形式、不分大小寫、不錨行首，而且要掃散文中間：
+     `grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+'`。
+     敘事型的 merge body 特別危險——「Round 1 證明它**不能** fix GH-N」這種句子正中解析器。
+     已經存在的連結（PR body 那類）才用 GraphQL 查：
      `gh api graphql -f query='{repository(owner:"…",name:"…"){pullRequest(number:<N>){closingIssuesReferences(first:10){nodes{number state}}}}}'`。
-     舊版 body 建立的連結可能在關鍵字被刪掉之後存活（#1112 就這樣關掉了 #1031），
-     也可能不會（#1108 刪掉就解除了）。只有這張表算數。
-   - **合後窗的方向跟派審前那個不同，不要混。** 派審前查的是 `<base>..origin/main`——
-     「main 有沒有動過這張 PR 要改的檔」；合後查的是 `<審過的 SHA>..origin/main`——
-     「合進去的是不是我審的那棵樹」。前者的比較基準是分支起點，後者是被判決釘住的那個 commit。
-     `.claude/CLAUDE.md` item 9 記的是後者，以及 `main` 曾獨立動過同一批路徑時的
-     squash-vs-diff 變體（`fleet.lgtm-merges`）。
+   - **窗檢查有兩個，時間點和基準都不同，不要互抄。** 派審前查 `<base>..origin/main`——
+     「從分支起點到現在，main 有沒有動過這張 PR 要改的檔」，這是本 runbook 第 6 步加的。
+     **合併前**查 `<審過的 SHA>..origin/main`——「判決釘住的那棵樹跟 main 之間是不是空的」，
+     這是 R6 與 `.claude/CLAUDE.md` item 9 列的**合併前置條件之一**，合併的 session 要把結果
+     記進 PR；`main` 曾獨立動過同一批路徑時改用 `fleet.lgtm-merges` 的 squash-vs-diff 形式。
+     **`merge-reviewed-pr.sh` 刻意不做這一步**（`:5-12` 的註解寫明「The window step is
+     deliberately NOT wired here」），所以手打 merge 的人自己補，而且要補在 `gh pr merge`
+     **之前**。合併後再跑一次同一條 diff 是確認，不是那個前置條件。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009）：
    先看 dry-run —— `sh scripts/fleet/reclaim-merged.sh`。每個 worktree／local branch／remote

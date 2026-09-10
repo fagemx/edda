@@ -151,19 +151,34 @@ item nobody has been burned by does not belong here.
 7. **All GitHub text through a file and `--body-file`.** Never multi-line text in
    shell double quotes: backticks inside become command substitution, which ate a
    test name out of an issue comment on 2026-09-09.
-8. **Closing keywords: check GitHub's link table, not the body text.** The
-   principle above (`pr.closing-keyword`) governs *when* one is allowed. What is
-   mechanical is verifying it: a link created by an earlier body version can
-   survive the keyword being removed. On PR #1112 the removal did not clear it
-   and the merge closed an issue anyway; on PR #1108 the identical removal did
-   clear it. Before merging, ask GitHub:
+8. **Closing keywords fire from prose, from `GH-N`, and through a negation.** The
+   principle above (`pr.closing-keyword`) governs *when* one is allowed; this is
+   how to tell whether one is present, which is harder than it looks. On PR #1112
+   the issue that closed was closed by the **squash commit**, not the PR — GitHub's
+   `ClosedEvent.closer` names `Commit 3fbf08a` for it and `PullRequest 1112` for the
+   other — and the string that fired was `can fix GH-1031`, inside a sentence saying
+   a change did **not** fix it. Negation does not disarm the parser and `GH-N` counts
+   exactly as `#N` does; this repository recorded that once already, from #488.
+
+   So scan both forms, unanchored, case-insensitive, in running prose rather than
+   trailer lines only:
+
+   ```bash
+   grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+' <file>
+   ```
+
+   And scan **the squash body you are about to submit**, because that is the text
+   the parser will read and it does not exist until the merge. Querying GitHub's
+   link table beforehand cannot see it:
 
    ```bash
    gh api graphql -f query='{repository(owner:"<owner>",name:"<repo>"){pullRequest(number:<N>){closingIssuesReferences(first:10){nodes{number state}}}}}'
    ```
 
-   Grepping for `^Closes #` is narrower than GitHub's own parser, which is
-   case-insensitive, unanchored, and accepts every form of close/fix/resolve.
+   That query answers a different question — which links *already* exist, normally
+   from the PR body. Use it for those; use the grep for the text you are authoring.
+   A narrative merge body is the dangerous case: explaining that a fix did not work
+   is exactly the sentence shape that closes the issue.
 9. **R7** — no amend, rebase, or force-push on a pushed commit; add a commit.
 
 ## Review briefs — state the risk as a question
