@@ -15,14 +15,45 @@
 set -eu
 die() { echo "merge-reviewed-pr: $*" >&2; exit 1; }
 if [ "${1:-}" = --help ]; then
-  echo 'usage: merge-reviewed-pr.sh PR [--merge] (merge requires operator authority)'
+  echo 'usage: merge-reviewed-pr.sh PR [--check|--merge] [--body-file <path>] (merge requires operator authority)'
+  echo '  --check (default) validates only. --merge squash-merges with the subject'
+  echo '  ALWAYS pinned to the PR title via --subject (GH-1100), validated against the'
+  echo '  conventional commit rule (REVIEW.md §5 U4) before any merge: a wip(...),'
+  echo '  empty-scope, or missing-type title refuses. The " (#N)" PR back-reference'
+  echo '  GitHub only adds to a subject it picks itself is appended here instead, so'
+  echo '  the squash commit keeps its PR pointer. The merge body comes from'
+  echo '  --body-file, or is composed as a receipt (reviewed SHA, review round, CI run).'
   exit 0
 fi
 self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-pr=${1:-}; action=${2:---check}
+pr=${1:-}
 printf '%s\n' "$pr" | grep -qE '^[1-9][0-9]*$' || die 'invalid PR'
-case "$action" in --check|--merge) ;; *) die 'expected --check or --merge' ;; esac
-[ "$#" -le 2 ] || die 'too many arguments'
+shift
+# GH-1100: flags after the PR number. `--body-file <path>` joins --check/--merge
+# (still the default action); anything unrecognized refuses, and a missing
+# --body-file operand refuses rather than eating the next flag.
+action=--check
+body_file=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check|--merge) action=$1 ;;
+    --body-file)
+      [ "$#" -ge 2 ] || die '--body-file requires a path'
+      # An empty operand used to slip through as "no body file": the -z test
+      # below short-circuits on it, so `--body-file ''` silently composed a
+      # receipt while every other malformed operand refused. Refuse here too.
+      [ -n "$2" ] || die '--body-file requires a non-empty path'
+      body_file=$2
+      shift
+      ;;
+    *) die "unexpected argument: $1 (expected --check, --merge, or --body-file <path>)" ;;
+  esac
+  shift
+done
+[ -z "$body_file" ] || [ -f "$body_file" ] || die "body file not found: $body_file"
+# --body-file only has a reader on the merge path. Accepting it under --check
+# and then ignoring it tells the caller their body was taken when it was not.
+[ -z "$body_file" ] || [ "$action" = --merge ] || die '--body-file applies to --merge only'
 repo=${EDDA_REPO:-fagemx/edda}
 printf '%s\n' "$repo" | grep -qE '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$' || die 'invalid repository'
 # GH-993: a completed review round must reach the PR regardless of transport
@@ -60,6 +91,16 @@ head=$(printf '%s\n' "$facts" | cut -f1)
 state=$(printf '%s\n' "$facts" | cut -f2)
 printf '%s\n' "$head" | grep -qE '^[0-9a-f]{40}$' || die 'invalid PR head'
 [ "$state" = OPEN ] || die "PR is $state"
+# GH-1100: the squash subject is pinned to the PR title, never left to GitHub.
+# With no --subject, GitHub picks the squash subject itself, and for a PR with
+# exactly one commit it uses that commit's subject verbatim — which wrote a
+# `wip(review): ...` checkpoint (fa0d011) onto main permanently. The title is
+# read here and checked against the conventional-commit subject rule
+# (REVIEW.md §5 U4) in both modes: earlier signal on --check, and the
+# mandatory refusal on the merge path, before `gh pr merge` is ever reached.
+subject=$(gh pr view "$pr" --repo "$repo" --json title --jq '.title') || die 'cannot read PR title'
+printf '%s\n' "$subject" | grep -qE '^(feat|fix|docs|refactor|test|chore|perf|build|ci|style|revert)(\([a-z0-9._/-]+\))?!?: .+' \
+  || die "PR title is not a conventional commit subject (REVIEW.md §5 U4) and would become the squash subject as-is: '$subject' — rename the PR before merging"
 # `gh pr view --json comments` does not expose a comment `updatedAt` field.
 # Read the REST issue-comments shape instead: it carries `updated_at`, and
 # --paginate/--slurp makes the selection global rather than accidentally
@@ -174,5 +215,48 @@ malformed=$(printf '%s\n' "$report" | jq -er '.malformed | arrays | length') \
 gh pr checks "$pr" --repo "$repo" --required || die 'required checks are not green'
 echo "review accepted: PR #$pr @ $head"
 if [ "$action" = --merge ]; then
-  gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$head"
+  # GH-1100: `--subject` is mandatory — without it GitHub chooses the squash
+  # subject (the single-commit hazard above). `--body-file` is the caller's
+  # file when given; otherwise a minimal receipt is composed naming the
+  # reviewed SHA, the LGTM round parsed from $header, and the CI run link from
+  # `gh pr checks --json` (the `link` field carries the Actions run URL).
+  merge_body=$body_file
+  if [ -z "$merge_body" ]; then
+    round=$(printf '%s\n' "$header" | sed -n 's/^## Code Review: Round \([0-9][0-9]*\).*/\1/p')
+    [ -n "$round" ] || die 'cannot parse the review round for the merge body'
+    checks_json=$(gh pr checks "$pr" --repo "$repo" --required --json name,state,link) || die 'cannot read check runs for the merge body'
+    ci_link=$(printf '%s\n' "$checks_json" | jq -r 'map(.link // empty) | map(select(length > 0)) | (first // "")') || ci_link=''
+    [ -n "$ci_link" ] || die 'no check run link found for the merge body'
+    merge_body=$(mktemp "${TMPDIR:-/tmp}/merge-reviewed-pr-body.XXXXXX") || die 'cannot create the merge body file'
+    trap 'rm -f "$merge_body"' 0 HUP INT TERM
+    {
+      printf 'Squash merge via scripts/merge-reviewed-pr.sh.\n\n'
+      printf '%s\n' "- Reviewed SHA: $head"
+      printf '%s\n' "- Code review: PR #$pr Round $round — LGTM (P0=0, P1=0)"
+      printf '%s\n' "- CI: $ci_link"
+    } >"$merge_body"
+  fi
+  # GH-1100 Round 2: GitHub appends the ` (#N)` PR back-reference only to a
+  # squash subject IT chooses; a subject supplied through --subject is used
+  # verbatim, with no suffix. Pinning the title without re-adding the suffix
+  # would therefore strip the PR pointer from every future squash commit on
+  # main — measured, not theorised: of the last 60 subjects on main, 58 carry
+  # ` (#N)` and the only two that do not are exactly the two merged by hand
+  # with an explicit --subject. R7 forbids rewriting main, so each such commit
+  # would stay pointer-less forever. Compose what GitHub would have written.
+  #
+  # $subject stays the bare title: the U4 check above judges the title alone,
+  # never the title-plus-suffix, so a trailing ` (#N)` can neither rescue a
+  # bad title nor break a good one.
+  #
+  # The suffix is skipped only when the title already ends in THIS PR's own
+  # number — the one case where appending would duplicate it. A title ending
+  # in some OTHER PR's number still gets ` (#$pr)` appended: leaving a foreign
+  # number as the trailing back-reference would point `git log` at an
+  # unrelated PR, which is worse than a title that reads `… (#999) (#$pr)`.
+  merge_subject="$subject (#$pr)"
+  case "$subject" in
+    *" (#$pr)") merge_subject=$subject ;;
+  esac
+  gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$head" --subject "$merge_subject" --body-file "$merge_body"
 fi
