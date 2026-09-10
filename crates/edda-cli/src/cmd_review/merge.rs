@@ -173,7 +173,10 @@ fn receipt_body(pr: u64, head: &str, round: &str, ci: Option<&str>) -> String {
 /// `Ok(round)` on every check passing; `Err(exit_code)` after printing the
 /// refusal, mirroring `merge_inner`'s own stages.
 fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<String, i32> {
-    let mut latest: Option<&TimedComment> = None;
+    // `(updated_at, id, comment)` rather than a `key()` over the comment: the
+    // ordering keys are validated once, below, and carried, so nothing here
+    // can fall back to a default the sort would then trust.
+    let mut latest: Option<(&str, u64, &TimedComment)> = None;
     for candidate in timed.iter().filter(|t| {
         trusted_association(t.comment.author_association.as_deref())
             && t.comment
@@ -181,20 +184,36 @@ fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<St
                 .lines()
                 .any(|line| heading_parts(line.trim_end_matches('\r')).is_some())
     }) {
-        // A fn item, not a closure: it is called with two references of
-        // different borrow lifetimes (candidate vs. current), and a fn is
-        // lifetime-generic where a closure would pin one.
-        fn key(t: &TimedComment) -> (&str, u64) {
-            (
-                t.updated_at.as_str(),
-                t.comment.id.parse::<u64>().unwrap_or(0),
-            )
+        // Fail closed on the REST keys this ordering is built from, as the
+        // shell did: `error("trusted review lacks REST updated_at or numeric
+        // id")` → `die 'cannot select latest updated trusted review'`, exit 1
+        // (`scripts/merge-reviewed-pr.sh`, pre-adapter blob). Defaulting them
+        // instead — `unwrap_or_default()` on the read, `unwrap_or(0)` on the
+        // parse — sorts an unreadable comment silently to the bottom, so an
+        // edited blocker the gate cannot order loses to an older LGTM. A
+        // source that cannot be read yields a refusal, never "clean"
+        // (GH-1105 doneWhen 4); exit 1 is the shell's own code for it.
+        let Ok(id) = candidate.comment.id.parse::<u64>() else {
+            eprintln!(
+                "cannot select latest updated trusted review: a trusted §7 review carries no \
+                 numeric REST id (got {:?})",
+                candidate.comment.id
+            );
+            return Err(1);
+        };
+        if candidate.updated_at.is_empty() {
+            eprintln!(
+                "cannot select latest updated trusted review: trusted §7 review {id} carries no \
+                 REST updated_at"
+            );
+            return Err(1);
         }
-        if latest.is_none_or(|current| key(candidate) > key(current)) {
-            latest = Some(candidate);
+        let key = (candidate.updated_at.as_str(), id);
+        if latest.is_none_or(|(updated_at, current_id, _)| key > (updated_at, current_id)) {
+            latest = Some((key.0, key.1, candidate));
         }
     }
-    let Some(latest) = latest else {
+    let Some((_, _, latest)) = latest else {
         eprintln!("no trusted §7 review on PR #{pr}");
         return Err(1);
     };
@@ -531,6 +550,9 @@ mod tests {
     use std::cell::RefCell;
 
     const HEAD: &str = "aaaaaaaabbbbbbbbccccccccdddddddd11112222";
+    /// A SHA that is not the head — the side of the window where the
+    /// latest-review ordering actually decides the outcome.
+    const OLDER: &str = "1111111111111111111111111111111111111111";
 
     fn args(merge: bool) -> MergeArgs {
         MergeArgs {
@@ -761,6 +783,70 @@ mod tests {
             review(2, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
         ]);
         assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    }
+
+    /// The window `an_edit_moves_which_review_is_latest` does not reach: that
+    /// fixture puts the edited blocker on the **head** SHA, where `gate::union`
+    /// already refuses on its own, so it holds even with the ordering deleted.
+    /// Here the blocker is pinned to an older SHA — invisible to the union —
+    /// and only the `(updated_at, id)` ordering makes it the latest review the
+    /// head-pinning check then rejects. Take the ordering away (select the
+    /// first candidate, say) and the head-pinned LGTM wins and this merges.
+    #[test]
+    fn an_edited_blocker_on_an_older_sha_still_decides_which_review_is_latest() {
+        let fake = Fake::clean(vec![
+            // Deliberately first in the list: a selection that ignores
+            // `updated_at` and takes what it sees first picks this one.
+            review(2, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+            review(
+                1,
+                OLDER,
+                "Changes Requested, P0=0, P1=1",
+                "2026-09-08T12:00:00Z",
+            ),
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(
+            code, 1,
+            "the most recently edited trusted review was not the one judged"
+        );
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after the review check already refused"
+        );
+    }
+
+    /// GH-1105 review round 1: the shell refused outright when a trusted §7
+    /// review lacked the REST keys the selection orders by — the port defaulted
+    /// them, which sorts the unreadable comment to the bottom of the key and
+    /// lets an older LGTM be chosen instead of stopping the gate.
+    ///
+    /// The fixture sits inside the window where that difference shows: the
+    /// keyless comment is a blocker pinned to an **older** SHA, so it is
+    /// outside the union and outside the head-pinning check. Restore the two
+    /// `unwrap_or` defaults and the head-pinned LGTM is selected, every
+    /// remaining precondition passes and this merges at exit 0.
+    #[test]
+    fn a_trusted_review_lacking_its_rest_ordering_keys_refuses() {
+        for (label, id, updated_at) in [
+            ("no updated_at", "700", ""),
+            ("no numeric id", "", "2026-09-08T13:00:00Z"),
+            ("node id, not a REST id", "IC_kwDOA", "2026-09-08T13:00:00Z"),
+        ] {
+            let mut broken = review(7, OLDER, "Changes Requested, P0=1, P1=0", updated_at);
+            broken.comment.id = id.into();
+            let fake = Fake::clean(vec![lgtm().remove(0), broken]);
+            let code = merge_inner(&args(false), &fake).unwrap();
+            assert_eq!(
+                code, 1,
+                "{label}: a trusted review the gate cannot order was sorted to the bottom \
+                 instead of refusing"
+            );
+            assert!(
+                !*fake.reached_checks.borrow(),
+                "{label}: required checks were queried after the selection already refused"
+            );
+        }
     }
 
     #[test]
