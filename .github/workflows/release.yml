@@ -106,7 +106,97 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-release:
+  build-linux-release:
+    name: Build (${{ matrix.name }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    container:
+      # Both Linux architectures build in the same older userspace. The host
+      # label selects CPU architecture; the container owns the glibc floor.
+      image: ubuntu:22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - name: Install Linux build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential ca-certificates curl gh git pkg-config libssl-dev zstd
+
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}-ubuntu-22.04
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }} -p edda
+
+      - name: Verify Linux ABI floor and critical CLI surfaces
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/edda"
+          highest_glibc="$(readelf --version-info "$binary" \
+            | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
+          if [ -z "$highest_glibc" ]; then
+            echo "::error::Could not determine the GLIBC requirement for $binary"
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$highest_glibc" GLIBC_2.35 | sort -Vu | tail -1)" != "GLIBC_2.35" ]; then
+            echo "::error::$binary requires $highest_glibc; release assets must not exceed GLIBC_2.35"
+            exit 1
+          fi
+          echo "Linux ABI floor: $highest_glibc"
+          "$binary" --version
+          "$binary" dispatch --help >/dev/null
+          "$binary" verdict --help >/dev/null
+
+      - name: Prepare Linux archive
+        shell: bash
+        run: |
+          TAG="${{ needs.create-release.outputs.tag }}"
+          ARCHIVE="edda-${TAG}-${{ matrix.target }}"
+          mkdir "$ARCHIVE"
+          cp target/${{ matrix.target }}/release/edda "$ARCHIVE/"
+          cp LICENSE-MIT LICENSE-APACHE "$ARCHIVE/"
+          tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
+          sha256sum "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+          echo "ASSET=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Verify draft release and upload assets
+        shell: bash
+        run: |
+          tag="${{ needs.create-release.outputs.tag }}"
+          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" != "true" ]; then
+            echo "::error::Release $tag is no longer a draft; refusing to replace assets"
+            exit 1
+          fi
+          gh release upload "$tag" "${{ env.ASSET }}" "${{ env.ASSET }}.sha256" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-non-linux-release:
     name: Build (${{ matrix.name }})
     needs: create-release
     runs-on: ${{ matrix.os }}
@@ -114,19 +204,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux-x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-          - name: linux-aarch64
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            archive: tar.gz
           - name: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
-            cross: true
           - name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
@@ -138,10 +219,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Linux native deps
-        if: contains(matrix.target, 'linux-gnu')
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-
       - name: Install Rust
         run: |
           rustup show
@@ -151,10 +228,10 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Build release binaries
+      - name: Build release binary
         run: cargo build --locked --release --target ${{ matrix.target }} -p edda
 
-      - name: Prepare archive (unix)
+      - name: Prepare archive (macOS)
         if: matrix.archive == 'tar.gz'
         run: |
           TAG="${{ needs.create-release.outputs.tag }}"
@@ -166,7 +243,7 @@ jobs:
           shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
           echo "ASSET=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
 
-      - name: Prepare archive (windows)
+      - name: Prepare archive (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
@@ -178,7 +255,12 @@ jobs:
           Copy-Item "LICENSE-APACHE" "$ARCHIVE\"
           Compress-Archive -Path "$ARCHIVE\*" -DestinationPath "${ARCHIVE}.zip"
           $hash = (Get-FileHash "${ARCHIVE}.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  ${ARCHIVE}.zip" | Out-File -Encoding ASCII "${ARCHIVE}.zip.sha256"
+          $checksum = "$hash  ${ARCHIVE}.zip`n"
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) "${ARCHIVE}.zip.sha256"),
+            $checksum,
+            [System.Text.Encoding]::ASCII
+          )
           echo "ASSET=${ARCHIVE}.zip" >> $env:GITHUB_ENV
 
       - name: Verify draft release and upload assets
@@ -195,7 +277,7 @@ jobs:
 
   publish-release:
     name: Publish Release
-    needs: [create-release, build-release]
+    needs: [create-release, build-linux-release, build-non-linux-release]
     runs-on: ubuntu-latest
     steps:
       - name: Verify release assets
@@ -243,14 +325,21 @@ jobs:
             cd "$asset_dir"
             for checksum in *.sha256; do
               archive="${checksum%.sha256}"
-              expected_hash="$(awk '{ print tolower($1) }' "$checksum" | tr -d '\r\n')"
               actual_hash="$(sha256sum "$archive" | awk '{ print $1 }')"
-              if [[ ! "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || [ "$actual_hash" != "$expected_hash" ]; then
-                echo "::error::Checksum mismatch for $archive"
+              expected_line="$actual_hash  $archive"
+              actual_line="$(cat "$checksum")"
+              line_count="$(awk 'END { print NR }' "$checksum")"
+              final_byte="$(tail -c 1 "$checksum" | od -An -t u1 | tr -d '[:space:]')"
+              if grep -q $'\r' "$checksum"; then
+                echo "::error::Checksum sidecar contains CRLF: $checksum"
+                exit 1
+              fi
+              if [ "$line_count" != "1" ] || [ "$final_byte" != "10" ] \
+                || [ "$actual_line" != "$expected_line" ]; then
+                echo "::error::Checksum sidecar must be one exact ASCII LF line: $checksum"
                 exit 1
               fi
             done
-
           )
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

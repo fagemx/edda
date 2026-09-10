@@ -12,9 +12,13 @@ release-critical commands. A GitHub Release alone is not success.
 Since GH-648 (PR #847) the repository automates crates.io publication inside
 `.github/workflows/release.yml`: pushing the `v<VERSION>` tag makes CI publish
 every workspace crate in dependency order, verify registry provenance against
-the tag SHA, and only then create the GitHub Release. Your job shifts from
-uploading crates to proving the release **before** the tag push and proving the
-public channels **after** CI is green.
+the tag SHA, and only then create the GitHub Release. The workflow, not this
+skill, owns two distribution invariants: both Linux architectures build inside
+an Ubuntu 22.04 userspace and reject requirements above `GLIBC_2.35`, and every
+checksum sidecar is one exact ASCII line ending in LF. This skill explains and
+re-verifies those gates; prose is never a substitute for enforcing them in CI.
+Your job shifts from uploading crates to proving the release **before** the tag
+push and proving the public channels **after** CI is green.
 
 ## Usage
 
@@ -274,8 +278,8 @@ gh run view <RUN_ID> --json conclusion,jobs \
 | `prepare-crates` | `enabled=true` (secret present); tag/plan validation passed |
 | `publish-crates` | `SUCCESS: all <N> workspace versions verified` |
 | `create-release` | parity gate `verify --tag` passed; draft release created from the CHANGELOG section |
-| `build-release` (5 jobs) | every platform matrix leg green; all five archives + `.sha256` uploaded to the draft |
-| `publish-release` | exact 10-asset set, no empty assets, checksums verified, native binary canary without credentials (version core after stripping the optional build identity suffix), release published `--latest` |
+| `build-linux-release` + `build-non-linux-release` (5 jobs total) | every platform leg green; Linux x86_64/aarch64 built in Ubuntu 22.04, ABI cap and critical CLI canaries passed; all five archives + `.sha256` uploaded to the draft |
+| `publish-release` | exact 10-asset set, no empty assets, each checksum sidecar is exact ASCII+LF and matches its archive, native binary canary without credentials (version core after stripping the optional build identity suffix), release published `--latest` |
 
 Never repair a failed run by moving the tag.
 
@@ -320,12 +324,18 @@ curl -sSf https://raw.githubusercontent.com/fagemx/edda/main/install.sh \
 <LATEST_DIR>/bin/edda verdict --help
 ```
 
-Both binaries must report the intended version. Also prove the downloaded Linux
-asset on the repository's documented minimum Linux/glibc baseline. If no floor
-is documented, test at least a mainstream older baseline (for example Ubuntu
-22.04) and report the highest `GLIBC_x.y` from `readelf --version-info`. An
-`ubuntu-latest` build that starts only on the newest runner is not portable;
-`GLIBC_x.y not found` is a product failure, never an environmental retry.
+Both binaries must report the intended version. The release-asset compatibility
+baseline is Ubuntu 22.04: CI builds both Linux architectures inside that
+userspace and rejects a highest `readelf --version-info` requirement above
+`GLIBC_2.35`. Post-publication verification must still download the public
+asset, run it on Ubuntu 22.04, and report its observed highest `GLIBC_x.y`;
+checking the build directory or trusting the runner label is insufficient. An
+asset that fails there is a product failure, never an environmental retry.
+
+Download all ten public assets and run GNU `sha256sum -c` against every
+sidecar. A sidecar containing CRLF, a missing final LF, extra lines, a non-ASCII
+payload, or anything other than `<64 lowercase hex><two spaces><archive>\n` is
+a distribution failure even when the digest value itself is correct.
 
 After crates.io publication is verified, generate the Homebrew formula from the
 immutable crates.io source package. The generator downloads and hashes the
@@ -447,7 +457,7 @@ Use the decision table below, then resume at the earliest missing safe step.
 | Tag pushed, run failed at `publish-crates` | Rerun failed jobs (`gh run rerun <id> --failed`); verified crates are NO-OP |
 | Run failed at `create-release` (parity) | Inspect registry with `verify --tag`; rerun only after the cause is gone |
 | Run failed at `create-release` (CHANGELOG section missing) | BLOCKED; repair means a new commit and tag — operator decision, never move the tag |
-| Run failed at `build-release`/`publish-release` | Rerun failed jobs; draft uploads are clobber-safe and re-verified |
+| Run failed at `build-linux-release`/`build-non-linux-release`/`publish-release` | Rerun failed jobs; draft uploads are clobber-safe and re-verified |
 | Registry provenance differs from tag SHA | BLOCKED; do not yank or move tag without operator decision |
 | Public release exists but a channel is stale | Repair that channel without changing immutable crate/tag identity |
 
@@ -501,10 +511,15 @@ lag. After three failures with the same stable cause, stop and report
     detached tag worktree; never retarget silently when main advances.
 19. **Watch-log diagnosis**: trust run/job conclusions and required success
     markers, not an alarming tail line from `gh run watch`.
-20. **Newest-runner Linux means portable Linux**: measure the glibc floor and
-    run the release asset on the documented/older baseline.
+20. **Newest-runner Linux means portable Linux**: the host CPU label does not
+    define the userspace. Keep both Linux builds in the Ubuntu 22.04 container,
+    enforce the `GLIBC_2.35` cap before upload, and run the downloaded asset on
+    that baseline after publication.
 21. **Fresh `brew reinstall`**: install first, then reinstall; final proof reads
     the remote tap, not only a locally mounted formula.
+22. **Normalize checksum files only in the verifier**: accepting CRLF by
+    stripping `\r` hides a broken public sidecar. Producers emit ASCII+LF and
+    `publish-release` rejects any other byte shape before publishing.
 
 ## References
 

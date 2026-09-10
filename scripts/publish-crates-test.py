@@ -130,6 +130,30 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("needs: publish-crates", create)
         self.assertIn("publish-crates.py verify", create)
 
+    def test_workflow_enforces_portable_linux_and_lf_checksums(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/release.yml"
+        text = workflow.read_text()
+        linux = text.split("  build-linux-release:", 1)[1].split(
+            "  build-non-linux-release:", 1)[0]
+        non_linux = text.split("  build-non-linux-release:", 1)[1].split(
+            "  publish-release:", 1)[0]
+        publish = text.split("  publish-release:", 1)[1]
+
+        self.assertIn("image: ubuntu:22.04", linux)
+        self.assertEqual(linux.count("target: "), 2)
+        self.assertIn("release assets must not exceed GLIBC_2.35", linux)
+        self.assertIn('"$binary" dispatch --help', linux)
+        self.assertIn('"$binary" verdict --help', linux)
+        self.assertIn("[System.IO.File]::WriteAllText", non_linux)
+        self.assertIn('${ARCHIVE}.zip`n', non_linux)
+        self.assertNotIn("Out-File", non_linux)
+        self.assertIn("Checksum sidecar contains CRLF", publish)
+        self.assertIn("Checksum sidecar must be one exact ASCII LF line", publish)
+        self.assertIn(
+            "needs: [create-release, build-linux-release, build-non-linux-release]",
+            publish,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
