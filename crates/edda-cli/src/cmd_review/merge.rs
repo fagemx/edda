@@ -241,39 +241,41 @@ fn mergeability_refusal(pr: u64, mergeable: &str) -> Result<(), i32> {
     }
 }
 
-/// The subject PR's own holds, decided by the walk's own reducer over the
-/// subject's own comments — the same rule the walk applies, without a second
-/// read and without depending on the walk completing (#1124 Rounds 2 and 4):
+/// The subject PR's own holds, decided over the subject's own comments with
+/// the walk's own parsing — the same rule the walk applies, without a second
+/// read and without depending on the walk completing (#1124 Rounds 2, 4, 7):
 ///
 /// - a `## Review Response: Round N` answering a round that was never posted
 ///   (GH-993);
-/// - a reduced state that holds the PR ([`drift::PrState::holds`]): no verdict
-///   on head, or the newest verdict stale from an older SHA.
+/// - the newest AUTHORITATIVE §7 round in comment order pinned to an older
+///   SHA ([`drift::stale_authoritative`]) — authoritative only: a SHADOW round
+///   is not a verdict (`docs/fleet/rules.md` R18) and never enters the union,
+///   so it must not be able to hold the subject.
 ///
-/// The state half is not decoration. The walk's reducer orders a PR's comments
+/// The second half is not decoration. The walk's reducer orders a PR's comments
 /// by creation and the merge gate's own latest-review selection
 /// ([`latest_review_round`]) orders them by GitHub's edit time, so an older
-/// head-pinned LGTM edited after a later stale verdict is newest by edit —
-/// stage 4 approves it — while the reducer still reads the stale verdict,
-/// which the walk calls a hold. Two readings of the subject's own comments
-/// that disagree are not a green (Round 4's first P0).
+/// head-pinned LGTM edited after a later authoritative verdict is newest by
+/// edit — stage 4 approves it — while the other ordering still reads the later
+/// verdict as newest, and stale. Two readings of the subject's own comments
+/// that disagree are not a green (Round 4's first P0) — but only verdicts get
+/// a reading at all (Round 7's P1).
 ///
 /// `Err(1)` after printing the refusal.
 fn subject_hold_refusal(pr: u64, head: &str, comments: &[Comment]) -> Result<(), i32> {
-    let (state, orphan) = drift::reduce(head, comments);
-    if let Some(round) = orphan {
+    if let Some(round) = drift::reduce(head, comments).1 {
         eprintln!(
             "PR #{pr} carries an orphan Review Response for Round {round} — a response to \
              a round that was never posted (GH-993); refusing (#1124)"
         );
         return Err(1);
     }
-    if state.holds() {
+    if let Some(sha) = drift::stale_authoritative(head, comments) {
         eprintln!(
-            "PR #{pr}'s own reviews read {:?} to the verdict-drift walk's reducer — the walk \
-             orders these comments by creation and the merge gate orders them by edit, and two \
-             readings of the subject that disagree are not a green; refusing (#1124)",
-            state.as_str()
+            "PR #{pr}'s newest authoritative §7 round in comment order reads stale from {} — \
+             the walk orders these comments by creation and the merge gate orders them by edit, \
+             and two readings of the subject that disagree are not a green; refusing (#1124)",
+            &sha[..12]
         );
         return Err(1);
     }
@@ -958,6 +960,30 @@ mod tests {
             !*fake.reached_checks.borrow(),
             "required checks were queried after the subject's own hold already refused"
         );
+    }
+
+    // Round 7's P1: the check above must not let a SHADOW round hold the
+    // subject. SHADOW rounds are not verdicts (`docs/fleet/rules.md` R18) and
+    // never enter the union, so one pinned to an older SHA — created after the
+    // authoritative round, the way a calibration round follows a review — must
+    // not turn the gate's own edit-ordered approval into a refusal.
+    #[test]
+    fn a_shadow_round_cannot_hold_the_subject() {
+        let mut shadow = review(2, OLDER, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z");
+        shadow.comment.body = format!(
+            "## Code Review: Round 2 (SHADOW) — PR #4242 @ {OLDER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)\n"
+        );
+        let fake = Fake::clean(vec![
+            // Authoritative, pinned to head, edited after the shadow round:
+            // newest by `updated_at`, so stage 4 judges and approves it.
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T12:00:00Z"),
+            // SHADOW, created last: newest by comment order, stale by pin.
+            shadow,
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 0, "a SHADOW round held the subject");
+        assert!(*fake.reached_checks.borrow());
     }
 
     // The other half of the split: the subject's OWN stale verdict still

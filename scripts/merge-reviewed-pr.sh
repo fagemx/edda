@@ -4,9 +4,11 @@
 # `edda review merge` (crates/edda-cli/src/cmd_review/merge.rs): the
 # fleet-wide drift walk (GH-993, advisory since #1124 and refusing nothing —
 # the subject PR's own holds are read from the subject itself: its
-# mergeability, its orphan Review Responses, and the verdict states the drift
-# walk's own reducer holds — its comment order and the gate's edit order can
-# disagree about which round is newest, and a disagreement is not a green), the
+# mergeability, its orphan Review Responses, and the newest authoritative §7
+# round reading stale in the walk's comment order — its comment order and the
+# gate's edit order can disagree about which round is newest, and a
+# disagreement is not a green; SHADOW rounds are not verdicts and cannot hold
+# it), the
 # trusted-review checks, the union
 # rule (GH-769/GH-742), malformed-comment refusal (#917), required
 # checks, and — folded from #1100 — a squash subject always derived from

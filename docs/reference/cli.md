@@ -1543,13 +1543,14 @@ own holds still refuse**, read from the subject itself rather than from the
 walk: `mergeable=CONFLICTING` (R24 forbids reporting such a PR ready), an
 orphan `Review Response` answering a round that was never posted (GH-993),
 and a verdict that does not pin the current head (condition 2 above). The
-walk's own reducer is asked about the subject too, and a state it holds — no
-verdict on head, or the newest verdict stale from an older SHA — is a refusal
-of its own: the reducer orders a PR's comments by creation where this gate's
-latest-review selection orders them by GitHub's edit time, so an older
-head-pinned LGTM edited after a later stale verdict is newest to the gate and
-stale to the reducer, and two readings of the subject that disagree are not a
-green (#1124).
+walk's own heading grammar is then applied to the subject's comments in the
+walk's own order — creation order, where this gate's latest-review selection
+orders by GitHub's edit time — and the newest **authoritative** §7 round
+reading stale from an older SHA is a refusal of its own: an older head-pinned
+LGTM edited after a later verdict is newest to the gate and stale to the walk,
+and two readings of the subject that disagree are not a green (#1124). SHADOW
+rounds are not verdicts (R18) and never enter the union, so one pinned to an
+older SHA cannot hold the subject.
 
 The check-to-merge windows are deliberately not checked here:
 `--match-head-commit <head>` makes the forge itself reject a push that

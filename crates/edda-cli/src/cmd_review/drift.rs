@@ -73,10 +73,8 @@ pub(crate) enum PrState {
 }
 
 impl PrState {
-    /// The exact `<state>` token the shell printed — byte-compatible. Read by
-    /// `merge`'s subject-hold refusal too, so the state a refusal names is the
-    /// state the walk's own line prints (#1124 Round 4).
-    pub(crate) fn as_str(&self) -> String {
+    /// The exact `<state>` token the shell printed — byte-compatible.
+    fn as_str(&self) -> String {
         match self {
             PrState::NoVerdict => "no verdict on head".into(),
             PrState::StaleFrom(sha) => format!("stale from {}", &sha[..12]),
@@ -86,9 +84,7 @@ impl PrState {
         }
     }
 
-    /// Does this state hold its PR? The walk's own not-ready rule, applied by
-    /// the merge gate to the subject PR (#1124 Round 4).
-    pub(crate) fn holds(&self) -> bool {
+    fn holds(&self) -> bool {
         matches!(self, PrState::NoVerdict | PrState::StaleFrom(_))
     }
 }
@@ -180,6 +176,43 @@ pub(crate) fn reduce(head: &str, comments: &[Comment]) -> (PrState, Option<Strin
     };
     let orphan = response.filter(|round| !rounds.contains(round));
     (state, orphan)
+}
+
+/// The SHA of the newest *authoritative* §7 round, when it is pinned to a
+/// different SHA than `head` — the merge gate's cross-check against its own
+/// edit-ordered latest-review selection (#1124 Round 4).
+///
+/// The same loop as [`reduce`], with SHADOW rounds skipped rather than allowed
+/// to become `newest`: a SHADOW round is not a verdict (`docs/fleet/rules.md`
+/// R18) and never enters the union, so one pinned to an older SHA cannot hold
+/// a subject that carries an authoritative head-pinned LGTM (#1124 Round 7).
+/// The walk's own line still counts them, because that line reports what is on
+/// the PR rather than what the gate may act on (GH-1134 tracks the walk's own
+/// ordering).
+pub(crate) fn stale_authoritative(head: &str, comments: &[Comment]) -> Option<String> {
+    let mut newest: Option<String> = None;
+    for comment in comments {
+        if !trusted_association(comment.author_association.as_deref()) {
+            continue;
+        }
+        let lines: Vec<&str> = comment
+            .body
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .collect();
+        let Some(first) = lines.first().copied() else {
+            continue;
+        };
+        let Some((_round, sha, mut shadow)) = heading_parts(first) else {
+            continue;
+        };
+        shadow = shadow || lines.iter().any(|line| line.trim_end() == "- shadow: true");
+        if shadow {
+            continue;
+        }
+        newest = Some(sha);
+    }
+    newest.filter(|sha| sha != head)
 }
 
 /// The exact line the shell printed for one PR — byte-compatible, because

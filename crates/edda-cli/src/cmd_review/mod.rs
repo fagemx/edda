@@ -94,10 +94,11 @@ pub enum ReviewCmd {
     /// condition and a refusal there made every merge hostage to the whole
     /// open set. The subject PR's own holds still stop the merge, read from
     /// the subject itself — `CONFLICTING` mergeability (R24 forbids reporting
-    /// it ready), an orphan Review Response, the drift walk's own reducer
-    /// reading the subject's verdicts as stale (its comment order and this
-    /// gate's edit order can disagree about which round is newest), and a
-    /// verdict that does not pin head (#1124). `--merge`
+    /// it ready), an orphan Review Response, the newest authoritative §7 round
+    /// reading stale in the walk's comment order (its comment order and this
+    /// gate's edit order can disagree about which round is newest; SHADOW
+    /// rounds are not verdicts and cannot hold it), and a verdict that does
+    /// not pin head (#1124). `--merge`
     /// executes the squash with the validated subject and a gate-receipt
     /// body and requires operator authority. Read-only without it; never
     /// writes labels or statuses (deliver owns those).

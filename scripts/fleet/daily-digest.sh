@@ -178,11 +178,13 @@ open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit "$open_pr_limit"
 # it entirely in GH-1124 — the walk's own query refuses nothing — and the
 # subject PR's own holds are read from the subject's own facts rather than
 # from this walk (`review.merge-drift-guard=advisory-not-an-r6-condition`).
-# One of those reads does run the walk's *reducer* over the subject's own
-# comments (merge.rs `subject_hold_refusal`), because that is the rule the
-# walk's lines already express; the fleet-wide query is never the deciding
-# read. So a reader who needs the fleet's drift state reads it here and in
-# `edda review drift`, not from a merge refusal.
+# One of those reads does apply the walk's own heading grammar to the
+# subject's own comments (merge.rs `subject_hold_refusal` -> drift.rs
+# `stale_authoritative`), because that is the rule the walk's lines already
+# express; the fleet-wide query is never the deciding read, and SHADOW rounds
+# are skipped there because they are not verdicts. So a reader who needs the
+# fleet's drift state reads it here and in `edda review drift`, not from a
+# merge refusal.
 drift_out="$tmp/drift.txt"
 drift_rc=0
 GH_OPEN_JSON= EDDA_OPEN_PR_LIMIT="$open_pr_limit" sh "$self_dir/verdict-drift.sh" >"$drift_out" 2>"$tmp/drift.err" || drift_rc=$?
