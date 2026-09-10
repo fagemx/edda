@@ -273,18 +273,10 @@
    - `verdict-drift.sh` 由 `merge-reviewed-pr.sh` 自己呼叫並且 **fail-closed**——它非零就
      `die`。**不要在腳本外面自己跑一次然後決定要不要採信它。** 並行 fleet 裡 rc=1 常常來自
      另一張 mid-round 的 PR，這是真實的限制，但處理方式是等那張收斂或修好判決，不是覆寫閘。
-   - **你手寫的那份 squash 內文，送出前自己掃一遍。** 這是 `--body-file` 這條路獨有的風險：
-     squash 訊息在合併那一刻才存在，所以**合併前查 `closingIssuesReferences` 查不到它**——
-     那張表只反映**已經存在**的連結（多半來自 PR body）。實例：#1112 合併時 #1031 被關掉，
-     GitHub 的 `ClosedEvent.closer` 指的是 **Commit `3fbf08a`**（squash 訊息）而不是 PR，
-     開槍的字串是控制者敘事裡的一句 **`can fix GH-1031`**——而那句話的意思是「**不能**修好它」。
-     **否定沒有用，而且 `GH-N` 形式跟 `#N` 一樣算數。** 前半這個專案踩過——一句「does not
-     close #488」把 #488 關掉了；後半是 2026-09-09 在 PR #1112 上量到的，先前沒有記錄。
-     所以掃的樣式要涵蓋兩種形式、不分大小寫、不錨行首，而且要掃散文中間：
+   - **你手寫的那份 squash 內文，送出前自己掃一遍**——它在合併那一刻才存在，所以任何
+     合併前的查詢都看不到它。兩種編號形式、不分大小寫、不錨行首、要掃散文中間：
      `grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+'`。
-     敘事型的 merge body 特別危險——「Round 1 證明它**不能** fix GH-N」這種句子正中解析器。
-     已經存在的連結（PR body 那類）才用 GraphQL 查：
-     `gh api graphql -f query='{repository(owner:"…",name:"…"){pullRequest(number:<N>){closingIssuesReferences(first:10){nodes{number state}}}}}'`。
+     敘事型的 merge body 特別危險——寫「這個改法**沒有**修好 X」正中解析器。
    - **窗檢查有兩個，時間點和基準都不同，不要互抄。** 派審前查 `<base>..origin/main`——
      「從分支起點到現在，main 有沒有動過這張 PR 要改的檔」，這是本 runbook 第 6 步加的。
      **合併前**查 `<審過的 SHA>..origin/main`——「判決釘住的那棵樹跟 main 之間是不是空的」，

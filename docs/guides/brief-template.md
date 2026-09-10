@@ -125,62 +125,36 @@ the line and cost trade-offs on the principles side. This block is the mechanize
 half as it stands on this workstation. Every item below was paid for once; an
 item nobody has been burned by does not belong here.
 
-1. **Build lane** — name one of `worker-1|worker-2|verifier|verifier-2` and write
-   it as an export, together with *never an ad-hoc target directory, under any
-   name, for any reason*. Omitting the last clause is not pedantry: a lane once
-   read the ban as covering only `CARGO_TARGET_DIR` proper and built a scratch
-   directory of its own for ten full workspace rebuilds. A session that compiles
-   nothing gets `none` in facts field 2 and no such line.
-2. **Commit with `SKIP_CLIPPY=1` after running the L0 clippy warm.** The
-   pre-commit hook re-runs the same clippy and its cargo does not inherit the
-   lane's `CARGO_TARGET_DIR` (#1099), so every commit otherwise cold-builds a
-   stray `target/` in the worktree. The hook documents the flag itself and it
-   skips clippy alone — the size cap, doc-citation check, GH-692 ratchet, fmt,
-   markdown lint and file-length ratchet all still run, and CI runs clippy again
-   on three operating systems.
+1. **Build lane** — name one of `worker-1|worker-2|verifier|verifier-2` as an
+   export, with *never an ad-hoc target directory, under any name, for any
+   reason*. A session that compiles nothing gets `none` in facts field 2 and no
+   such line.
+2. **Commit with `SKIP_CLIPPY=1` after running the L0 clippy warm.** *(Placeholder
+   — delete this item when #1099 lands.)* The pre-commit hook re-runs the same
+   clippy and its cargo does not inherit the lane's `CARGO_TARGET_DIR`, so every
+   commit otherwise cold-builds a stray `target/` in the worktree. The flag is the
+   hook's own and skips clippy alone; every other hook gate still runs.
 3. **Peer-claimed paths**, listed explicitly, with *do not touch*.
 4. **Never delete or prune a worktree or branch.** A stray `target/` is the one
    deletable thing.
-5. **Foreground.** The single legitimate exception is a commit that still
-   triggers the hook's cold build. What is banned is manufactured work — load
-   generators, repeated-measurement loops, anything that spends the machine to
-   produce a number. One stalled lane left three orphan load processes running
-   and starved a healthy peer.
-6. **Commit and push per coherent edit, not at the end.** Lanes here have
-   repeatedly stopped with finished work uncommitted on disk.
-7. **All GitHub text through a file and `--body-file`.** Never multi-line text in
-   shell double quotes: backticks inside become command substitution, which ate a
-   test name out of an issue comment on 2026-09-09.
-8. **Closing keywords fire from prose, from `GH-N`, and through a negation.** The
-   principle above (`pr.closing-keyword`) governs *when* one is allowed; this is
-   how to tell whether one is present, which is harder than it looks. On PR #1112
-   the issue that closed was closed by the **squash commit**, not the PR — GitHub's
-   `ClosedEvent.closer` names `Commit 3fbf08a` for it and `PullRequest 1112` for the
-   other — and the string that fired was `can fix GH-1031`, inside a sentence saying
-   a change did **not** fix it. Negation does not disarm the parser and `GH-N` counts
-   exactly as `#N` does. The first half this project has met before — a sentence reading
-   "does not close #488" closed #488. The second half was measured on PR #1112 on
-   2026-09-09 and was not recorded anywhere before that.
-
-   So scan both forms, unanchored, case-insensitive, in running prose rather than
-   trailer lines only:
+5. **Foreground.** The exception is a commit that still triggers the hook's cold
+   build. Banned is manufactured work — load generators, repeated-measurement
+   loops, anything that spends the machine to produce a number.
+6. **Commit and push per coherent edit, not at the end.** *(Placeholder — the
+   reason lanes stop mid-work is the cold build; revisit when #1099 lands.)*
+7. **All GitHub text through a file and `--body-file`.** Backticks inside shell
+   double quotes become command substitution.
+8. **Closing keywords fire from prose, from `GH-N`, and through a negation** — so
+   grep the text you are about to submit, including the squash body, which does not
+   exist until the merge and which no pre-merge query can see:
 
    ```bash
    grep -inE '(clos|fix|resolv)[a-z]*[[:space:]]+(#|GH-)[0-9]+' <file>
    ```
 
-   And scan **the squash body you are about to submit**, because that is the text
-   the parser will read and it does not exist until the merge. Querying GitHub's
-   link table beforehand cannot see it:
-
-   ```bash
-   gh api graphql -f query='{repository(owner:"<owner>",name:"<repo>"){pullRequest(number:<N>){closingIssuesReferences(first:10){nodes{number state}}}}}'
-   ```
-
-   That query answers a different question — which links *already* exist, normally
-   from the PR body. Use it for those; use the grep for the text you are authoring.
-   A narrative merge body is the dangerous case: explaining that a fix did not work
-   is exactly the sentence shape that closes the issue.
+   `pr.closing-keyword` governs *when* a keyword is allowed; this is only how to
+   tell whether one is present. A narrative body is the dangerous case — writing
+   that a change did not fix something is the sentence shape that closes it.
 9. **R7** — no amend, rebase, or force-push on a pushed commit; add a commit.
 
 ## Review briefs — state the risk as a question
