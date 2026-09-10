@@ -529,14 +529,57 @@ fn mirror_import_fails_closed_on_partial_or_mixed_encoding_before_writes() {
         std::fs::write(mirror.join("decisions/test.md"), text).unwrap();
 
         let source = MirrorSource { mirror_dir: mirror };
-        let error = sync_from_mirror(&target, &source, false).unwrap_err();
-        assert!(error.to_string().contains("ambiguous mirror encoding"));
+        // The refusal is now contained to the file and reported (GH-1044 F13)
+        // rather than aborting the import — but it is still a refusal: not one
+        // row of an unclassifiable shape reaches the ledger.
+        let r = sync_from_mirror(&target, &source, false).unwrap();
+        assert_eq!(r.errors.len(), 1, "the refusal is reported, not swallowed");
+        assert!(r.errors[0].error.contains("ambiguous mirror encoding"));
+        assert!(r.imported.is_empty());
         assert!(target
             .active_decisions(None, None, None, None)
             .unwrap()
             .is_empty());
         let _ = std::fs::remove_dir_all(tmp);
     }
+}
+
+#[test]
+fn mirror_import_contains_one_unparseable_file_instead_of_aborting_the_mirror() {
+    // The raw (pre-#1017) writer rendered the heading as `## `{key}`` with the
+    // key verbatim (`3306c1a^:crates/edda-cli/src/cmd_export.rs:125`), so a
+    // legacy key holding a newline emits a heading with no closing backtick.
+    // Before this fix `parse_mirror`'s `?` let that one file abort every other
+    // domain in the mirror, and SessionStart's `.ok()?` swallowed the error —
+    // cross-machine sync died silently and retried identically forever.
+    let (tmp, target) = setup_workspace();
+    let index = index_body_with_stamp("2026-09-09T00:00:00Z", "4090");
+    let mirror = write_mirror_tree(&tmp.join("_mirror"), &index);
+    // Sorts before `fleet.md`, so the refusal is reached first.
+    std::fs::write(
+        mirror.join("decisions/aaa-legacy.md"),
+        "## `legacy\nkey`\n- **Value**: `v`\n- **event_id**: `evt_legacy`\n",
+    )
+    .unwrap();
+
+    let source = MirrorSource { mirror_dir: mirror };
+    let r = sync_from_mirror(&target, &source, false).unwrap();
+
+    assert_eq!(r.imported.len(), 2, "the parseable domain still imports");
+    assert_eq!(r.errors.len(), 1, "the refusal is reported, not swallowed");
+    assert_eq!(r.errors[0].project_name, "aaa-legacy");
+    assert!(r.errors[0].error.contains("malformed mirror heading"));
+    // Base read this heading as `strip_suffix('`').unwrap_or(rest)` and would
+    // have imported the truncated key. Refusing means refusing, not guessing.
+    assert!(
+        target
+            .sqlite
+            .find_active_decision("main", "legacy")
+            .unwrap()
+            .is_none(),
+        "nothing from the refused file is imported as if it parsed"
+    );
+    let _ = std::fs::remove_dir_all(tmp);
 }
 
 /// Every caller-supplied field in its escaped form (GH-671 R5) — not only

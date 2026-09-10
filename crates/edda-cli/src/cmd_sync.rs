@@ -132,6 +132,13 @@ fn execute_from_mirror(repo_root: &Path, mirror: &str, dry_run: bool) -> anyhow:
         }
     }
 
+    // GH-1044: a domain file the importer refuses is skipped, not fatal — but
+    // it prints before the summary and before the up-to-date early return,
+    // because "already up to date" over a refused file is the lie that hides it.
+    if let Some(warning) = refused_files_warning(&result.errors) {
+        eprintln!("{warning}\n");
+    }
+
     if result.imported.is_empty() && result.conflicts.is_empty() {
         println!("Already up to date ({} skipped).", result.skipped);
         return Ok(());
@@ -171,6 +178,19 @@ fn execute_from_mirror(repo_root: &Path, mirror: &str, dry_run: bool) -> anyhow:
     }
 
     Ok(())
+}
+
+/// The visible refusal signal (GH-1044): every mirror file the importer would
+/// not parse, named with its reason, so the operator can fix or delete it.
+fn refused_files_warning(errors: &[edda_ledger::sync::SourceError]) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+    let mut out = format!("Refused {} mirror file(s) — NOT imported:", errors.len());
+    for e in errors {
+        out.push_str(&format!("\n  {}.md: {}", e.project_name, e.error));
+    }
+    Some(out)
 }
 
 /// Resolve the mirror directory: absolute as-is, otherwise relative to the
@@ -217,6 +237,22 @@ mod tests {
     use super::*;
     use edda_ledger::Ledger;
     use std::fs;
+
+    #[test]
+    fn a_refused_mirror_file_is_named_with_its_reason() {
+        // GH-1044 F13: the importer now contains a refusal instead of aborting
+        // the mirror, so `--from-mirror` must print what it refused. Silence
+        // here would trade a loud abort for a quiet skip, which is worse.
+        assert_eq!(refused_files_warning(&[]), None, "no refusal ⇒ no noise");
+        let errors = [edda_ledger::sync::SourceError {
+            project_name: "legacy".to_string(),
+            error: "malformed mirror heading: ## `legacy".to_string(),
+        }];
+        let warning = refused_files_warning(&errors).expect("a refusal must be visible");
+        assert!(warning.contains("Refused 1 mirror file(s)"), "{warning}");
+        assert!(warning.contains("legacy.md"), "{warning}");
+        assert!(warning.contains("malformed mirror heading"), "{warning}");
+    }
 
     /// The verbatim value and six-point reason the binding carrier demands:
     /// `fleet.lane-profile` quotes the operator ruling, never the

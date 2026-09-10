@@ -347,7 +347,7 @@ pub fn sync_from_mirror(
         freshness,
     });
 
-    let decisions = parse_mirror(&source.mirror_dir)?;
+    let decisions = parse_mirror(&source.mirror_dir, &mut result)?;
     let branch = target.head_branch()?;
 
     for md in &decisions {
@@ -544,8 +544,10 @@ fn mirror_freshness(meta: &MirrorIndexMeta, threshold_hours: i64) -> MirrorFresh
     }
 }
 
-/// Parse every `decisions/*.md` file of a mirror into importable rows.
-fn parse_mirror(mirror_dir: &Path) -> anyhow::Result<Vec<MirrorDecision>> {
+/// Parse every `decisions/*.md` file of a mirror into importable rows. A file
+/// this parser refuses is reported in `result.errors` — never guessed at, never
+/// fatal to the mirror's other domains, and never silent (GH-1044).
+fn parse_mirror(mirror_dir: &Path, result: &mut SyncResult) -> anyhow::Result<Vec<MirrorDecision>> {
     let decisions_dir = mirror_dir.join("decisions");
     if !decisions_dir.is_dir() {
         anyhow::bail!(
@@ -562,14 +564,16 @@ fn parse_mirror(mirror_dir: &Path) -> anyhow::Result<Vec<MirrorDecision>> {
 
     let mut out = Vec::new();
     for f in files {
-        let stem = f
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
+        let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let text = std::fs::read_to_string(&f)
             .with_context(|| format!("read mirror file {}", f.display()))?;
-        out.extend(parse_domain_markdown(&stem, &text)?);
+        match parse_domain_markdown(stem, &text) {
+            Ok(rows) => out.extend(rows),
+            Err(e) => result.errors.push(SourceError {
+                project_name: stem.to_string(),
+                error: e.to_string(),
+            }),
+        }
     }
     Ok(out)
 }
@@ -636,9 +640,8 @@ fn record_section_encoding(
     Ok(())
 }
 
-/// Parse one domain file of the mirror format (the exact shape
-/// `edda export md` renders) into decisions. Missing optional lines fall
-/// back to conservative defaults so pre-GH-671 mirrors still import.
+/// Parse one domain file of the mirror format (the exact shape `edda export md`
+/// renders). Missing optional lines default; an unclassifiable shape errors.
 fn parse_domain_markdown(file_domain: &str, text: &str) -> anyhow::Result<Vec<MirrorDecision>> {
     let encoding = detect_mirror_encoding(text)?;
     let mut out: Vec<MirrorDecision> = Vec::new();
