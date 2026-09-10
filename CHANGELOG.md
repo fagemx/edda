@@ -12,12 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Merged-lane cleanup script** — `scripts/fleet/reclaim-merged.sh` reclaims merged lane worktrees and local/remote branches with dry-run-first receipts and fail-closed remote verification (GH-1009, #1091)
+- **Explicit fleet machine identity** — sessions carry `label@machine` identity through the fleet label chain and warn when live labels collide on the machine-local board (GH-671, #1120)
 
 ### Changed
 
 - **Merge governance follows the rule gate** — loaded policy carriers now describe the current-head LGTM, zero-blocker, CI, union, and base-window conditions instead of assigning merge to a named operator; shared checkouts remain on main and reviewers fetch private refs (GH-1064, #1101)
 - **Fleet review rules are complete** — R18–R20 restore Independent Review semantics, review-dispatch pre-claim, and L1 ownership while repairing R21/R22 citations (GH-966, #1095)
 - **Release operations are hardened** — Homebrew formulas build the immutable crates.io source package to avoid Linux glibc-runner coupling (#1090), and the release skill records the slower `0.6.x` patch cadence plus v0.6.0 operational lessons (#1106)
+- **Review gating has one implementation** — drift detection and merge preconditions now share the Rust verdict reader instead of parallel shell logic (GH-1105, #1121)
 
 ### Fixed
 
@@ -27,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **doneWhen parsing** accepts the documented spacing variants across issue/spec matchers (GH-1056, #1089)
 - **`edda review deliver` read path** has an argv-level regression guard and validates PR-vs-issue identity before reducing comments (GH-1079, #1086)
 - **CI test reliability** — verify-contract assertions match Edda's authored success marker instead of random temporary-path text (GH-1033, #1110), and fake-Codex reconciliation tests use event synchronization instead of load-sensitive renewal timing (GH-1078, GH-1031, #1112)
+- **Trusted review delivery** — `edda review deliver` refuses §7 verdicts whose authors GitHub does not identify as trusted collaborators (GH-1103, #1119)
+- **Stable merge receipts** — `merge-reviewed-pr.sh` pins the squash subject to the PR title and carries the reviewed merge body (GH-1100, #1118)
+- **Mirror round trips and recovery** — backticks round-trip without corrupting list boundaries, raw pre-#1017 mirrors retain their backslashes, ambiguous shapes fail closed, and one refused domain file is contained and reported instead of aborting the whole import (GH-1044, #1108)
 
 ## [0.6.0] - 2026-09-09
 
