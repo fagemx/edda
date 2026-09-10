@@ -22,11 +22,12 @@
 //!   deliver`'s to write, which the reviewing session runs when it
 //!   delivers its own round.
 //! - **Cross-PR drift is advisory (#1124).** The walk still runs and every
-//!   line it produced still prints, but it no longer refuses: coupling one
-//!   merge to the whole open set made every PR hostage to unrelated ones, and
-//!   drift across the open set is not among R6's conditions. The subject PR's
-//!   own verdict pinned to its head is a different check, and stage 4 keeps
-//!   it — as do the union and the required checks behind it.
+//!   line it produced still prints, but another PR's hold no longer refuses:
+//!   coupling one merge to the whole open set made every PR hostage to
+//!   unrelated ones, and drift across the open set is not among R6's
+//!   conditions. The subject PR's own hold still does — its stale verdict as
+//!   stage 4's R6 condition, and a `CONFLICTING` subject, which R24 forbids
+//!   reporting ready and `--check` answers for.
 //! - **#1100 is folded in.** The squash subject is always the PR title —
 //!   never the branch commit's own subject on a single-commit PR — and it
 //!   is validated against the commit convention before any merge executes,
@@ -89,8 +90,9 @@ pub(crate) trait Reads {
     /// The REST issue comments, newest-last, each with its `updated_at`.
     fn comments(&self, pr: u64) -> Result<Vec<TimedComment>>;
     /// The fleet-wide drift walk (`edda review drift`'s own query) — stage
-    /// 1's report, advisory since #1124.
-    fn drift(&self) -> Result<(Vec<String>, bool)>;
+    /// 1's report: every line prints, and `Report::holds(subject)` decides
+    /// the one refusal left in it (#1124).
+    fn drift(&self) -> Result<drift::Report>;
     /// Do the ruleset's required checks pass? (`gh pr checks --required`)
     fn checks_green(&self, pr: u64) -> Result<bool>;
     /// The `CI Gate` check-run URL for the receipt body, if resolvable.
@@ -331,16 +333,26 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
             anyhow::bail!("body file not found: {path}");
         }
     }
-    // 1. Fleet-wide drift (GH-993) — reported, never a refusal (#1124):
-    //    cross-PR drift is not an R6 condition, and while it refused, every
-    //    merge was hostage to the whole open set. The subject PR's own
-    //    verdict pinning is stage 4; a walk that cannot read is reported as
-    //    unavailable for the same reason it no longer decides anything.
+    // 1. Fleet-wide drift (GH-993) — reported for every PR, a refusal only
+    //    for the subject (#1124). Cross-PR drift is not an R6 condition, and
+    //    while it refused, every merge was hostage to the whole open set. The
+    //    subject's own hold still refuses: its stale verdict is stage 4's R6
+    //    condition, and a `CONFLICTING` subject is one R24 forbids calling
+    //    ready — `--check` answers that question. A walk that cannot read is
+    //    reported as unavailable for the same reason it no longer decides.
     match reads.drift() {
-        Ok((lines, any_holds)) => {
-            let block = drift::advisory(&lines, any_holds);
+        Ok(report) => {
+            let block = drift::advisory(&report.lines, report.any_holds);
             if !block.is_empty() {
                 eprintln!("{block}");
+            }
+            if report.holds(args.pr) {
+                eprintln!(
+                    "verdict-drift holds PR #{} itself — the subject PR's own drift is still a \
+                     refusal; the rest of the walk above is advisory (#1124, GH-993)",
+                    args.pr
+                );
+                return Ok(1);
             }
         }
         Err(error) => eprintln!(
@@ -564,7 +576,7 @@ impl Reads for GhReads<'_> {
             .collect())
     }
 
-    fn drift(&self) -> Result<(Vec<String>, bool)> {
+    fn drift(&self) -> Result<drift::Report> {
         drift::evaluate(
             self.cwd,
             std::env::var("EDDA_OPEN_PR_LIMIT")
@@ -668,7 +680,7 @@ mod tests {
         state: &'static str,
         title: String,
         comments: Vec<TimedComment>,
-        drift: Result<(Vec<String>, bool), String>,
+        drift: Result<drift::Report, String>,
         fail_comments: bool,
         checks_green: bool,
         merged: RefCell<Vec<(u64, String, String, String)>>,
@@ -687,7 +699,7 @@ mod tests {
                 state: "OPEN",
                 title: "fix(edda-cli): a merge the fleet already reviewed".into(),
                 comments,
-                drift: Ok((vec![], false)),
+                drift: Ok(drift::Report::new(vec![], vec![])),
                 fail_comments: false,
                 checks_green: true,
                 merged: RefCell::new(Vec::new()),
@@ -715,7 +727,7 @@ mod tests {
             }
             Ok(self.comments.clone())
         }
-        fn drift(&self) -> Result<(Vec<String>, bool)> {
+        fn drift(&self) -> Result<drift::Report> {
             self.drift.clone().map_err(anyhow::Error::msg)
         }
         fn checks_green(&self, pr: u64) -> Result<bool> {
@@ -802,12 +814,12 @@ mod tests {
     #[test]
     fn a_dirty_open_set_is_advisory_and_the_green_subject_merges() {
         let mut fake = Fake::clean(lgtm());
-        fake.drift = Ok((
+        fake.drift = Ok(drift::Report::new(
             vec![
                 "#9001 dddddddddddd main no verdict on head".into(),
                 "#9002 eeeeeeeeeeee main LGTM".into(),
             ],
-            true,
+            vec![9001],
         ));
         let code = merge_inner(&args(false), &fake).unwrap();
         assert_eq!(code, 0, "an unrelated PR's drift refused this merge");
@@ -822,9 +834,11 @@ mod tests {
     }
 
     // The other half of the split: the subject's OWN stale verdict still
-    // refuses. A guard, not the fix's evidence — it holds on the pre-fix code
-    // too, and does not isolate the refusing stage. The two tests around it
-    // are where the regression evidence lives.
+    // refuses, and since the Round-2 P0 it refuses at stage 1 — the walk's
+    // hold list names the subject. A guard rather than regression evidence:
+    // the pre-fix code also answered 1 here, because back then ANY open PR's
+    // hold refused. `a_conflicting_subject_still_refuses` below is the
+    // fixture that fails on the code this branch replaced.
     #[test]
     fn the_subjects_own_stale_verdict_still_refuses() {
         let mut fake = Fake::clean(vec![review(
@@ -833,19 +847,41 @@ mod tests {
             "LGTM (P0=0, P1=0)",
             "2026-09-08T11:00:00Z",
         )]);
-        fake.drift = Ok((
+        fake.drift = Ok(drift::Report::new(
             vec![format!(
                 "#4242 {} main stale from {}",
                 &HEAD[..12],
                 &OLDER[..12]
             )],
-            true,
+            vec![4242],
         ));
         let code = merge_inner(&args(false), &fake).unwrap();
         assert_eq!(code, 1, "the subject's own drifted verdict was merged");
         assert!(
             !*fake.reached_checks.borrow(),
-            "required checks were queried after the pinning check already refused"
+            "required checks were queried after the subject's own hold already refused"
+        );
+    }
+
+    // The authoritative round's P0 (PR #1132 Round 2): a subject PR whose own
+    // drift line reads `mergeable=CONFLICTING` holds, and `--check` must not
+    // answer "accepted" for a PR R24 forbids reporting ready. Before the fix
+    // the walk's hold was printed and discarded, and this fixture returned 0.
+    #[test]
+    fn a_conflicting_subject_still_refuses() {
+        let mut fake = Fake::clean(lgtm());
+        fake.drift = Ok(drift::Report::new(
+            vec![format!(
+                "#4242 {} main LGTM mergeable=CONFLICTING",
+                &HEAD[..12]
+            )],
+            vec![4242],
+        ));
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 1, "a CONFLICTING subject was reported ready");
+        assert!(
+            !*fake.reached_comments.borrow(),
+            "the refusal came after the review reads, not from the subject's own hold"
         );
     }
 
@@ -865,7 +901,10 @@ mod tests {
     #[test]
     fn a_populated_clean_drift_state_does_not_block() {
         let mut fake = Fake::clean(lgtm());
-        fake.drift = Ok((vec!["#9002 eeeeeeeeeeee main LGTM".into()], false));
+        fake.drift = Ok(drift::Report::new(
+            vec!["#9002 eeeeeeeeeeee main LGTM".into()],
+            vec![],
+        ));
         assert_eq!(merge_inner(&args(false), &fake).unwrap(), 0);
     }
 

@@ -277,6 +277,35 @@ fn parse_open_prs(value: &serde_json::Value) -> Vec<PrRow> {
         .collect()
 }
 
+/// The drift walk's result: the lines the fleet report prints, whether any
+/// open PR holds, and which PR numbers do (#1124). `edda review merge` reads
+/// the last two separately: another PR's hold is advisory, the subject's own
+/// is still a refusal — including a subject that is `CONFLICTING`, which
+/// [`holds`] counts and R24 forbids reporting ready.
+#[derive(Debug, Clone)]
+pub(crate) struct Report {
+    pub lines: Vec<String>,
+    pub any_holds: bool,
+    pub holding: Vec<u64>,
+}
+
+impl Report {
+    /// The report-shaped constructor: `any_holds` follows from the hold set,
+    /// so no caller can state one without the other.
+    pub(crate) fn new(lines: Vec<String>, holding: Vec<u64>) -> Self {
+        Self {
+            any_holds: !holding.is_empty(),
+            lines,
+            holding,
+        }
+    }
+
+    /// Does this PR hold? The question stage 1 asks about the subject.
+    pub(crate) fn holds(&self, pr: u64) -> bool {
+        self.holding.contains(&pr)
+    }
+}
+
 /// The drift query over the whole open-PR set: one output line per PR and
 /// whether any PR is not ready. Split from [`run`] so `edda review merge`
 /// consults the same walk without a subprocess. The walk's scope is the whole
@@ -284,7 +313,7 @@ fn parse_open_prs(value: &serde_json::Value) -> Vec<PrRow> {
 /// `merge` reads it through [`advisory`] and the subject PR's own gate
 /// decides, where the shell this replaced refused every merge while any
 /// unrelated PR had drifted.
-pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
+pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<Report> {
     let argv = open_prs_argv(limit);
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     let value = gh(cwd, &args).context("list open PRs")?;
@@ -293,17 +322,17 @@ pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
         eprintln!("{warning}");
     }
     let mut lines = Vec::new();
-    let mut not_ready = false;
+    let mut holding = Vec::new();
     for row in &rows {
         let list = comments(cwd, row.number)
             .with_context(|| format!("read comments of PR #{}", row.number))?;
         let (state, orphan) = reduce(&row.head, &list);
         if holds(row, &state, &orphan) {
-            not_ready = true;
+            holding.push(row.number);
         }
         lines.push(line_for(row, &state, &orphan));
     }
-    Ok((lines, not_ready))
+    Ok(Report::new(lines, holding))
 }
 
 /// CLI entry point. Exit: 0 every open PR is ready, 1 drift found, 2 cannot
@@ -311,21 +340,21 @@ pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
 pub fn run(args: DriftArgs, cwd: &Path) -> Result<()> {
     let limit = effective_limit(args.limit);
     match evaluate(cwd, limit) {
-        Ok((lines, not_ready)) => {
+        Ok(report) => {
             if args.json {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "prs": lines,
-                        "not_ready": not_ready,
+                        "prs": report.lines,
+                        "not_ready": report.any_holds,
                     })
                 );
             } else {
-                for line in &lines {
+                for line in &report.lines {
                     println!("{line}");
                 }
             }
-            if not_ready {
+            if report.any_holds {
                 std::process::exit(1);
             }
             Ok(())
@@ -689,6 +718,36 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].mergeable, "CONFLICTING");
         assert_eq!(rows[1].mergeable, "", "absent mergeable annotates nothing");
+    }
+
+    // #1132 Round 2's P0 lives at this seam: `merge` must be able to tell the
+    // subject's own hold from another PR's, because only the subject's is
+    // still a refusal. `holds` is also where CONFLICTING enters a hold
+    // (R24), so a subject that is CONFLICTING lands in `holding`.
+    #[test]
+    fn the_report_separates_the_subject_from_the_open_set() {
+        let report = Report::new(vec!["#1 a main LGTM".into()], vec![2, 3]);
+        assert!(report.any_holds);
+        assert!(
+            report.holds(2) && report.holds(3),
+            "a holding PR was dropped from the set"
+        );
+        assert!(!report.holds(1), "a clean PR read as holding");
+        let empty = Report::new(vec![], vec![]);
+        assert!(!empty.any_holds && !empty.holds(1));
+    }
+
+    #[test]
+    fn a_conflicting_row_is_a_hold_for_its_own_pr() {
+        let rows = [row(7, SHA, "main", "CONFLICTING")];
+        let list = [comment(
+            &verdict_line_body(SHA, "LGTM (P0=0, P1=0)"),
+            "OWNER",
+        )];
+        let (state, orphan) = reduce(SHA, &list);
+        assert!(holds(&rows[0], &state, &orphan));
+        let conflict = Report::new(vec![line_for(&rows[0], &state, &orphan)], vec![7]);
+        assert!(conflict.holds(7) && conflict.any_holds);
     }
 
     // #1124's fixture at the block's own seam: the walked lines survive into

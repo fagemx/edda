@@ -1534,13 +1534,15 @@ The conditions run in order, and the first failure rejects with exit 1:
    offending string — `wip`, an empty scope, and a missing type all block.
 
 Before those, the fleet-wide drift walk (GH-993) runs and prints every line
-it produced — each open PR's head, base, and verdict state — but it is
-**advisory**: drift on other open PRs no longer refuses, because cross-PR
-drift is not one of R6's conditions and a refusal there made every merge
-hostage to the whole open set (#1124,
-`review.merge-drift-guard=advisory-not-an-r6-condition`). Drift on *this*
-PR is not lost by that: a verdict that does not pin the current head is
-condition 2 above, and stops the merge there.
+it produced — each open PR's head, base, and verdict state — and it is
+**advisory about the other PRs**: drift on them no longer refuses, because
+cross-PR drift is not one of R6's conditions and a refusal there made every
+merge hostage to the whole open set (#1124,
+`review.merge-drift-guard=advisory-not-an-r6-condition`). The **subject PR's
+own hold still refuses** — a verdict that does not pin the current head is
+condition 2 above, and a subject whose own line is held (for instance
+`mergeable=CONFLICTING`, which R24 forbids reporting ready) stops the merge
+at this stage with exit 1.
 
 The check-to-merge windows are deliberately not checked here:
 `--match-head-commit <head>` makes the forge itself reject a push that

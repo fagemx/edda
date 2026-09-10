@@ -2,8 +2,9 @@
 # merge-reviewed-pr.sh — one-line adapter (GH-1105; mechanism.shell-role=
 # one-line-adapter-only). The merge preconditions are the product verb
 # `edda review merge` (crates/edda-cli/src/cmd_review/merge.rs): the
-# fleet-wide drift walk (GH-993, advisory since #1124 — reported, never a
-# refusal), the trusted-review checks, the union
+# fleet-wide drift walk (GH-993, advisory since #1124 about every other PR —
+# it is reported and printed, and only the subject PR's own hold refuses), the
+# trusted-review checks, the union
 # rule (GH-769/GH-742), malformed-comment refusal (#917), required
 # checks, and — folded from #1100 — a squash subject always derived from
 # the validated PR title and carrying its ` (#N)` back-reference, plus a

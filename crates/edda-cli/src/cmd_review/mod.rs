@@ -90,9 +90,11 @@ pub enum ReviewCmd {
     /// trusted review pinned to head, the union (GH-769/GH-742), malformed
     /// refusals (#917), required checks, and a commit-conventional squash
     /// subject — without merging. The fleet-wide drift walk (GH-993) is
-    /// reported and printed, but no longer enforced: cross-PR drift is not an
-    /// R6 condition, and a refusal there made every merge hostage to the
-    /// whole open set (#1124). `--merge`
+    /// reported and printed, and enforced only against the subject PR itself:
+    /// cross-PR drift is not an R6 condition and a refusal there made every
+    /// merge hostage to the whole open set, while a subject that holds (a
+    /// stale verdict, or `CONFLICTING`, which R24 forbids calling ready) still
+    /// stops the merge (#1124). `--merge`
     /// executes the squash with the validated subject and a gate-receipt
     /// body and requires operator authority. Read-only without it; never
     /// writes labels or statuses (deliver owns those).
