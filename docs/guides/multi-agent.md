@@ -322,9 +322,28 @@ network protocol:
 - **Doorbell boundary.** The mirror is truth-layer replication: it rides git
   and delivers whenever the clone pulls, with no resident process. There is
   deliberately **no cross-platform doorbell** in this issue — live push over
-  Tailscale (`edda node` / `edda inbox`) is #685, as is session identity
-  (`label@machine`, collision warning). The mirror carries the *decisions*;
-  it does not implement them.
+  Tailscale (`edda node` / `edda inbox`) is #685. The mirror carries the
+  *decisions*; it does not implement them.
+- **Session identity (the other half of #671).** The label is the only part
+  of a session's identity that can cross machines at all, so in fleet mode
+  it is explicit or it is nobody's:
+  - `scripts/fleet/lane-launch.ps1` exports `EDDA_SESSION_LABEL` (the lane
+    name — unique per lane) and `EDDA_MACHINE` (the machine half of
+    `-Machine`) into the wrapper, so every fleet session, its hooks and its
+    children inherit an explicit identity; no hostname is guessed.
+  - A fleet session's heartbeat label chain is explicit label →
+    `EDDA_SESSION_LABEL` → claim label → `sid-<first 8>`. The branch/auto
+    fallbacks stay for bare local sessions only — they were what made three
+    live fleet sessions all answer to `main`.
+  - `edda peers` renders `label@machine` (machine resolved
+    `EDDA_MACHINE` → OS host name, same chain as the mirror's "Exporting
+    machine"), and **both render surfaces** — `edda peers` and the pack's
+    peer block — print a warning when two or more live sessions share a
+    label, because `edda request` addresses by label and a shared label is
+    an ambiguous address.
+  - Claims stay per-machine (`#656` owns the cross-machine mutex at the
+    issue layer); identity here makes each machine's board unambiguous, it
+    does not federate the board.
 
 ### Auditing a doneWhen that says 「決策 X 已在帳本」(`audit.ledger-donewhen`)
 

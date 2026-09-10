@@ -4,8 +4,8 @@ use super::autoclaim::derive_scope_from_files;
 use super::board::{compute_board_state, partition_requests_for_session};
 use super::discovery::discover_active_peers;
 use super::helpers::{
-    self, format_age, format_age_coarse, format_peer_suffix, session_label_from_board,
-    truncate_to_budget,
+    self, colliding_labels, format_age, format_age_coarse, format_peer_suffix,
+    session_label_from_board, truncate_to_budget,
 };
 use super::read_heartbeat;
 use super::{
@@ -369,6 +369,16 @@ pub(crate) fn render_peer_updates_with(
         } else {
             lines.push(format!("- {} ({age}){branch_suffix}", p.label));
         }
+    }
+
+    // GH-671 identity half: `edda request` addresses peers by label, so a
+    // label two live sessions share is an ambiguous address — the sender
+    // cannot tell which session answers. One warning line per colliding
+    // label, before the instructions below can teach a reader to use it.
+    for (label, count) in colliding_labels(peers) {
+        lines.push(format!(
+            "- ⚠ label \"{label}\" is shared by {count} live sessions — requests to it are ambiguous; set EDDA_SESSION_LABEL or claim a unique label"
+        ));
     }
 
     // Latest recorded decisions (coordination broadcasts, max 3). GH-401:
