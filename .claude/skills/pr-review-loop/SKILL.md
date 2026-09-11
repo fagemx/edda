@@ -39,9 +39,11 @@ merge policy remain canonical.
 6. Review-requested fixes return to an author/fixer. Prefer the same reviewer
    agent and real native conversation for the new head, with updated context
    and product `--resume`; Pi persisted history and Claude resume remain
-   required. A first Codex product round persists its thread mapping; Codex
-   resume refuses a missing/rejected mapping without a fresh old-UUID thread.
-   Product resume cannot continue a host-only session.
+   required. Every Codex product round requires readable mapping storage and a
+   successful final mapping/tombstone write before a verdict is recorded. A
+   missing map is valid only for a first round; Codex resume refuses a
+   missing/rejected mapping without a fresh old-UUID thread. Product resume
+   cannot continue a host-only session.
    If history is missing, allocate a distinct replacement UUID, omit `--resume`,
    include prior findings and say replacement. The fixer never becomes judge.
 7. Follow-up review covers the delta, prior findings, affected direct consumers,

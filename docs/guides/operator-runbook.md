@@ -263,8 +263,11 @@ L1 是 exact-head CI，加 verifier 對 Windows CI 未覆蓋 surface 的 focused
 
       新 head 的 follow-up 優先同 reviewer agent 與真實 native conversation，更新 facts
       後加 product `--resume`：Pi 必須有 persisted conversation，Claude 用 native resume；
-      Codex first round 先持久化 thread mapping，`--resume` 缺 mapping 或 thread 被拒絕時
-      fail closed，不在舊 UUID 下 fresh start。舊 SHA 的 LGTM 不沿用。Product 不能 resume
+      每個 Codex product round 都要求 mapping store 可讀，且 final mapping／tombstone 寫入
+      成功後才記錄 verdict；first round 可從 missing map 開始。corrupt／unreadable store 或
+      lock／write／replace 失敗都拒絕該輪。`--resume` 另要求既有 mapping；缺 mapping 或
+      thread 被拒絕時 fail closed，不在舊 UUID 下 fresh start，tombstone 失敗也一併回報。
+      舊 SHA 的 LGTM 不沿用。Product 不能 resume
       host-only session。找不到原 conversation 時，改用 distinct reviewer UUID、不加 `--resume`，
       context 帶 prior findings 並明說 replacement；無 context replacement 也要揭露限制。
       Product 自己的 `WorktreeGuard` 保留，caller 不另建第二個 review worktree。Fix round

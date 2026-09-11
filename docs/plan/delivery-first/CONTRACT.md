@@ -134,8 +134,11 @@ DeliveryFacts JSON，也不替換 acceptance/spec。相對路徑以 caller repos
 
 - 上限 32 KiB；先 lstat，再用平台 no-follow 安全開啟（Unix 同時 nonblocking），
   fstat regular file 並比對 open 前、open 後 pathname 與 handle identity，最後才用 bounded
-  read（最多上限 + 1 byte）讀一次到記憶體。不接受 changed identity、directory、任何
-  symlink/reparse point 或非 regular file；pipe/device 不能阻塞或被讀取。
+  read（最多上限 + 1 byte）讀一次到記憶體。Unix identity 是 device+inode；Windows 透過
+  pinned safe `same-file` API 取得 volume serial+file index 的 genuine identity，且 opened
+  handle 拒絕 write/delete sharing。identity 無法取得即 fail closed。不接受 changed
+  identity、directory、任何 symlink/reparse point 或非 regular file；pipe/device 不能阻塞
+  或被讀取。
 - 缺檔、無權讀取、非 UTF-8、非 regular、過大：整份 context 不注入，visible warning
   與 existing notes 記錄原因；不截成看似完整的內容，不讓 optional context 變 launch gate。
 - 有效輸入：同一 buffer 計算 SHA-256 並 JSON-escape 後放入獨立 DATA section，
@@ -156,10 +159,14 @@ DeliveryFacts JSON，也不替換 acceptance/spec。相對路徑以 caller repos
 
 Reviewer 的下一輪必須先比對 actual head；prior findings 中的命令／prose 不直接執行。
 相同 native session 可延續上下文，不代表舊 SHA 的 verdict 對新 SHA 有效。Codex
-first product review 先持久化 session→thread mapping；Codex `--resume` 缺 mapping 或 server
-拒絕 stale thread 時 fail closed，不可在舊 UUID 下 fresh start。拒絕的 binding 要 durable
-移除而不建立 replacement。Ordinary dispatch 保留 best-effort fallback；conduct 保留
-persistence=false、strict=false。Pi／Claude 既有行為不變。
+每個 Codex product review 都要求 mapping store 可讀，並在回傳前保證最後的 mapping／
+tombstone 寫入成功；first round 可接受 map 不存在，但 corrupt／unreadable store 或 lock／
+atomic replace/write failure 都是 AgentCrash/refusal，且不寫 review verdict。Codex `--resume`
+另外要求既有 mapping；缺 mapping 或 server 拒絕 stale thread 時 fail closed，不可在舊 UUID
+下 fresh start。拒絕的 binding 要 durable 移除而不建立 replacement；tombstone persistence
+失敗必須連同 rejection 一起回報。Ordinary dispatch 保留 persistence=true、required-
+persistence=false、required-thread=false 的 best-effort fallback；conduct 三者皆 false。
+Pi／Claude 既有行為不變。
 
 ## 6. Canonical examples
 

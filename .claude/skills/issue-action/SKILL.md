@@ -42,9 +42,11 @@ existing verdict fields and the existing raw-response blob.
 
 Prefer the original reviewer and real native conversation for a new-head
 follow-up. Update the facts and use product `--resume` only for that product
-session; host-only continuity stays host-only. A first Codex product round
-persists its thread mapping, and Codex resume refuses a missing/rejected mapping
-instead of starting fresh under the old UUID. If history is unavailable, use a
+session; host-only continuity stays host-only. Every Codex product round requires
+readable mapping storage and a successful final mapping/tombstone write before a
+verdict is recorded. A missing map is valid only for a first round; Codex resume
+refuses a missing/rejected mapping instead of starting fresh under the old UUID.
+If history is unavailable, use a
 distinct replacement UUID without `--resume`, include prior findings, and state
 the limitation rather than fabricating continuity or reusing old LGTM.
 

@@ -12,6 +12,8 @@ action="$root/.claude/skills/issue-action/SKILL.md"
 self_check="$root/.claude/skills/pr-review-loop/SKILL.md"
 agents="$root/AGENTS.md"
 runbook="$root/docs/guides/operator-runbook.md"
+contract="$root/docs/plan/delivery-first/CONTRACT.md"
+cli_reference="$root/docs/reference/cli.md"
 templates="$root/crates/edda-cli/src/pipeline_templates.rs"
 cli_main="$root/crates/edda-cli/src/main.rs"
 phase_core="$root/crates/edda-core/src/agent_phase.rs"
@@ -82,7 +84,10 @@ audit_coord() {
     require_text "$active" 'capability-check the selected binary'
     require_text "$active" 'must remain real: Pi needs its persisted conversation'
     require_text "$active" 'Claude its native'
-    require_text "$active" 'A first Codex product round persists its mapped thread'
+    require_text "$active" 'Every Codex product round requires readable mapping storage'
+    require_text "$active" 'successful final mapping update before any verdict is recorded'
+    require_text "$active" 'failure to write the mapping or'
+    require_text "$active" 'tombstone is a refusal, not review history'
     require_text "$active" 'never starts fresh under the old UUID'
     require_text "$active" 'existing raw-response blob'
     require_text "$active" 'host-only reviewer session cannot be resumed through product `--resume`'
@@ -132,7 +137,10 @@ audit_routes() {
     require_text "$action" 'distinct replacement UUID without `--resume`'
     require_text "$action" 'reusing old LGTM'
     require_text "$action" 'existing raw-response blob'
-    require_text "$action" 'Codex resume refuses a missing/rejected mapping'
+    require_text "$action" 'Every Codex product round requires'
+    require_text "$action" 'successful final mapping/tombstone write before a'
+    require_text "$action" 'missing map is valid only for a first round'
+    require_text "$action" 'refuses a missing/rejected mapping'
     require_text "$action" 'active `edda pipeline` caller is only a one-phase compatibility'
     require_text "$action" 'it does not require PR-only output'
     require_text "$action" 'Standard reuses an accepted plan'
@@ -151,7 +159,9 @@ audit_routes() {
     require_text "$self_check" '**Counterexample lens:**'
     require_text "$self_check" 'Capability-check `edda review --help`'
     require_text "$self_check" 'Pi persisted history and Claude resume'
-    require_text "$self_check" 'A first Codex product round persists its thread mapping'
+    require_text "$self_check" 'Every Codex product round requires readable mapping storage'
+    require_text "$self_check" 'successful final mapping/tombstone write before a verdict is recorded'
+    require_text "$self_check" 'missing map is valid only for a first round'
     require_text "$self_check" 'existing raw-response blob'
     require_text "$self_check" 'distinct replacement UUID'
     require_text "$self_check" 'old-head LGTM is never reused'
@@ -189,8 +199,23 @@ audit_direct_consumers() {
     require_text "$runbook" 'host-only session。找不到原 conversation'
     require_text "$runbook" 'distinct reviewer UUID、不加 `--resume`'
     require_text "$runbook" '既有 verdict fields 與 raw-response blob'
-    require_text "$runbook" '`--resume` 缺 mapping 或 thread 被拒絕時'
+    require_text "$runbook" '每個 Codex product round 都要求 mapping store 可讀'
+    require_text "$runbook" '成功後才記錄 verdict'
+    require_text "$runbook" 'first round 可從 missing map 開始'
+    require_text "$runbook" 'lock／write／replace 失敗都拒絕該輪'
+    require_text "$runbook" 'tombstone 失敗也一併回報'
     require_text "$runbook" 'caller 不另建第二個 review worktree'
+
+    require_text "$contract" 'pinned safe `same-file` API'
+    require_text "$contract" 'volume serial+file index 的 genuine identity'
+    require_text "$contract" 'identity 無法取得即 fail closed'
+    require_text "$contract" '不寫 review verdict'
+    require_text "$contract" 'persistence=false、required-thread=false'
+    require_text "$contract" 'conduct 三者皆 false'
+    require_text "$cli_reference" 'pinned safe `same-file` API'
+    require_text "$cli_reference" 'Failure to establish any identity omits'
+    require_text "$cli_reference" 'before any verdict is recorded'
+    require_text "$cli_reference" 'failed tombstone reports both failures'
     reject_text "$runbook" '`cmd_succeeds` machine check'
     reject_text "$runbook" 'closingIssuesReferences'
 

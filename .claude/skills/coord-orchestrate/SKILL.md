@@ -283,9 +283,12 @@ edda review --pr "$PR" --agent "$REVIEW_AGENT" --model "$REVIEW_MODEL" \
 For a follow-up on a new subject SHA, prefer the same reviewer agent and real
 native conversation, update the facts, and add `--resume`. Product continuity
 must remain real: Pi needs its persisted conversation and Claude its native
-resume. A first Codex product round persists its mapped thread; Codex `--resume`
-strictly requires that mapping and never starts fresh under the old UUID when it
-is missing or rejected. The old SHA's LGTM never applies to the new head. A
+resume. Every Codex product round requires readable mapping storage and a
+successful final mapping update before any verdict is recorded. The first round
+may start with no map; Codex `--resume` additionally requires an existing mapping
+and never starts fresh under the old UUID when it is missing or rejected. A
+rejected stale binding is durably tombstoned; failure to write the mapping or
+tombstone is a refusal, not review history. The old SHA's LGTM never applies to the new head. A
 host-only reviewer session cannot be resumed through product `--resume`.
 
 If the native conversation is missing, launch a replacement without `--resume`,

@@ -58,6 +58,10 @@ tracing-subscriber = { workspace = true }
 # Direct because review context safe-open uses O_NOFOLLOW/O_NONBLOCK by name.
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# Safe file identity for review context replacement detection (volume + file index).
+same-file = "=1.0.6"
+
 [features]
 default = ["tui"]
 tui = ["ratatui", "crossterm"]

@@ -592,6 +592,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             transcript_dir: None,
             // Dispatch persists caller-chosen session ids for resume (GH-535).
             persistent_codex_threads: true,
+            require_codex_persistence: false,
             require_codex_thread: false,
             session_dir: args.session_dir.as_ref().map(std::path::PathBuf::from),
             resume: args.resume,

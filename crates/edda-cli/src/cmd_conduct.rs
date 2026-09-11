@@ -246,6 +246,7 @@ pub fn run(
             // persisted binding could leak a stale thread/resume into a
             // later invocation and every turn would gain store I/O.
             persistent_codex_threads: false,
+            require_codex_persistence: false,
             require_codex_thread: false,
             // Conduct has no session-dir surface (GH-574); pi uses its own
             // default session storage under conduct.

@@ -41,21 +41,24 @@ impl AgentLauncher for Reviewer {
         _: CancellationToken,
     ) -> Result<PhaseResult> {
         *self.prompt.lock().unwrap() = Some(prompt.into());
-        assert_eq!(phase.tools, tools(AgentKind::Pi));
-        assert!(!phase
-            .tools
-            .as_ref()
-            .unwrap()
+        if self.answer == "required-persistence-failure" {
+            assert_eq!(phase.tools, tools(AgentKind::Codex));
+        } else {
+            assert_eq!(phase.tools, tools(AgentKind::Pi));
+        }
+        assert!(!phase.tools.as_ref().is_some_and(|allowed| allowed
             .iter()
-            .any(|v| matches!(v.as_str(), "bash" | "powershell" | "write" | "edit")));
+            .any(|v| matches!(v.as_str(), "bash" | "powershell" | "write" | "edit"))));
         assert!(prompt.ends_with(brief::OUTPUT_CONTRACT_V1));
         // Without its R22 qualification the engine is a checklist-type engine
         // per REVIEW.md 6.1 and escalates D5 on every round (GH-999).
         assert!(prompt.contains(qualification::SECTION_HEADING), "{prompt}");
-        assert!(
-            prompt.contains("VERDICT: AUTHORITATIVE for this surface"),
-            "{prompt}"
-        );
+        if self.answer != "required-persistence-failure" {
+            assert!(
+                prompt.contains("VERDICT: AUTHORITATIVE for this surface"),
+                "{prompt}"
+            );
+        }
         let head = std::fs::read_to_string(cwd.join(git::SUBJECT_MARKER))?;
         assert_eq!(git::commit(cwd, "HEAD")?, head);
         *self.session.lock().unwrap() = Some(session.into());
@@ -70,6 +73,13 @@ impl AgentLauncher for Reviewer {
         if self.answer == "crash" {
             return Ok(PhaseResult::AgentCrash {
                 error: "provider unavailable".into(),
+            });
+        }
+        if self.answer == "required-persistence-failure" {
+            return Ok(PhaseResult::AgentCrash {
+                error: format!(
+                    "{REQUIRED_PERSISTENCE_ERROR_PREFIX}: injected final map replace failure"
+                ),
             });
         }
         if self.answer == "malformed" {
@@ -205,6 +215,40 @@ async fn end_to_end_four_exit_codes_and_author_ledger() {
             1
         );
     }
+}
+
+#[tokio::test]
+async fn required_codex_persistence_failure_never_records_a_review_verdict() {
+    let (_temp, root, mut args) = fixture(true);
+    args.agent = AgentKind::Codex;
+    args.model = None;
+    let reviewer = Reviewer::new("required-persistence-failure", None);
+    let prepared = prepare::prepare(&args, &root).unwrap();
+    let error = match run_with(prepared, &args, &reviewer).await {
+        Err(error) => error,
+        Ok(_) => panic!("required mapping failure must refuse the review round"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(REQUIRED_PERSISTENCE_ERROR_PREFIX),
+        "{error:#}"
+    );
+    let ledger = edda_ledger::Ledger::open(&root).unwrap();
+    assert!(
+        ledger
+            .iter_events_by_type("review_verdict")
+            .unwrap()
+            .is_empty(),
+        "a round without guaranteed native continuity must not become review history"
+    );
+    assert_eq!(
+        testrepo::run(&root, &["worktree", "list", "--porcelain"])
+            .matches("worktree ")
+            .count(),
+        1,
+        "the refused round must still remove its scratch worktree"
+    );
 }
 
 #[tokio::test]

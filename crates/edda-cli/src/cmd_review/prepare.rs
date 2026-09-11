@@ -120,22 +120,30 @@ fn open_context_file(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(unix)]
-fn file_identity(metadata: &Metadata) -> (u64, u64) {
-    (metadata.dev(), metadata.ino())
+type ContextFileIdentity = (u64, u64);
+#[cfg(windows)]
+type ContextFileIdentity = same_file::Handle;
+
+#[cfg(unix)]
+fn path_file_identity(_: &Path, metadata: &Metadata) -> std::io::Result<ContextFileIdentity> {
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
-fn file_identity(metadata: &Metadata) -> (u32, u64, u64, u64, u64) {
-    // Stable std does not expose volume serial + file index yet. This
-    // conservative metadata identity is paired with delete/write sharing
-    // denial on the opened handle; any observable mismatch fails closed.
-    (
-        metadata.file_attributes(),
-        metadata.creation_time(),
-        metadata.last_access_time(),
-        metadata.last_write_time(),
-        metadata.file_size(),
-    )
+fn path_file_identity(path: &Path, _: &Metadata) -> std::io::Result<ContextFileIdentity> {
+    // same-file 1.0.6 safely asks Windows for volume serial + file index and
+    // keeps its path handle open for the lifetime of the identity comparison.
+    same_file::Handle::from_path(path)
+}
+
+#[cfg(unix)]
+fn opened_file_identity(_: &File, metadata: &Metadata) -> std::io::Result<ContextFileIdentity> {
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn opened_file_identity(file: &File, _: &Metadata) -> std::io::Result<ContextFileIdentity> {
+    same_file::Handle::from_file(file.try_clone()?)
 }
 
 #[cfg(unix)]
@@ -174,7 +182,8 @@ fn read_context_after_lstat(
     let before = std::fs::symlink_metadata(&resolved)
         .map_err(|error| omission(metadata_error_reason(&resolved, &error), resolved.clone()))?;
     validate_regular_metadata(&before, &resolved)?;
-    let before_identity = file_identity(&before);
+    let before_identity = path_file_identity(&resolved, &before)
+        .map_err(|_| omission("unreadable", resolved.clone()))?;
 
     after_lstat(&resolved);
 
@@ -184,16 +193,18 @@ fn read_context_after_lstat(
         .metadata()
         .map_err(|_| omission("unreadable", resolved.clone()))?;
     validate_regular_metadata(&opened, &resolved)?;
-    let opened_identity = file_identity(&opened);
+    let opened_identity = opened_file_identity(&file, &opened)
+        .map_err(|_| omission("unreadable", resolved.clone()))?;
 
-    // Re-lstat the path while the safe handle is open. Comparing all three
-    // identities catches regular-file replacement between either pathname
-    // check and open; no bytes are read unless the selected path still names
-    // the exact regular file that was inspected before open.
+    // Re-lstat and identify the path while the safe handle denies write/delete
+    // sharing. Comparing genuine identities catches regular-file replacement
+    // between either pathname check and open; no bytes are read unless the
+    // selected path still names the exact regular file inspected before open.
     let after = std::fs::symlink_metadata(&resolved)
         .map_err(|error| omission(metadata_error_reason(&resolved, &error), resolved.clone()))?;
     validate_regular_metadata(&after, &resolved)?;
-    let after_identity = file_identity(&after);
+    let after_identity = path_file_identity(&resolved, &after)
+        .map_err(|_| omission("unreadable", resolved.clone()))?;
     if before_identity != opened_identity || after_identity != opened_identity {
         return Err(omission("changed", resolved));
     }
@@ -652,6 +663,63 @@ mod tests {
             }),
             "non-regular",
             "O_NONBLOCK must make a FIFO replacement return instead of waiting for a writer"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn distinct_files_with_identical_legacy_metadata_are_rejected_as_changed() {
+        use std::os::windows::fs::{FileTimesExt as _, MetadataExt as _};
+        use std::time::{Duration, UNIX_EPOCH};
+
+        fn set_identical_metadata(path: &Path) {
+            std::fs::write(path, b"same-size-facts").expect("write context");
+            let fixed = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let times = std::fs::FileTimes::new()
+                .set_accessed(fixed)
+                .set_modified(fixed)
+                .set_created(fixed);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open for timestamps")
+                .set_times(times)
+                .expect("set identical timestamps");
+        }
+
+        fn legacy_metadata_tuple(metadata: &Metadata) -> (u32, u64, u64, u64, u64) {
+            (
+                metadata.file_attributes(),
+                metadata.creation_time(),
+                metadata.last_access_time(),
+                metadata.last_write_time(),
+                metadata.file_size(),
+            )
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let selected = temp.path().join("selected");
+        let replacement = temp.path().join("replacement");
+        let retained = temp.path().join("retained");
+        set_identical_metadata(&selected);
+        set_identical_metadata(&replacement);
+        assert_eq!(
+            legacy_metadata_tuple(&std::fs::metadata(&selected).expect("selected metadata")),
+            legacy_metadata_tuple(&std::fs::metadata(&replacement).expect("replacement metadata")),
+            "the adversarial files must defeat the retired metadata tuple"
+        );
+        assert_ne!(
+            same_file::Handle::from_path(&selected).expect("selected identity"),
+            same_file::Handle::from_path(&replacement).expect("replacement identity"),
+            "distinct files must have distinct genuine Windows identities"
+        );
+
+        assert_eq!(
+            omitted_after_lstat(&selected, temp.path(), |path| {
+                std::fs::rename(path, &retained).expect("retain original identity");
+                std::fs::rename(&replacement, path).expect("install metadata twin");
+            }),
+            "changed"
         );
     }
 

@@ -29,7 +29,10 @@ pub use args::ReviewArgs;
 pub use deliver::DeliverArgs;
 pub use drift::DriftArgs;
 pub use due::DueArgs;
-use edda_conductor::agent::launcher::{AgentLauncher, PhaseResult};
+use edda_conductor::agent::{
+    codex_rpc::REQUIRED_PERSISTENCE_ERROR_PREFIX,
+    launcher::{AgentLauncher, PhaseResult},
+};
 use edda_core::{
     ReviewBrief, ReviewCost, ReviewFinding, ReviewReviewer, ReviewSubject, ReviewVerdictPayload,
 };
@@ -213,6 +216,7 @@ fn review_launcher_options(
         // session→thread binding so a later --resume has something real to
         // resume. Only resumed review is strict; first review may start.
         persistent_codex_threads: args.agent == AgentKind::Codex,
+        require_codex_persistence: args.agent == AgentKind::Codex,
         require_codex_thread: args.agent == AgentKind::Codex && args.resume,
         session_dir,
         resume: args.resume && args.agent == AgentKind::Claude,
@@ -295,13 +299,13 @@ mod pi_resume_tests {
 
     #[test]
     fn product_review_launcher_option_matrix_preserves_each_backend_contract() {
-        for (agent, resume, persist_codex, require_codex, native_resume) in [
-            (AgentKind::Pi, false, false, false, false),
-            (AgentKind::Pi, true, false, false, false),
-            (AgentKind::Claude, false, false, false, false),
-            (AgentKind::Claude, true, false, false, true),
-            (AgentKind::Codex, false, true, false, false),
-            (AgentKind::Codex, true, true, true, false),
+        for (agent, resume, persist_codex, require_persist, require_thread, native_resume) in [
+            (AgentKind::Pi, false, false, false, false, false),
+            (AgentKind::Pi, true, false, false, false, false),
+            (AgentKind::Claude, false, false, false, false, false),
+            (AgentKind::Claude, true, false, false, false, true),
+            (AgentKind::Codex, false, true, true, false, false),
+            (AgentKind::Codex, true, true, true, true, false),
         ] {
             let args = ReviewArgs {
                 agent,
@@ -310,7 +314,8 @@ mod pi_resume_tests {
             };
             let options = review_launcher_options(&args, None);
             assert_eq!(options.persistent_codex_threads, persist_codex);
-            assert_eq!(options.require_codex_thread, require_codex);
+            assert_eq!(options.require_codex_persistence, require_persist);
+            assert_eq!(options.require_codex_thread, require_thread);
             assert_eq!(options.resume, native_resume);
         }
     }
@@ -500,6 +505,18 @@ async fn run_with(
         )
         .await;
     let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if args.agent == AgentKind::Codex {
+        if let Ok(PhaseResult::AgentCrash { error }) = &result {
+            if error.starts_with(REQUIRED_PERSISTENCE_ERROR_PREFIX) {
+                let cleanup = worktree
+                    .remove()
+                    .err()
+                    .map(|failure| format!("; worktree removal failed: {failure}"))
+                    .unwrap_or_default();
+                bail!("{error}{cleanup}");
+            }
+        }
+    }
     let (outcome, raw, cost) = outcome(result);
     let observed = launcher
         .last_observed_model()
