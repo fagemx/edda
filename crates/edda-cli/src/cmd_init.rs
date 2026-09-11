@@ -251,16 +251,16 @@ mod tests {
     }
 
     #[test]
-    fn init_without_claude_dir_no_error() {
+    fn init_without_detected_host_projects_no_skills() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
 
         execute(&tmp, false, false).unwrap();
 
-        // Workspace created
         assert!(tmp.join(".edda").is_dir());
-        // No Claude artifacts
         assert!(!tmp.join(".claude").join("settings.local.json").exists());
+        assert!(!tmp.join(".claude").join("skills").exists());
+        assert!(!tmp.join(".agents").join("skills").exists());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -296,12 +296,7 @@ mod tests {
 
         execute(&tmp, true, false).unwrap();
 
-        for name in [
-            "coord-sync",
-            "coord-handoff",
-            "coord-request",
-            "coord-review",
-        ] {
+        for &(name, expected) in SKILLS {
             let path = tmp
                 .join(".claude")
                 .join("skills")
@@ -309,10 +304,7 @@ mod tests {
                 .join("SKILL.md");
             assert!(path.exists(), "{name}/SKILL.md should be scaffolded");
             let content = std::fs::read_to_string(&path).unwrap();
-            assert!(
-                content.contains(&format!("name: {name}")),
-                "{name} should have correct frontmatter"
-            );
+            assert_eq!(content, expected, "{name} must use the embedded bytes");
 
             // GH-1063: these files are scaffolded into every new project, so
             // whatever they say about binding authority is what every future
@@ -348,7 +340,7 @@ mod tests {
 
         execute(&tmp, true, false).unwrap();
 
-        for &(name, _) in SKILLS {
+        for &(name, expected) in SKILLS {
             let path = tmp
                 .join(".agents")
                 .join("skills")
@@ -358,29 +350,56 @@ mod tests {
                 path.exists(),
                 "{name}/SKILL.md should be scaffolded for Codex"
             );
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                expected,
+                "{name} must use the embedded bytes for Codex"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn init_skips_existing_skills() {
+    fn init_preserves_existing_orchestration_customizations_for_both_hosts() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
-        let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "custom content").unwrap();
+        std::fs::write(tmp.join("AGENTS.md"), "# Project instructions\n").unwrap();
+        let claude_skill = tmp
+            .join(".claude")
+            .join("skills")
+            .join("coord-orchestrate")
+            .join("SKILL.md");
+        let agents_skill = tmp
+            .join(".agents")
+            .join("skills")
+            .join("coord-orchestrate")
+            .join("SKILL.md");
+        std::fs::create_dir_all(claude_skill.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(agents_skill.parent().unwrap()).unwrap();
+        std::fs::write(&claude_skill, "custom claude content").unwrap();
+        std::fs::write(&agents_skill, "custom agents content").unwrap();
 
         execute(&tmp, true, false).unwrap();
 
-        // Should NOT be overwritten
-        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
         assert_eq!(
-            content, "custom content",
-            "should not overwrite existing skill"
+            std::fs::read_to_string(claude_skill).unwrap(),
+            "custom claude content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(agents_skill).unwrap(),
+            "custom agents content"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tracked_orchestration_projection_matches_embedded_source() {
+        let embedded = include_str!("skills/coord-orchestrate.md");
+        let tracked = include_str!("../../../.claude/skills/coord-orchestrate/SKILL.md");
+        assert_eq!(tracked, embedded);
+        assert!(embedded.contains("delivery-flow/1"));
     }
 
     #[test]

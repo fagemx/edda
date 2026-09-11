@@ -1,344 +1,40 @@
 ---
 name: pr-review-loop
-description: self-check before requesting independent review; never a merge verdict
+description: Bounded author self-check and fixes before independent current-head review; never a verdict or merge loop
 context: fork
 ---
 
-You are an author self-check and fix specialist for the Edda project (Rust). Your role is to iteratively inspect a pull request, post findings as an author self-check comment each pass, fix all high-priority issues, and repeat until the self-check is clean. This is an author self-check, not a Code Review; independent review is a separate step required before merge.
-
-## Contract: review-and-fix vs house review
-
-This skill is the **review-and-fix** half: the same agent that finds P0/P1 issues
-also fixes them. That makes it author self-check — it can never be the independent
-judge of a PR.
-
-The independent judge is a **separate review round**, run by an agent that does
-not fix the PR it judges: `edda review --pr <N> --agent claude` builds the brief
-and runs it with read-only capabilities (decision `fleet.review-backend`); its
-verdict comment pins the full reviewed SHA (decision `fleet.review-protocol`).
-When a house-review verdict requests changes, the fixes are made by a separate
-sub-agent running `issue-action` — never by the reviewer, and never inside a
-reused round of this loop presenting itself as the judge.
-
-## Wiring audit
-
-Every self-check pass fills the wiring audit slot defined in `REVIEW.md` §5.5;
-this skill does not restate the table or the P1 rules.
-
-## Architecture
-
-Loop control is handled by a **bash driver script**, not by your memory. You MUST follow the ACTION output from the driver script at every step. The driver script is deterministic — it enforces the review-comment-fix cycle.
-
-```
-┌──────────┐     ACTION: REVIEW      ┌─────────┐
-│  Driver   │ ──────────────────────→ │   LLM   │  ← run code-quality + test review
-│  Script   │ ←────────────────────── │ (you)   │
-│           │   review-done {p0} {p1} │         │
-│           │                         │         │
-│           │     ACTION: COMMENT     │         │  ← post PR comment with findings
-│           │ ──────────────────────→ │         │
-│           │ ←────────────────────── │         │
-│           │       comment-done      │         │
-│           │                         │         │
-│           │     ACTION: FIX         │         │  ← fix P0/P1 issues, commit, push
-│           │ ──────────────────────→ │         │
-│           │ ←────────────────────── │         │
-│           │       fix-done          │         │
-│           │                         │         │
-│           │     ACTION: CLEAN       │         │  ← post self-check clean comment, done
-│           │ ──────────────────────→ │         │
-└──────────┘                          └─────────┘
-```
-
----
-
-## Phase 1: Setup
-
-### 1a: Identify PR
-
-**CRITICAL — do this FIRST before anything else.**
-
-Your args are: `$ARGUMENTS`
-
-Extract the PR number from the args above using these rules:
-1. **Args is a URL** containing `/pull/<number>` or `/issues/<number>` → extract `<number>` (e.g., `https://github.com/fagemx/edda/pull/42` → `42`)
-2. **Args is a plain number** → use it directly (e.g., `42`)
-3. **Args is empty** → detect from current branch using `gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number'`
-
-Once you have the PR number, **hardcode it as a literal** in all subsequent bash commands. Never use shell variables for the PR number derived from args — always substitute the actual number directly.
-
-### 1b: Checkout PR Branch
-
-Switch to the PR branch so that fixes are applied to the correct code:
-
-```bash
-gh pr checkout <PR_NUMBER>
-```
-
-### 1c: Create Driver Script
-
-Write this script to `/tmp/pr-review-loop-driver.sh` and make it executable:
-
-```bash
-cat > /tmp/pr-review-loop-driver.sh << 'DRIVER'
-#!/bin/bash
-set -euo pipefail
-
-PR="$1"
-CMD="$2"
-STATE="/tmp/pr-review-loop-${PR}.state"
-
-case "$CMD" in
-  init)
-    echo "0" > "$STATE"
-    echo "ACTION: REVIEW"
-    ;;
-  review-done)
-    P0="${3:-0}"
-    P1="${4:-0}"
-    ITER=$(cat "$STATE")
-    ITER=$((ITER + 1))
-    echo "$ITER" > "$STATE"
-    if [ "$P0" -eq 0 ] && [ "$P1" -eq 0 ]; then
-      echo "ACTION: CLEAN"
-    elif [ "$ITER" -ge 5 ]; then
-      echo "ACTION: COMMENT_FINAL"
-    else
-      echo "ACTION: COMMENT"
-    fi
-    ;;
-  comment-done)
-    echo "ACTION: FIX"
-    ;;
-  fix-done)
-    echo "ACTION: REVIEW"
-    ;;
-esac
-DRIVER
-chmod +x /tmp/pr-review-loop-driver.sh
-```
-
-### 1d: Initialize
-
-```bash
-ACTION=$(/tmp/pr-review-loop-driver.sh "$PR_NUMBER" init)
-# Output: ACTION: REVIEW
-```
-
-Display PR metadata, then proceed to Phase 2 following the ACTION.
-
----
-
-## Phase 2: Action Loop
-
-Read the ACTION output from the driver script and execute the corresponding action. **Always call the driver script after completing an action to get the next ACTION.**
-
-### On `ACTION: REVIEW`
-
-1. Perform code quality analysis directly (same methodology as `/code-quality review`):
-   - Fetch the PR diff: `gh pr diff <PR_NUMBER>`
-   - For each changed file, analyze against all bad smell categories (#1-#16 + Rust/Edda checks)
-   - Create review notes (in memory, not written to files yet)
-
-2. Perform testing coverage and convention review:
-   - Identify changed source files from PR diff
-   - Check test coverage for new features and bug fixes
-   - Check testing conventions against project standards (#[test], real SQLite, no internal mocking, cargo test)
-
-3. Compile findings into P0 (critical) and P1 (high priority) categories.
-
-4. Count P0 and P1 issues from the findings.
-
-5. **Report the counts to the driver script:**
-
-```bash
-ACTION=$(/tmp/pr-review-loop-driver.sh "$PR_NUMBER" review-done "$P0_COUNT" "$P1_COUNT")
-```
-
-6. Follow the returned ACTION.
-
----
-
-### On `ACTION: COMMENT`
-
-Post a PR comment with the current iteration's self-check findings. Read the current iteration number from the state file.
-
-```bash
-ITER=$(cat /tmp/pr-review-loop-${PR_NUMBER}.state)
-```
-
-Structure the comment:
-
-```markdown
-## Author self-check: PR #<number> (pass <ITER>)
-
-### Summary
-<Brief summary based on code-quality analysis>
-
-### Key Findings
-
-#### Critical Issues (P0)
-<List from code-quality review AND testing review>
-
-#### High Priority (P1)
-<List from code-quality review AND testing review>
-
-### Testing Review
-
-#### Coverage
-<For each new feature or bug fix, state whether tests exist>
-
-#### Convention Compliance
-<List any violations found, with file:line references>
-
-#### Testing Assessment: <Adequate / Insufficient Coverage / Convention Violations>
-
-### Self-Check Status: Fixes Needed
-
-Fixing P0/P1 issues and will re-check.
-
----
-*Pass <ITER> of automated self-check-fix loop*
-```
-
-Post the comment:
-
-```bash
-gh pr comment "$PR_NUMBER" --body "$REVIEW_CONTENT"
-```
-
-Report completion to the driver script:
-
-```bash
-ACTION=$(/tmp/pr-review-loop-driver.sh "$PR_NUMBER" comment-done)
-# Output is ALWAYS: ACTION: FIX
-```
-
-Follow the returned ACTION.
-
----
-
-### On `ACTION: FIX`
-
-1. Fix all P0 issues first, then P1 issues:
-
-| Category | Fix Approach |
-|----------|--------------|
-| Missing test coverage | Write tests (#[test] or #[tokio::test]) |
-| Type safety issues | Use proper enums/structs instead of stringly-typed |
-| Error handling anti-patterns | Use thiserror/anyhow, propagate with ?, no unwrap in lib |
-| Unused code | Remove dead code (cargo clippy catches this) |
-| Testing anti-patterns | Rewrite tests following Rust conventions |
-| Unsafe code | Replace unsafe blocks with safe abstractions |
-
-   Mark unfixable issues (ambiguous requirements, design trade-offs, out of scope) as **skipped**.
-
-   Rules:
-   - Only modify files that are part of the PR diff
-   - Minimal changes — fix the issue, nothing more
-
-2. Run pre-commit checks:
-
-```bash
-cargo check --workspace
-cargo clippy --workspace -- -D warnings
-cargo test --workspace
-```
-
-   If a fix breaks checks: revert that fix, mark the issue as skipped.
-
-3. Commit and push:
-
-```bash
-git add <fixed-files>
-git commit -m "fix: address self-check findings (pass <ITER>)"
-git push
-```
-
-4. **Report completion to the driver script:**
-
-```bash
-ACTION=$(/tmp/pr-review-loop-driver.sh "$PR_NUMBER" fix-done)
-# Output is ALWAYS: ACTION: REVIEW
-```
-
-5. Follow the returned ACTION (which is always REVIEW — this is how the loop is enforced).
-
----
-
-### On `ACTION: CLEAN`
-
-Post a self-check clean comment and go to Phase 3.
-
-```bash
-ITER=$(cat /tmp/pr-review-loop-${PR_NUMBER}.state)
-```
-
-```markdown
-## Author self-check: PR #<number> (pass <ITER>)
-
-All P0 and P1 issues have been resolved.
-
-### Summary
-<Brief summary of the final state>
-
-### Self-Check Status: Clean
-
-self-check clean — independent review required before merge (`Independent Review` status)
-
----
-*Completed after <ITER> pass(es) of automated self-check-fix loop*
-```
-
-```bash
-gh pr comment "$PR_NUMBER" --body "$CLEAN_CONTENT"
-```
-
-Go to Phase 3.
-
----
-
-### On `ACTION: COMMENT_FINAL`
-
-Max iterations reached. Post a final self-check comment with remaining issues:
-
-```markdown
-## Author self-check: PR #<number> (pass 5) — Max Iterations Reached
-
-### Remaining Issues
-<List unresolved P0/P1 issues that need manual intervention>
-
-### Self-Check Status: Needs Manual Attention
-
-Automated self-check-fix loop reached maximum iterations (5). The remaining issues above need manual attention before requesting independent review.
-
----
-*Final pass of automated self-check-fix loop*
-```
-
-```bash
-gh pr comment "$PR_NUMBER" --body "$FINAL_CONTENT"
-```
-
-Go to Phase 3.
-
----
-
-## Phase 3: Summary
-
-Display a local summary (do NOT post another comment):
-
-```
-PR Self-Check Loop Complete
-
-PR: #{number} - {title}
-Passes: {count}
-Issues fixed: {count}
-Status: {Clean — ready for independent review / Needs manual attention (max iterations)}
-
-[If max iterations reached]
-Remaining issues need manual intervention:
-- {issue}
-
-All self-check comments posted to PR. Independent review required before merge (`Independent Review` status).
-```
+# PR Author Self-Check Route
+
+This compatibility entry is for the author or a designated fixer. It is not an
+independent `Code Review`, cannot publish LGTM, and cannot merge. Follow the
+`delivery-flow/1` review handoff in `coord-orchestrate`; repository review and
+merge policy remain canonical.
+
+## Bounded route
+
+1. Resolve the PR from the explicit argument, or from the current branch when
+   the host supports that lookup. Read actual head/base, acceptance, diff,
+   prior SHA-pinned verdicts/responses and applicable gate receipts. Do not
+   repurpose a shared checkout or overwrite another writer's worktree.
+2. Freeze the author-check surface to changed behavior/paths, direct consumers,
+   acceptance, fix-caused security/data-loss risk and current-base integration.
+3. Perform one combined author self-check activity and record both parts in one
+   handoff:
+   - **Behavior lens:** exercise the supported entry and direct consumers with
+     focused evidence.
+   - **Counterexample lens:** try the likeliest failure or partial-result case
+     and record any uncovered risk.
+4. Fix in-scope P0/P1 found by that author check, using the same author context.
+   Run the repository's focused checks while iterating. A frozen SHA relies on
+   the canonical ladder; do not run a full local workspace solely because it
+   froze. Commit/push only when this invocation already has that authority.
+5. Hand the new full SHA and RAN/READ evidence to an independent reviewer. Every
+   push invalidates the old verdict. Review-requested fixes return to an
+   author/fixer, then the independent reviewer resumes or is explicitly
+   replaced; the fixer never becomes the judge.
+
+A clean author check means only "ready to request independent review." It does
+not mean accepted, CI-green or mergeable. This route has no deterministic
+phase driver, no fresh-fixer fleet, no direct merge command and no independent
+acceptance loop.

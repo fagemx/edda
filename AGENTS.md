@@ -12,14 +12,21 @@ output as the pack:
 
 1. `edda context` — decisions, peers, off-limits paths.
 2. `edda task list` — the task rail; pick the task assigned to you.
-3. `edda task show <id>` — prints your brief (until `edda task start` lands in
-   #793). Follow it: it names your scope, who owns the gate, and what is out
-   of scope.
+3. `edda task show <id>` — prints your brief without changing its lifecycle.
+   Follow it: it names your scope, who owns the gate, and what is out of scope.
+
+## Delivery entry
+
+Assigned sessions resume their task and brief. Small or cohesive single-writer
+changes use the ordinary repository flow. A controller forms a fleet only for
+two or more genuinely parallel implementing sessions; the canonical generic
+route is `crates/edda-cli/src/skills/coord-orchestrate.md` (`delivery-flow/1`),
+projected to the host-selected coordination skill.
 
 ## Multi-session work
 
-- When two or more sessions are implementing in parallel, use
-  `$coord-orchestrate` from `.agents/skills/coord-orchestrate/`.
+- When two or more sessions are implementing in parallel, use the host-selected
+  `coord-orchestrate` projection and follow the canonical source above.
 - Before editing with active peers, use `$coord-sync`, inspect off-limits paths,
   and claim the smallest accurate scope.
 - Record load-bearing facts in `edda task` or `edda decide` before using chat or
@@ -42,13 +49,13 @@ output as the pack:
   Stop after two non-product/harness-only cycles without useful progress or at
   diminishing returns; route follow-up or ask the operator to expand scope.
 - Verify once per frozen SHA on the ladder in `.claude/CLAUDE.md`: focused
-  crate gates while iterating (L0); the full workspace set once per frozen full
-  SHA with a recorded receipt (L1); reviewers READ that receipt and exact-head
-  CI and RAN only what they do not cover (L2); a draft, label, or status flip
-  is not a push, so nothing reruns (L3). State the reason whenever you rerun a
-  recorded gate. Know what this repository's CI actually covers — Windows runs
-  tests for only 7 crates — and treat a real gap as a reason to RAN a focused
-  check of the uncovered surface, not the full set.
+  crate gates while iterating (L0); exact-head CI at the frozen full SHA plus
+  the verifier's applicable focused Windows-gap run (L1); reviewers READ that
+  receipt and exact-head CI and RAN only what they do not cover (L2); a draft,
+  label, or status flip is not a push, so nothing reruns (L3). State the reason
+  whenever you rerun a recorded gate. Know what this repository's CI actually
+  covers — Windows runs tests for only 7 crates — and treat a real gap as a
+  reason to RAN a focused check of the uncovered surface, not the full set.
   Deterministically red CI already blocks the SHA: audit and request changes
   instead of spending a full run; re-run only the failed job when the red is
   environmental.
