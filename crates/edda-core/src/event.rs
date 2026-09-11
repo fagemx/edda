@@ -344,7 +344,10 @@ pub fn new_review_verdict_event(
     Ok(event)
 }
 
-pub use crate::cmd_event::{new_cmd_event, new_cmd_event_with_git_context, CmdEventParams};
+pub use crate::cmd_event::{
+    new_cmd_event, new_cmd_event_with_git_context, new_cmd_event_with_git_context_and_dirty_paths,
+    CmdEventParams,
+};
 
 /// Parameters for creating a `commit` event.
 pub struct CommitEventParams<'a> {

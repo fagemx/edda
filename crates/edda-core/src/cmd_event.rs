@@ -27,7 +27,27 @@ pub fn new_cmd_event_with_git_context(
     git_sha: Option<&str>,
     tree_dirty: Option<bool>,
 ) -> anyhow::Result<Event> {
-    let payload = serde_json::json!({
+    build_cmd_event(params, git_sha, tree_dirty, None)
+}
+
+/// Create a SHA-bound receipt with the tracked and untracked paths observed
+/// around command execution. `None` records an explicitly unknown path state.
+pub fn new_cmd_event_with_git_context_and_dirty_paths(
+    params: &CmdEventParams<'_>,
+    git_sha: Option<&str>,
+    tree_dirty: Option<bool>,
+    tree_dirty_paths: Option<(&[String], &[String])>,
+) -> anyhow::Result<Event> {
+    build_cmd_event(params, git_sha, tree_dirty, Some(tree_dirty_paths))
+}
+
+fn build_cmd_event(
+    params: &CmdEventParams<'_>,
+    git_sha: Option<&str>,
+    tree_dirty: Option<bool>,
+    tree_dirty_paths: Option<Option<(&[String], &[String])>>,
+) -> anyhow::Result<Event> {
+    let mut payload = serde_json::json!({
         "argv": params.argv,
         "cwd": params.cwd,
         "exit_code": params.exit_code,
@@ -37,6 +57,15 @@ pub fn new_cmd_event_with_git_context(
         "git_sha": git_sha,
         "tree_dirty": tree_dirty,
     });
+    if let Some(paths) = tree_dirty_paths {
+        payload["tree_dirty_paths"] = match paths {
+            Some((tracked, untracked)) => serde_json::json!({
+                "tracked": tracked,
+                "untracked": untracked,
+            }),
+            None => serde_json::Value::Null,
+        };
+    }
 
     let mut blob_refs = Vec::new();
     if !params.stdout_blob.is_empty() {

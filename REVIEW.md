@@ -33,7 +33,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.7`
+- Spec version: `review-spec-v1.8`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -409,6 +409,19 @@ cover different gates. A green required-CI row remains visible set-level
 evidence but covers no declared gate; any gate without eligible green evidence
 keeps the set unverified. Unknown evidence is advisory; deterministically red
 mapped or required CI remains blocking.
+
+Exact-head local receipts are relevant/scoped, not clean-only. A legacy receipt
+with `tree_dirty=false` and no `tree_dirty_paths` remains eligible. A path-aware
+dirty receipt is eligible, and visibly reads as `cmd-event-scoped`, only when
+its tracked list is empty and every untracked root-relative Git `/` path is
+outside the reviewed subject and matches this measured inert positive
+allowlist: `docs/archive/**`, `.tmp-fleet/**`, `codereviews/**`, or root
+`edda_tmp_*.txt`. Tracked dirt always rejects, even outside the subject.
+Unknown, null, malformed, inconsistent, empty, absolute, parent-traversing,
+control-character, source/control, and all other untracked paths reject. A
+legacy dirty receipt remains ineligible. These rejected states provide no
+evidence rather than being inferred safe from the PR file list; a scoped
+receipt's command exit still decides green (0) or red (nonzero).
 
 The workspace Cargo `gates:` entries above are READ from those job results,
 never RAN by the reviewer (`ladder` L1: CI is the workspace gate; C5 is the
@@ -830,7 +843,7 @@ One comment per round, pinned to the reviewed full SHA
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
 - reviewer_session: <per-PR UUID the lane was launched with>
-- spec: review-spec-v1.7
+- spec: review-spec-v1.8
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - shadow: true|false  (documentation for a SHADOW round: true requires the heading suffix ` (SHADOW)` — `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; the suffix is the only marker, this field never substitutes for it; a SHADOW round is never a verdict — §8)
@@ -1058,6 +1071,14 @@ mechanical.
   evidence becomes advisory; red and undeclared remain qualification blockers.
   `ran_allowlist` is unchanged because execution capability is not a fallback
   for unavailable evidence.
+- `review-spec-v1.8` (2026-09-11, issue #1136 d-002): exact-head command
+  receipts become path-aware without treating ambient inputs as clean. Legacy
+  clean receipts remain compatible. Dirty receipts cover a gate only as
+  visible `cmd-event-scoped` evidence when tracked dirt is empty and every
+  untracked path is outside the subject and in the four measured inert
+  patterns named by U6. Tracked, control/source, unknown, malformed, or
+  inconsistent dirt never becomes evidence. CI mapping and advisory-unverified
+  semantics from v1.7, and the unchanged `ran_allowlist`, remain intact.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
