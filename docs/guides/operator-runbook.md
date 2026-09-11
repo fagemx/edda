@@ -124,7 +124,7 @@
 |---|---|---|
 | promote（撕 ready） | `gh issue edit <N> --add-label fleet:ready --remove-label fleet:pending` | 或跟控制者說「這幾張 promote」。批次表見 #599 |
 | ratify（讓決策 binding） | `edda ratify <key> --note "<為什麼>"` | agent 記的決策全是 unratified；`edda ask "<domain>"` 先看 |
-| 合併授權 | 對控制者說「LGTM 就合」（standing）或逐張放行 | 前置：final current-head LGTM、P0=0/P1=0、required check「`CI Gate`」綠（`ci.merge-gate`）、SHA 窗檢查（見 §六） |
+| 合併授權 | 對控制者授予 repository R6 standing authority（「LGTM 就合」） | 前置：final current-head LGTM、P0=0/P1=0、同 SHA 無其他非 LGTM 判決、required check「`CI Gate`」綠（`ci.merge-gate`）、SHA 窗檢查（見 §六）；條件成立後控制者立即合，不再二次請示 |
 | 看板 | `edda watch`（即時 peer／事件 TUI）、`gh pr list`、`edda task list` | dispatch 出去的 lane 目前不出現在 peers（#569） |
 
 ---
@@ -162,12 +162,14 @@
    `review.watcher=polling-stopped-independent-rounds-dispatched-on-demand`，皆 2026-09-07）。
 
    預設路徑：任一在線的強引擎 session 直接讀 diff、照 `REVIEW.md` 從頭跑到尾、把 §7 判決貼上
-   PR，LGTM 且 CI 綠即可合。**不起 lane、不建 review worktree、不做全檔快照。**
+   PR；合併仍須第 7 步的完整 R6 條件。**不起 lane、不建 review worktree、不做全檔快照。**
    這條路今天實測每張 PR 約 5–20 分鐘；同一批 PR 的審查 lane 在 40 分鐘後仍卡在快照階段。
    審查內容一點都沒放寬——`REVIEW.md` 全規則照跑、判決釘 full SHA、每次 push 使前一輪失效、
    合前做窗檢查——省掉的只有排隊。
 
-   `Independent Review` 必要 status 已於同日從 ruleset 移除，合併閘只剩 `CI Gate`。
+   `Independent Review` 必要 status 已於同日從 ruleset 移除；它只保留為 `edda review deliver`
+   冪等寫出的 advisory delivery projection，不是 `edda review merge` 的輸入。權威合併輸入是可信作者貼出的
+   SHA-pinned §7 判決留言；ruleset 唯一 required check 是 `CI Gate`。
    **輪詢器連同整套審查殼已退役**（GH-1061，`review.shell-branch`）：它對每一張 open PR
    無差別自動派 lane，連只改一個 markdown 檔的 docs PR 也照收全額快照稅，這正是樸實流程要
    拿掉的東西。腳本已從 repo 刪除，它註冊的隱藏排程任務已從本機解除註冊；
@@ -185,8 +187,9 @@
       要自己控制運輸時就 `edda dispatch --agent claude --exclude-tools Edit,Write,NotebookEdit`
       餵同一份 brief——工具集是唯讀的那一半，brief 正文是另一半。
    2. **貼**：審查者自己用 `gh pr comment` 貼 §7 判決，釘 full SHA。沒有中間人代貼。
-   3. **落**：`edda review deliver --pr <N>` 依 union 規則（`edda review gate`）結算
-      `review:*` label 與 `Independent Review` commit status；判決格式壞掉時它貼一次告示而不是猜。
+   3. **落**：`edda review deliver --pr <N>` 依 union 規則（`edda review gate`）冪等結算
+      `review:*` label 與 advisory `Independent Review` commit status；判決格式壞掉時它貼一次告示而不是猜。
+      這是 delivery projection，不是 ruleset required check，也不供 `edda review merge` 讀取。
 
    **唯讀怎麼證**（`review.readonly-proof=capability-flags-not-per-file-hash`）：看 capability
    旗標，加上前後各一次 `git status --porcelain`。**不做逐檔雜湊**——退役的殼對 1077 個檔案各
@@ -243,7 +246,7 @@
    handoff：現在的狀態、什麼已定案不要重審、下一手具體做什麼，並**把 `Closes #NNN` 從 PR body
    拿掉**,免得有人事後合併時關掉一張判決已經否掉的單。
 
-7. **合併**（規則閘綠即可執行，任何控制者皆可、冪等；`docs/fleet/rules.md` R6）：先執行 `edda review merge --pr <N>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過；它另外會問一次聯集判決（GH-1057），該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。**開著的 PR 整體漂移它只印不擋**：跨 PR 的漂移不是 R6 條件，被判的永遠是被合的那張自己——漂移行仍逐行印出（#1124、`review.merge-drift-guard=advisory-not-an-r6-condition`；fleet 健康訊號看 `edda review drift` 與每日摘要，不看這一步的 rc）。**被合的那張自己仍然擋，而且是從它自己讀的**：`mergeable=CONFLICTING`（R24 不准在這種狀態回報就緒，而 `--check` 就是那個回報）、孤兒 Review Response（回應一個從未貼出的輪次，GH-993）、walk 自己的留言順序把主體最新的**權威**判決讀成 stale（它按建立序讀留言、閘自己按 GitHub 的編輯序選最新的一輪；兩者不一致時以擋為準，不當綠，因為讀同一份留言得到兩個答案不是綠。SHADOW 輪次不是判決、不進 union，所以擋不住）、判決沒釘在 head（R6 的條件）——walk 讀不到時也藏不住這四者。檢查通過後使用 `edda review merge --pr <N> --merge`（--merge 需 operator authority）；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。它也把 squash subject 永遠釘在 PR 標題上（GH-1100）：合併一律帶 `--subject`——單 commit 的 PR 若讓 GitHub 自選 subject，會原封抄用該 commit 的標題，fa0d011 那次就是這樣把 `wip(review): ...` 寫進 main——且標題先按 conventional commit 格式驗證（REVIEW.md §5 U4），`wip(...)`、空 scope、缺 type 一律當場拒絕、不執行合併（`--check` 也驗，早一步給訊號）。GitHub 只會替「自己挑的」subject 補上 ` (#N)` 這個 PR 回指，帶了 `--subject` 就原文照用、不補；所以這個動詞自己接上 `<PR 標題> (#<PR 編號>)`，squash commit 才不會從此在 main 上失去 PR 指標（U4 驗的仍是純標題，不含後綴；標題若已經以「本 PR 自己的編號」結尾就不重複補，結尾是「別的 PR 編號」則照補，免得 `git log` 的回指指到無關的 PR）。合併 body 可用 `--body-file <path>` 指定（只在 `--merge` 有效，空字串或配 `--check` 都會拒絕）；沒給就自動組一張最小收據（審查 SHA、LGTM 輪號、CI run 連結）當 body。`scripts/merge-reviewed-pr.sh` 還在，是一行適配器（GH-1105）：PR 編號之後的參數原封轉發（`--check`／`--merge`／`--body-file <path>` 都穿得過去），`--help` 也直接接到動詞自己的說明，所以舊呼叫不變。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
+7. **合併**（只由已具 repository R6 standing authority 的控制者執行；條件綠就立即合，不再二次詢問；worker、fixer、reviewer 永不合併；`docs/fleet/rules.md` R6）：先執行 `edda review merge --pr <N>`；它直接讀可信作者貼出的 SHA-pinned §7 留言，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過，再直接結算留言聯集（GH-1057），不呼叫 `edda review deliver`、不讀 `Independent Review` status。該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。**開著的 PR 整體漂移它只印不擋**：跨 PR 的漂移不是 R6 條件，被判的永遠是被合的那張自己——漂移行仍逐行印出（#1124、`review.merge-drift-guard=advisory-not-an-r6-condition`；fleet 健康訊號看 `edda review drift` 與每日摘要，不看這一步的 rc）。**被合的那張自己仍然擋，而且是從它自己讀的**：`mergeable=CONFLICTING`（R24 不准在這種狀態回報就緒，而 `--check` 就是那個回報）、孤兒 Review Response（回應一個從未貼出的輪次，GH-993）、walk 自己的留言順序把主體最新的**權威**判決讀成 stale（它按建立序讀留言、閘自己按 GitHub 的編輯序選最新的一輪；兩者不一致時以擋為準，不當綠，因為讀同一份留言得到兩個答案不是綠。SHADOW 輪次不是判決、不進 union，所以擋不住）、判決沒釘在 head（R6 的條件）——walk 讀不到時也藏不住這四者。檢查通過後，已有上述 standing R6 authority 的控制者直接使用 `edda review merge --pr <N> --merge`，不另請示；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。它也把 squash subject 永遠釘在 PR 標題上（GH-1100）：合併一律帶 `--subject`——單 commit 的 PR 若讓 GitHub 自選 subject，會原封抄用該 commit 的標題，fa0d011 那次就是這樣把 `wip(review): ...` 寫進 main——且標題先按 conventional commit 格式驗證（REVIEW.md §5 U4），`wip(...)`、空 scope、缺 type 一律當場拒絕、不執行合併（`--check` 也驗，早一步給訊號）。GitHub 只會替「自己挑的」subject 補上 ` (#N)` 這個 PR 回指，帶了 `--subject` 就原文照用、不補；所以這個動詞自己接上 `<PR 標題> (#<PR 編號>)`，squash commit 才不會從此在 main 上失去 PR 指標（U4 驗的仍是純標題，不含後綴；標題若已經以「本 PR 自己的編號」結尾就不重複補，結尾是「別的 PR 編號」則照補，免得 `git log` 的回指指到無關的 PR）。合併 body 可用 `--body-file <path>` 指定（只在 `--merge` 有效，空字串或配 `--check` 都會拒絕）；沒給就自動組一張最小收據（審查 SHA、LGTM 輪號、CI run 連結）當 body。`scripts/merge-reviewed-pr.sh` 還在，是一行適配器（GH-1105）：PR 編號之後的參數原封轉發（`--check`／`--merge`／`--body-file <path>` 都穿得過去），`--help` 也直接接到動詞自己的說明，所以舊呼叫不變。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009）：
    先看 dry-run —— `sh scripts/fleet/reclaim-merged.sh`。每個 worktree／local branch／remote

@@ -448,16 +448,20 @@ imposed on every project.
    and #570 both merged over exactly this hole), `CI Gate` (ruleset
    18852689's only required status check; `bypass_actors` is empty) is
    green, and the window between the reviewed SHA and current `main` is
-   empty. Any session may execute it once those hold (idempotent).
-   `Independent Review` is the union rule's machine form (`docs/fleet/rules.md`
-   R18, written by `edda review deliver`) — advisory evidence
-   `merge-reviewed-pr.sh` checks and refuses on, not a ruleset-required
-   status; only an **authoritative** LGTM counts toward it, since a glm
-   SHADOW round is not a verdict, joins no union, and never merges anything
-   (`fleet.lgtm-merges`). The merging session records the empty-window check
-   in the PR — `git diff <reviewed-sha>..origin/main` over the changed
-   paths, or the squash-vs-diff form `fleet.lgtm-merges` documents when
-   `main` moved those paths independently.
+   empty. Only a controller holding standing repository R6 authority may
+   execute it; once those conditions hold, that controller merges immediately
+   without a second operator prompt. Workers, fixers, and reviewers never
+   merge. Trusted, SHA-pinned §7 comments are the authoritative union input:
+   `edda review merge` reads them and evaluates the union directly.
+   `Independent Review` (written idempotently by `edda review deliver`) is an
+   advisory delivery projection, not a ruleset-required status and not an
+   input to `edda review merge`; a SHADOW round is not a verdict, joins no
+   union, and produces no status (`fleet.lgtm-merges`).
+   `scripts/merge-reviewed-pr.sh` is a one-line compatibility adapter over the
+   product verb and owns no decision logic. The merging controller records the
+   empty-window check in the PR — `git diff <reviewed-sha>..origin/main` over
+   the changed paths, or the squash-vs-diff form `fleet.lgtm-merges` documents
+   when `main` moved those paths independently.
 
 Internal verifier reports, task receipts, and CI do not replace PR comments.
 

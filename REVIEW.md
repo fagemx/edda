@@ -33,7 +33,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.8`
+- Spec version: `review-spec-v1.9`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -843,7 +843,7 @@ One comment per round, pinned to the reviewed full SHA
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
 - reviewer_session: <per-PR UUID the lane was launched with>
-- spec: review-spec-v1.8
+- spec: review-spec-v1.9
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - shadow: true|false  (documentation for a SHADOW round: true requires the heading suffix ` (SHADOW)` — `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; the suffix is the only marker, this field never substitutes for it; a SHADOW round is never a verdict — §8)
@@ -893,7 +893,10 @@ rather than overwriting it.
 - **P0 = 0 and P1 = 0 → LGTM.** Add `fleet:reviewed`. Stop. Merge belongs to
   the rule-based merge gate — current-head LGTM, `CI Gate` green, empty SHA
   window, P0=0/P1=0 (`docs/fleet/rules.md` R6) — not the reviewer's own
-  action (`loop`; GATE-01).
+  action (`loop`; GATE-01). Only a controller holding standing repository R6
+  authority executes it; once every condition holds, that controller merges
+  immediately without a second operator prompt. Workers, fixers, and reviewers
+  never merge.
 - **Any P0 or any P1 → Changes Requested.** Post the comment, leave the PR
   open, stop. Fixing is the implementer's round; every `Changes Requested`
   round is answered by a `Review Response: Round N` that names the new full SHA
@@ -922,48 +925,46 @@ Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the
 strongest durable local carrier; do not invent a PR.
 
-The merge gate's commit status is context
-`Independent Review`, pinned to the reviewed SHA in §7's heading. Its state
-is the union of every §7 verdict comment on that SHA plus the round just
-posted — a SHADOW round (heading with the ` (SHADOW)` suffix) is never a
-verdict and never enters this state; that exclusion is part of this rule,
-not a side effect of any reader's pin regex — `success` only when at least
-one verdict is `LGTM (P0=0, P1=0)` and
-no verdict on that SHA is anything else; any standing non-qualifying verdict
-is `failure`; no verdict at all is `error`. A later LGTM therefore does not
-override an earlier Changes Requested on the same SHA (GH-742).
+Trusted, SHA-pinned §7 verdict comments are the authoritative input to the
+merge union. Only comments from GitHub-trusted associations count. A SHADOW
+round (heading with the ` (SHADOW)` suffix) is never a verdict and never joins
+the union. The union passes only when at least one verdict is
+`LGTM (P0=0, P1=0)` and no standing non-qualifying verdict exists on that SHA;
+a later LGTM therefore does not override an earlier Changes Requested on the
+same SHA (GH-742).
 
-**That rule is executable: `edda review gate <sha>` decides it** (GH-769), and
-it is the only implementation of the rule — no other code in this repository
-decides what a verdict means. `--base <ref>` adds the window check: if the
-base has advanced over any file the subject changed, the reviewed tree is no
-longer the tree that would merge, and the gate fails with reason `window`. The
-verb reads the ledger's `review_verdict` events by default and accepts the
-caller's verdict facts with `--verdicts`; it writes nothing, launches nothing,
-and never touches GitHub. Its exit codes and flags are in
-`docs/reference/cli.md`.
+`edda review merge --pr <n>` reads those comments directly, reduces them with
+`deliver::extract`, and evaluates the shared `gate::union` rule (GH-1057). It
+also requires the latest trusted review to be pinned to the current head, to
+be a qualifying LGTM with no unresolved escalation, and refuses a verdict
+comment the union could not read (a §7 heading below line 1, #917). It neither
+invokes `edda review deliver` nor reads the `Independent Review` status.
+`scripts/merge-reviewed-pr.sh` is a one-line compatibility adapter that
+forwards its arguments to this product verb; it owns no decision logic.
 
-**The merge step asks that rule** (GH-1057). `scripts/merge-reviewed-pr.sh`
-still requires the *latest* trusted review pinned to the head to be a
-qualifying LGTM with no unresolved escalation; on top of that it now refuses
-any head whose union is not a pass, so an earlier standing Changes Requested is
-no longer survived by a later LGTM there. It reaches the rule through
-`edda review deliver --pr <n> --sha <head> --json` (GH-1030) rather than
-`edda review gate` directly: verdicts do not cross machines in the ledger yet
-(`D8-debt(#671)`), so the §7 comments are the only source that answers
-correctly at a merge, and `deliver` is what reduces those comments and hands
-them to this same rule. A verdict comment the union could not read (a §7
-heading below line 1, #917) refuses too — a union reading `success` while a
-blocking round is invisible to it is not a pass. The shell that used to post
-the `Independent Review` commit status from the gate's answer was retired with
-its status writer (GH-1061), and `review.merge-gate` had already taken that
-context out of the ruleset, so the merge script — not a required check — is
-where the rule binds. What the merge step does **not** ask is the window check:
-`--base` needs both commits present locally and that entrypoint runs anywhere
-with `gh --repo`, so there `gh pr merge --match-head-commit` plus GitHub's own
-merge-state refusal covers the race at the moment it counts. Run
+`Independent Review` is the idempotent, advisory delivery projection of the
+same comment union, written by `edda review deliver` together with the
+`review:*` label and malformed-comment notice. Where delivery is due, it writes
+`success` only for a passing union, `failure` for a standing non-qualifying
+verdict, and `error` when no verdict exists; a SHADOW-only round causes no
+status or label write. The status is not ruleset-required and is not an input
+to `edda review merge`; ruleset 18852689's only required status check is
+`CI Gate`.
+
+`edda review gate <sha>` exposes the same union rule (GH-769). It reads the
+ledger's `review_verdict` events by default and accepts caller-supplied verdict
+facts with `--verdicts`; it writes nothing, launches nothing, and never touches
+GitHub. `--base <ref>` adds the window check: if the base has advanced over any
+file the subject changed, the reviewed tree is no longer the tree that would
+merge, and the gate fails with reason `window`. Its exit codes and flags are
+in `docs/reference/cli.md`.
+
+The merge product does **not** perform that checkout-side tree-level window
+check: `--base` needs both commits present locally and the entrypoint runs
+anywhere with `gh --repo`. There `gh pr merge --match-head-commit` plus GitHub's
+own merge-state refusal covers the race at the moment it counts. Run
 `edda review gate <sha> --base <ref>` from a checkout for the stronger
-tree-level window check.
+tree-level window check, and record R6's empty reviewed-SHA window in the PR.
 
 ## 9. Provenance of the check commands
 
@@ -1079,6 +1080,14 @@ mechanical.
   patterns named by U6. Tracked, control/source, unknown, malformed, or
   inconsistent dirt never becomes evidence. CI mapping and advisory-unverified
   semantics from v1.7, and the unchanged `ran_allowlist`, remain intact.
+- `review-spec-v1.9` (2026-09-11, issue #1144): trusted SHA-pinned §7 comments
+  are the authoritative merge-union input. `Independent Review` remains the
+  idempotent advisory projection written by `edda review deliver`, not a
+  ruleset requirement or merge input; `edda review merge` reads the comments
+  and union directly, while the shell is only its one-line compatibility
+  adapter. Only a controller with standing repository R6 authority merges,
+  immediately once the existing conditions hold and without a second prompt;
+  workers, fixers, and reviewers never merge.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
