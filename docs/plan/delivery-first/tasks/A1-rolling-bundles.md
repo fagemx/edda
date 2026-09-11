@@ -50,8 +50,10 @@ job/hook, new skill name, global installation or peer program edits. Do not forc
    issue-specific investigation and option meanings, especially --no-merge/--skip-plan.
    Delete their independent all-agent phase waits/fresh-fixer/merge loops, not just add a
    pointer beside contradictory instructions. Inbound affected callers still resolve.
-4. Implement WORKFLOW's caller protocol in guidance, not new code. First select ONE rail
-   owner: manual named controller or existing reconciler. Manual mode refuses task creation/
+4. Implement WORKFLOW's caller protocol in guidance, not new code. First select ONE
+   repository-wide rail owner: manual named controller or existing reconciler. Never use
+   per-plan rail-owner keys: current reconcile selects eligible tasks across plan_id. Manual
+   mode scans all plans/peers and refuses task creation/
    launch unless scheduled/one-off reconcile and prior reconcile attempts are proven absent;
    reconcile mode owns its actual Codex/retry lifecycle and receives no manual/per-card-
    no-retry tasks. Add rail collision and mode-switch refusal cases to fixtures.
@@ -79,7 +81,8 @@ job/hook, new skill name, global installation or peer program edits. Do not forc
 11. Add V1/V6 fixtures with positive/negative cases. Static checks inspect active procedural
     sections, allow quoted historical bad examples, catch duplicate active loops. Existing
     init tests prove actual projection bytes and preserved custom files. Isolated task
-    fixtures prove deterministic active-map recovery, manual/reconcile refusal, same-ID
+    fixtures prove repository-wide/cross-plan rail-owner refusal, deterministic active-map
+    recovery, manual/reconcile separation, same-ID
     retries, ACP creation/preflight and dependency unlock. No actual model/network launch.
 
 ## Acceptance / commands

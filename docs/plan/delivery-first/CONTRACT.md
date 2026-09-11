@@ -111,8 +111,9 @@ V1–V6 的執行步驟見 [VALIDATION.md](VALIDATION.md)。
 
 [WORKFLOW.md](WORKFLOW.md) 是 routing、caller lifecycle、backend adapter、issue timing
 與 adoption 的單一定義。使用既有 brief/receipt/note，不新增 mandatory task fields。
-Controller start、worker normal done/fail 是 caller convention，不是新 role enforcement；
-不覆蓋現有 runtime 的權限／controlled acceptance 拒絕。
+Repository rail 先選一個 manual 或 reconcile owner。Controller start、worker normal
+done/fail 只適用 manual mode；reconcile mode 使用既有 lease/runner。這是 caller
+convention，不是新 role enforcement，也不覆蓋 runtime 權限／controlled refusal。
 
 ```text
 BundlePlan prose -> existing task brief / issue acceptance

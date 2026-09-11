@@ -26,18 +26,24 @@ This experiment replays a closed issue; it does not count as new shipped product
 
 1. Check exact historical object exists; obtain it from PR1143's existing refs/history if
    necessary. Use a fresh isolated experimental checkout, never an active peer checkout.
-2. Bind actual installed runtime/provider/model/version, guidance/product source SHA,
+2. Consume [WORKFLOW](../WORKFLOW.md) §3–5 before materializing C1. It is a Pi/no-retry card,
+   so the repository-wide rail owner must be manual. Prove reconcile scheduler/process/
+   attempt absence and read exact active-map/task data before task creation/start. If mode is
+   reconcile or unknown, do offline preparation only; do not create an eligible C1 task or
+   launch Pi. Controller prestarts the mapped task immediately before dispatch; worker does
+   not start it and owns normal done/fail. A dispatch receipt alone does not settle the task.
+3. Bind actual installed runtime/provider/model/version, guidance/product source SHA,
    timeout, one funded author call and one separately funded independent review, available
    build lane and store isolation. No correction call is authorized by this card. Record
    missing cost reporting and budget enforcement capability. Never inspect or print secret values.
-3. Give the worker issue behavior and source starting points, not the already merged fix
+4. Give the worker issue behavior and source starting points, not the already merged fix
    diff or gold patch. Reviewer can use final `10865bdcf503d7296ed6749318f781b00001dc13`
    as an oracle but compares behavior, not identical implementation.
-4. Strong planner writes concise outcome/scope plus Flash-specific ordered reads and a
+5. Strong planner writes concise outcome/scope plus Flash-specific ordered reads and a
    zero-output-versus-empty-array probe. Use ordinary controller-authored prompt-file;
    do not relabel imported issue/capsule prose as trusted commands or activate unresolved
    S5 controlled APIs. Existing direct low-level dispatch remains a separate path.
-5. Offer source access and safe offline tests, no live forge writes. This is a functional
+6. Offer source access and safe offline tests, no live forge writes. This is a functional
    workflow trial in an isolated environment, not proof of an adversarial sandbox.
 
 ## Run one guided attempt
@@ -47,12 +53,22 @@ all named CLI options with the installed binary's help before launch; no new fla
 
 ```bash
 edda dispatch --agent pi --list-models
-# Controller binds absolute PILOT_WT, PROMPT_FILE, receipt destinations and PI_MODEL.
-# Set assigned CARGO_TARGET_DIR in the caller environment; do not create another target.
+# Controller binds repository-wide manual rail mode, exact active C1_TASK_ID, absolute
+# PILOT_WT/PROMPT_FILE/receipt destinations and PI_MODEL. Prompt names task/attempt/card.
+# Set assigned CARGO_TARGET_DIR in caller environment; do not create another target.
+edda ask "delivery.rail-owner" --json
+edda ask "delivery.active.delivery-first" --json
+edda task show "$C1_TASK_ID" --json
+edda task start "$C1_TASK_ID"
 edda dispatch --agent pi --model "$PI_MODEL" --cwd "$PILOT_WT" \
   --prompt-file "$PROMPT_FILE" --timeout-sec "$TIMEOUT_SEC" \
   --json > "$DISPATCH_RECEIPT"
 ```
+
+Every readback must match the bound manual revision/task/brief/scope and show no prior live
+attempt before start. These commands are not a safe mode-switch by themselves; WORKFLOW's
+scheduler/process/attempt evidence is required first. If start/dispatch is ambiguous, do
+not invoke product reconcile or launch a second call.
 
 TIMEOUT_SEC and spend allowance must be explicit before paid execution. Budget flags
 are not represented here as a hard guarantee: repository evidence shows some backends
@@ -68,7 +84,9 @@ product review it does not accept --resume. Do not mix backend continuation sema
 ## Self-check / review / validation
 
 Author performs the two A2 lenses and hands off one facts block. No author self-LGTM.
-Read observed exit/outcome/session/model; `outcome=done` alone is not acceptance.
+Read observed exit/outcome/session/model; `outcome=done` alone is not acceptance. Worker
+settles the C1 task with a truthful local-candidate/failure receipt after inspecting output;
+that settlement neither authorizes review acceptance nor merge.
 
 At the trial source, the existing process fixture
 `required_check_diagnostics_refuse_every_observed_shape_without_squashing` is the starting

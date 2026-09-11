@@ -31,7 +31,7 @@ Two compile-needed sessions use different allowed lanes; do not inherit one shar
 | [A3](tasks/A3-convention-policy.md) | A owner or disjoint policy worker | base REVIEW semantics | U3-only advisory rule + runner regression tests | none | immediately, capacity permitting |
 | [B1](tasks/B1-release-cut.md) | existing continuity controller | task113 / GH1141 / current stack | owner-adopted usable-slice amendment | none | read-only now; edit after permission |
 | [B2](tasks/B2-continuity-delivery.md) | existing continuity owner + integrator | B1 amendment + accepted local candidates | current-base usable continuity PR(s) | B1 | adoption and source ownership settled |
-| [C1](tasks/C1-flash-pilot.md) | strong planner + one Flash author + independent reviewer | A2 guidance + frozen historical bug + selected runtime | result/evidence/cost report, no duplicate product PR | A2 | runtime/timeout/spend bound |
+| [C1](tasks/C1-flash-pilot.md) | strong planner + one Flash author + independent reviewer | A2 + repository-wide manual rail ownership + frozen bug/runtime | result/evidence/cost report, no duplicate product PR | A2 | manual mode and runtime/timeout/spend bound |
 
 A1–A3 may be one coherent PR if same owner completes them before external review;
 otherwise separate usable PRs. No need for three independent research sessions or three

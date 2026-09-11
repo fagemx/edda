@@ -78,9 +78,10 @@ accepted intent -> owner with facts -> implement + two self-check lenses
 
 沒有 launch evidence 時不能猜「沒跑」就再次啟動；沒有 heartbeat 也不能猜 process 已死。
 本輪不新增 exactly-once guarantee；不可判定的副作用維持局部 unknown，不重做 merge。
-以上是交付觀察，不是 task rail 的新狀態。WORKFLOW §4/5 定義 controller prestart、
-worker settlement、failed 同 ID start retry、changed-brief replacement。Dispatch done
-不等於 task done，更不等於 independent acceptance；無需另造 retry API。
+以上是交付觀察，不是 task rail 的新狀態。WORKFLOW §3 先為整個 repository rail
+選 manual 或 reconcile 單一 owner。只有 manual mode 使用 controller prestart、worker
+settlement、failed 同 ID start retry 與 revision replacement；reconcile mode 完全使用
+其 lease/runner lifecycle。Dispatch done 不等於 task done或 acceptance；不另造 retry API。
 
 ## 6. Two self-check lenses, one author context
 

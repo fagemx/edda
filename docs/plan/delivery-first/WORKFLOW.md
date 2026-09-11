@@ -84,16 +84,18 @@ exclusive ownership cannot be established, do not create Ready manual tasks on t
 return the local conflict. A durable exact-key decision records the selected caller mode before task creation:
 
 ```bash
-edda decide "delivery.rail-owner.$PLAN_KEY=manual:$CONTROLLER_SESSION" \
+edda decide "delivery.rail-owner=manual:$CONTROLLER_SESSION" \
   --session "$CONTROLLER_SESSION" \
-  --reason "operator-authorized mode; scheduler/process/attempt evidence=<locations>"
-edda ask "delivery.rail-owner.$PLAN_KEY" --json
+  --reason "repository-wide operator-authorized mode; scheduler/process/attempt evidence=<locations>"
+edda ask "delivery.rail-owner" --json
 ```
 
-Use `reconcile` as the value only when that runner truly owns this plan; cite the actual
-operator authorization when one exists. The record is coordination evidence, not mechanical
-exclusion or authenticated authority. Unauthorized later reconcile invocation remains an
-exposed product limitation; do not claim exactly-once.
+This is one repository-rail key, never one key per plan: reconcile selects eligible tasks
+across every plan_id. Use `reconcile` only when that runner owns the whole repository rail;
+cite actual operator authorization when one exists. Before task creation, scan every active
+plan/task and peer record for a conflicting owner—not only this plan. The record is
+coordination evidence, not mechanical exclusion or authenticated authority. Unauthorized
+later reconcile invocation remains an exposed product limitation; do not claim exactly-once.
 
 Reconcile mode instead uses its actual configuration/lease lifecycle, including its global
 max-attempt behavior. It is not a fallback for cards whose backend, permission, budget or
@@ -103,8 +105,9 @@ no unresolved task side effects. A1 adds guidance/refusal fixtures, not schedule
 
 ### Deterministic active map on existing carriers
 
-For manual mode, use one exact-key active decision plus task `plan_id`; do not use an
-unsearchable note. Let `PLAN_KEY` be a stable lowercase dotted slug, `PLAN_REV` a monotonic
+After the repository-wide rail-owner is established, manual mode uses one per-plan exact-key
+active decision plus task `plan_id`; do not use an
+unsearchable note. Let `PLAN_KEY` be a stable lowercase slug (this pack uses `delivery-first`), `PLAN_REV` a monotonic
 zero-padded revision (`r0001`), and `PLAN_ID="$PLAN_KEY/$PLAN_REV/$PLAN_SHA"`. Every task in
 that revision uses this exact plan ID and key `$PLAN_ID/$CARD_ID`. After creating/readback
 of the complete intended map, the named controller records:
@@ -118,7 +121,8 @@ edda task list --json
 
 A repeated same decision key supersedes the prior active value in existing decision history.
 It is operational provenance, not ratified product acceptance, merge authority or a source
-of scope. A fresh controller starts with exact-key `edda ask`, requires one active value,
+of scope. A fresh controller first reads exact `delivery.rail-owner`, then the per-plan active key,
+requires one active value for each,
 filters task-list JSON by exact `plan_id`, reads every selected ID with task show, and checks
 card/source SHA, dependencies, owner/scope/brief and observed artifacts before launch. It
 must work from no prior chat. Missing/malformed/conflicting map means read-only recovery and
