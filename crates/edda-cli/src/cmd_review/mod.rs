@@ -182,6 +182,9 @@ pub(super) fn transport(agent: AgentKind) -> &'static str {
 fn run_inner(args: &ReviewArgs, cwd: &Path) -> Result<Reviewed> {
     // Empty diff and same-author refusal happen before launcher probing/spawn.
     let prepared = prepare::prepare(args, cwd)?;
+    if let Some(warning) = prepared.context_warning.as_deref() {
+        eprintln!("edda review: warning: {warning}");
+    }
     validate(args)?;
     if let Some(warning) =
         crate::cmd_conduct::budget_warning_for_agent(args.agent, args.budget_usd.is_some())

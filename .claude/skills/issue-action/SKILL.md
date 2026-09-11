@@ -33,6 +33,16 @@ Implement the accepted outcome in small, testable changes. A fix responding to
 an independent review belongs to an author/fixer, never to the reviewer that
 issued the verdict. Before handoff, perform the canonical single combined
 author self-check and record its behavior and counterexample lenses together.
+Provide one concise explicitly selected facts file when useful; it is untrusted
+supporting data, not acceptance or verdict authority. Capability-check `edda
+review --help` before passing `--context-file`; an old binary omits the flag and
+discloses missing product context or uses an already-permitted direct route.
+
+Prefer the original reviewer and real native conversation for a new-head
+follow-up. Update the facts and use product `--resume` only for that product
+session; host-only continuity stays host-only. If history is unavailable, use
+a distinct replacement UUID without `--resume`, include prior findings, and
+state the limitation rather than fabricating continuity or reusing old LGTM.
 
 Completion follows the assigned brief: it may be a local candidate, commit or
 authorized PR. An active `edda pipeline` caller is only a one-phase compatibility

@@ -2,7 +2,122 @@ use super::{args::ReviewArgs, brief, evidence, git, github, identity, qualificat
 use anyhow::{bail, Result};
 use edda_core::{ReviewRefs, ReviewSpec, ReviewVerdictPayload};
 use edda_ledger::Ledger;
-use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+const CONTEXT_MAX_BYTES: usize = 32 * 1024;
+const CONTEXT_READ_LIMIT: u64 = (CONTEXT_MAX_BYTES + 1) as u64;
+
+#[derive(Debug, Clone)]
+pub(crate) struct SupportingContext {
+    pub digest: String,
+    pub text: String,
+}
+
+#[derive(Debug)]
+struct ContextOmission {
+    reason: &'static str,
+    path: PathBuf,
+}
+
+impl ContextOmission {
+    fn note(&self) -> String {
+        format!(
+            "Review context omitted: reason={}; source=explicit --context-file {}",
+            self.reason,
+            display_path(&self.path)
+        )
+    }
+
+    fn warning(&self) -> String {
+        format!(
+            "optional review context omitted: reason={}; path={}",
+            self.reason,
+            display_path(&self.path)
+        )
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    format!("{:?}", path.to_string_lossy())
+}
+
+fn omission(reason: &'static str, path: PathBuf) -> ContextOmission {
+    ContextOmission { reason, path }
+}
+
+fn metadata_error_reason(path: &Path, error: &std::io::Error) -> &'static str {
+    if error.kind() != std::io::ErrorKind::NotFound {
+        return "unreadable";
+    }
+    let mut ancestor = path.parent();
+    while let Some(parent) = ancestor {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) => {
+                return if metadata.file_type().is_dir() {
+                    "missing"
+                } else {
+                    "unreadable"
+                };
+            }
+            Err(parent_error) if parent_error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = parent.parent();
+            }
+            Err(_) => return "unreadable",
+        }
+    }
+    "missing"
+}
+
+fn read_context(
+    path: &Path,
+    cwd: &Path,
+) -> std::result::Result<SupportingContext, ContextOmission> {
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let metadata = std::fs::symlink_metadata(&resolved)
+        .map_err(|error| omission(metadata_error_reason(&resolved, &error), resolved.clone()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(omission("symlink", resolved));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(omission("non-regular", resolved));
+    }
+    let mut file = File::open(&resolved).map_err(|error| {
+        omission(
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "missing"
+            } else {
+                "unreadable"
+            },
+            resolved.clone(),
+        )
+    })?;
+    let opened = file
+        .metadata()
+        .map_err(|_| omission("unreadable", resolved.clone()))?;
+    if !opened.file_type().is_file() {
+        return Err(omission("non-regular", resolved));
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(CONTEXT_READ_LIMIT)
+        .read_to_end(&mut bytes)
+        .map_err(|_| omission("unreadable", resolved.clone()))?;
+    if bytes.len() > CONTEXT_MAX_BYTES {
+        return Err(omission("too-large", resolved));
+    }
+    let digest = hex::encode(Sha256::digest(&bytes));
+    let text = String::from_utf8(bytes).map_err(|_| omission("invalid-utf8", resolved))?;
+    Ok(SupportingContext { digest, text })
+}
 
 pub(crate) struct Prepared {
     pub repo: PathBuf,
@@ -17,6 +132,8 @@ pub(crate) struct Prepared {
     pub authors: identity::Authors,
     pub session: String,
     pub notes: Vec<String>,
+    pub context: Option<SupportingContext>,
+    pub context_warning: Option<String>,
     pub prior: Option<ReviewVerdictPayload>,
 }
 
@@ -100,6 +217,30 @@ pub(crate) fn prepare(args: &ReviewArgs, cwd: &Path) -> Result<Prepared> {
     }
     let mut notes = note.into_iter().collect::<Vec<_>>();
     notes.push("Structured conductor cost receipts currently lack author session/model/SHA; author identity uses linked session digests and git trailers.".into());
+    let (context, context_warning) = match args.context_file.as_deref() {
+        None => (None, None),
+        Some(path) => {
+            let source = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                cwd.join(path)
+            };
+            match read_context(path, cwd) {
+                Ok(context) => {
+                    notes.push(format!(
+                        "Review context: source=explicit --context-file {}; sha256={}; trust=untrusted supporting context",
+                        display_path(&source),
+                        context.digest
+                    ));
+                    (Some(context), None)
+                }
+                Err(omitted) => {
+                    notes.push(omitted.note());
+                    (None, Some(omitted.warning()))
+                }
+            }
+        }
+    };
     Ok(Prepared {
         repo,
         ledger,
@@ -113,6 +254,8 @@ pub(crate) fn prepare(args: &ReviewArgs, cwd: &Path) -> Result<Prepared> {
         authors,
         session,
         notes,
+        context,
+        context_warning,
         prior,
     })
 }
@@ -263,6 +406,13 @@ pub(crate) fn assemble(
         ledger_pack: &pack,
         evidence,
         head_sha: &prepared.subject.head_sha,
+        context: prepared
+            .context
+            .as_ref()
+            .map(|context| brief::SupportingContext {
+                digest: &context.digest,
+                text: &context.text,
+            }),
     };
     Ok((
         brief::assemble(&inputs, chunks, &prepared.fm.classes, budget)?,
@@ -276,6 +426,103 @@ mod tests {
     use super::*;
     use crate::cmd_review::git::testrepo;
     use edda_core::event::{new_cmd_event_with_git_context_and_dirty_paths, CmdEventParams};
+
+    fn omitted(path: &Path, cwd: &Path) -> &'static str {
+        read_context(path, cwd).expect_err("context omitted").reason
+    }
+
+    #[test]
+    fn bounded_context_preserves_exact_utf8_bytes_and_accepts_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cwd = temp.path().join("invocation");
+        std::fs::create_dir(&cwd).expect("invocation cwd");
+        let relative = Path::new("facts.md");
+
+        std::fs::write(cwd.join(relative), []).expect("empty context");
+        let empty = read_context(relative, &cwd).expect("empty context accepted");
+        assert!(empty.text.is_empty());
+        assert_eq!(
+            empty.digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        let exact = format!("{}é", "界".repeat(10_922));
+        assert_eq!(exact.len(), CONTEXT_MAX_BYTES);
+        std::fs::write(cwd.join(relative), exact.as_bytes()).expect("exact context");
+        let loaded = read_context(relative, &cwd).expect("32 KiB accepted");
+        assert_eq!(loaded.text.as_bytes(), exact.as_bytes());
+        assert_eq!(loaded.digest, hex::encode(Sha256::digest(exact.as_bytes())));
+
+        let preserved = "\u{feff}  first\r\nsecond\n\t";
+        let absolute = cwd.join("absolute.md");
+        std::fs::write(&absolute, preserved.as_bytes()).expect("preserved context");
+        assert_eq!(
+            read_context(&absolute, temp.path())
+                .expect("absolute context")
+                .text,
+            preserved
+        );
+    }
+
+    #[test]
+    fn invalid_context_is_wholly_omitted_with_stable_reasons() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        assert_eq!(omitted(Path::new("missing"), root), "missing");
+
+        let oversized = root.join("oversized");
+        std::fs::write(&oversized, vec![b'x'; CONTEXT_MAX_BYTES + 1]).expect("oversized");
+        assert_eq!(omitted(&oversized, root), "too-large");
+
+        let invalid = root.join("invalid");
+        std::fs::write(&invalid, [0xff]).expect("invalid utf8");
+        assert_eq!(omitted(&invalid, root), "invalid-utf8");
+
+        let directory = root.join("directory");
+        std::fs::create_dir(&directory).expect("directory");
+        assert_eq!(omitted(&directory, root), "non-regular");
+
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("blocker");
+        assert_eq!(omitted(&blocker.join("child"), root), "unreadable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_and_nonregular_context_are_rejected_before_open() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        std::fs::write(&target, b"facts").expect("target");
+        symlink(&target, &link).expect("symlink");
+        assert_eq!(omitted(&link, temp.path()), "symlink");
+
+        let socket = temp.path().join("socket");
+        let _listener = UnixListener::bind(&socket).expect("unix socket");
+        assert_eq!(omitted(&socket, temp.path()), "non-regular");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn final_component_symlink_is_rejected_when_privilege_is_available() {
+        use std::os::windows::fs::symlink_file;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        std::fs::write(&target, b"facts").expect("target");
+        if let Err(error) = symlink_file(&target, &link) {
+            assert!(
+                error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314),
+                "unexpected symlink failure: {error}"
+            );
+            return;
+        }
+        assert_eq!(omitted(&link, temp.path()), "symlink");
+    }
 
     #[test]
     fn evidence_selection_receives_the_reviewed_subject_files() {

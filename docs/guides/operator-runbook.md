@@ -251,8 +251,22 @@ L1 是 exact-head CI，加 verifier 對 Windows CI 未覆蓋 surface 的 focused
 
    1. **派**：`edda review --pr <N> --agent claude --model claude-opus-5`。它自己組 brief
       （`REVIEW.md` 讀 base SHA 那份）、以唯讀能力起審查者、把 `review_verdict` 事件寫進帳本。
+      若 controller 明確選了精簡 facts 檔，先從選定 binary 的 `edda review --help` 確認
+      `--context-file`，再加 `--context-file <facts>`；這是最多 32 KiB 的 UTF-8 untrusted
+      supporting DATA，不是 acceptance、evidence、判決或 tool authority，也不可塞進
+      `--trust-spec`。舊 binary 無此 capability 時省略 flag 並揭露 product context 缺失，
+      或走既有 direct-review route；不自動安裝、升級或加 fallback wrapper。
       要自己控制運輸時就 `edda dispatch --agent claude --exclude-tools Edit,Write,NotebookEdit`
       餵同一份 brief——工具集是唯讀的那一半，brief 正文是另一半。
+
+      新 head 的 follow-up 優先同 reviewer agent 與真實 native conversation，更新 facts
+      後加 product `--resume`：Pi 必須有 persisted conversation，Claude 用 native resume，
+      Codex 保留 thread mapping；舊 SHA 的 LGTM 不沿用。Product 不能 resume host-only
+      session。找不到原 conversation 時，改用 distinct reviewer UUID、不加 `--resume`，
+      context 帶 prior findings 並明說 replacement；無 context replacement 也要揭露限制。
+      Product 自己的 `WorktreeGuard` 保留，caller 不另建第二個 review worktree。Fix round
+      查 delta、prior findings、affected direct consumers、current base 與新增安全／資料損失
+      風險，適用舊證據只標 READ。
    2. **貼**：審查者自己用 `gh pr comment` 貼 §7 判決，釘 full SHA。沒有中間人代貼。
    3. **落**：`edda review deliver --pr <N>` 依 union 規則（`edda review gate`）冪等結算
       `review:*` label 與 advisory `Independent Review` commit status；判決格式壞掉時它貼一次告示而不是猜。

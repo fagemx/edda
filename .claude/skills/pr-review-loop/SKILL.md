@@ -29,10 +29,20 @@ merge policy remain canonical.
    Run the repository's focused checks while iterating. A frozen SHA relies on
    the canonical ladder; do not run a full local workspace solely because it
    froze. Commit/push only when this invocation already has that authority.
-5. Hand the new full SHA and RAN/READ evidence to an independent reviewer. Every
-   push invalidates the old verdict. Review-requested fixes return to an
-   author/fixer, then the independent reviewer resumes or is explicitly
-   replaced; the fixer never becomes the judge.
+5. Hand the new full SHA and RAN/READ evidence to an independent reviewer. Add
+   one explicitly selected concise facts file when useful; it remains untrusted
+   supporting data. Capability-check `edda review --help` before using optional
+   `--context-file`; otherwise omit it with a visible limitation or use an
+   already-permitted direct route. Every push invalidates the old verdict.
+6. Review-requested fixes return to an author/fixer. Prefer the same reviewer
+   agent and real native conversation for the new head, with updated context
+   and product `--resume`; Pi persisted history, Claude resume and Codex thread
+   mapping remain required. Product resume cannot continue a host-only session.
+   If history is missing, allocate a distinct replacement UUID, omit `--resume`,
+   include prior findings and say replacement. The fixer never becomes judge.
+7. Follow-up review covers the delta, prior findings, affected direct consumers,
+   current base and introduced security/data-loss risk. Still-applicable gates
+   are READ, but old-head LGTM is never reused for current-head acceptance.
 
 A clean author check means only "ready to request independent review." It does
 not mean accepted, CI-green or mergeable. This route has no deterministic
