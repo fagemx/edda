@@ -1018,7 +1018,7 @@ documented surface cannot silently drift from the binary;
 | `export` | Export the ledger as human-readable Markdown (read-only projection; SQLite stays authoritative) | A convenience projection; automation should query the ledger or `edda log`, not parse exports |
 | `hook` | Hook entrypoint (called by supported coding-agent hooks) | Internal: expects a hook payload on stdin; hand-invocation writes events with wrong attribution |
 | `intake` | Task intake — ingest external tasks into the ledger | Experimental ingest surface |
-| `prs` | Scan and record PR events from GitHub | Needs network and a token; normally driven by the scheduler or `edda watch` |
+| `prs` | Scan and record PR events; carries deprecated `check-merge` compatibility | `scan` needs network and a token; live `check-merge` forwards to `edda review merge`, while its offline scalar form is advisory only |
 | `pipeline` | Auto-execution pipeline — skill chain with approval gates | Experimental orchestration layer; prefer `edda plan` / `edda conduct` for reviewed plans |
 | `bundle` | Create and manage review bundles for rapid approval | Deprecated; use `edda review` |
 | `brief` | View task engineering briefs (materialized from ledger events) | Read-only viewer normally consumed via `edda task` workflows |
@@ -1488,7 +1488,7 @@ a `reason`) for each write.
 
 Launching reviews (`edda review`), the trigger policy (`edda review due`,
 GH-763), verdict semantics (`edda review gate`, GH-769), and merging
-(`edda prs check-merge`; GATE-01 — deliver never merges) stay out of scope.
+(`edda review merge`; GATE-01 — deliver never merges) stay out of scope.
 
 #### `edda review drift`
 
@@ -1544,6 +1544,35 @@ merges nothing.
 edda review merge --pr 1105                  # --check is the default
 edda review merge --pr 1105 --merge --body-file .edda/merge-receipt.md
 ```
+
+`edda prs check-merge <PR>` is a deprecated compatibility spelling. With a
+live positional PR and no `--input`, it calls this exact product path: stdout,
+stderr, JSON, and exits 0/1/2 are canonical, and `--merge` therefore uses the
+same `--match-head-commit`, validated squash subject, and receipt. It has no
+live verdict parser, CI classifier, or process-claim gate of its own.
+`--allowed-reviewers` refuses in live-forward mode rather than changing or
+silently bypassing the canonical trust rule: trusted §7 comments are selected
+from GitHub's `author_association` (`OWNER`, `MEMBER`, or `COLLABORATOR`).
+`--force` also refuses there because process claims are not an R6 condition.
+
+Two host-agnostic compatibility forms remain temporarily available:
+
+```bash
+edda prs check-merge --input facts.json --json
+edda prs check-merge --head-sha "$head" --verdict lgtm \
+  --verdict-sha "$head" --ci-green
+```
+
+These forms retain the `MergeGateInput` / `MergeGateResult` JSON shape, human
+report fields, and 0/1 report contract. They are **deprecated advisory scalar
+diagnostics only, not trusted R6 evidence**; output says so explicitly. They
+cannot establish the trusted-comment union or forge-required checks.
+`--merge` remains forbidden. Active-claim refusal and `--force` remain only in
+these offline/direct forms, including a positional PR paired with `--input`
+for claim lookup; they do not wrap live forwarding. The accepted scalar
+verdict is exactly `lgtm` or `approved` (case-insensitive), so prose such as
+`not lgtm` refuses. `required_ci_green: true` together with nonempty
+`failed_checks` also refuses as contradictory.
 
 The conditions run in order. A failed precondition rejects with exit 1;
 an unreadable or malformed answer rejects with exit 2:
