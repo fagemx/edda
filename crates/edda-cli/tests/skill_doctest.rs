@@ -1,4 +1,4 @@
-//! Executable examples for the coordination skills shipped by `edda init`.
+//! Executable examples for the project skills shipped by `edda init`.
 //!
 //! `crates/edda-cli/src/skills/*.md` are compiled into the binary with
 //! `include_str!` and written into every project. Nothing used to check that
