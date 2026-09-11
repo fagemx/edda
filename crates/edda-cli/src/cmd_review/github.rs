@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use edda_core::ReviewSpec;
 use serde_json::Value;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// Set `GH_REPO` for one `gh` invocation from `EDDA_REPO`, when present.
 ///
@@ -39,8 +39,169 @@ fn command(repo: &Path, args: &[&str]) -> Command {
     command
 }
 
+/// Capture one `gh` invocation through the shared binary/repository seam.
+/// Callers that need to interpret an exit status or stdout shape use this
+/// rather than rebuilding a `Command` and losing `EDDA_GH_BIN` / `EDDA_REPO`.
+pub(crate) fn gh_capture(repo: &Path, args: &[&str]) -> Result<Output> {
+    command(repo, args).output().context("run gh")
+}
+
+/// One row from the structured reread used only to diagnose a refused plain
+/// required-check read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RequiredCheckRow {
+    name: String,
+    state: String,
+    bucket: String,
+}
+
+/// Only `Green` satisfies the merge gate. Every diagnostic-only variant is a
+/// typed refusal, including a reread whose rows raced to passing/skipping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RequiredChecks {
+    Green,
+    Absent,
+    Blocked(Vec<RequiredCheckRow>),
+    RacedNowGreen(Vec<RequiredCheckRow>),
+    Indeterminate(String),
+}
+
+impl RequiredChecks {
+    pub(crate) fn refusal(self, pr: u64) -> Option<(i32, String)> {
+        let rows = |rows: &[RequiredCheckRow]| {
+            rows.iter()
+                .map(|row| format!("{} (bucket={}, state={})", row.name, row.bucket, row.state))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match self {
+            Self::Green => None,
+            Self::Absent => Some((
+                1,
+                format!(
+                    "no required-check rows are currently reported for PR #{pr}; wait for CI, or \
+                     check whether the PR base is covered by a ruleset; refusing"
+                ),
+            )),
+            Self::Blocked(checks) => Some((
+                1,
+                format!(
+                    "required checks are not green for PR #{pr}: {}; refusing",
+                    rows(&checks)
+                ),
+            )),
+            Self::RacedNowGreen(checks) => Some((
+                1,
+                format!(
+                    "required-check state changed during the read for PR #{pr}: diagnostic rows \
+                     are now all passing/skipping ({}); run `edda review merge` again; refusing",
+                    rows(&checks)
+                ),
+            )),
+            Self::Indeterminate(error) => Some((
+                2,
+                format!("cannot determine required checks for PR #{pr}: {error}; refusing"),
+            )),
+        }
+    }
+}
+
+fn required_checks_argv(pr: u64) -> Vec<String> {
+    vec![
+        "pr".into(),
+        "checks".into(),
+        pr.to_string(),
+        "--required".into(),
+    ]
+}
+
+fn required_checks_diagnostic_argv(pr: u64) -> Vec<String> {
+    let mut argv = required_checks_argv(pr);
+    argv.extend(["--json".into(), "name,state,bucket".into()]);
+    argv
+}
+
+/// Classify by exit status and structured stdout only — never gh's human
+/// stderr wording.
+fn classify_required_checks(exit: Option<i32>, stdout: &[u8]) -> RequiredChecks {
+    if stdout.is_empty() {
+        return RequiredChecks::Indeterminate(format!(
+            "diagnostic required-check read returned no structured report: stdout was empty \
+             (exit {exit:?}); retry after waiting for CI, and check GitHub connectivity and \
+             repository access"
+        ));
+    }
+    if !matches!(exit, Some(0 | 1 | 8)) {
+        return RequiredChecks::Indeterminate(format!(
+            "diagnostic `gh pr checks --required --json name,state,bucket` exited unexpectedly \
+             ({exit:?})"
+        ));
+    }
+    let rows: Vec<RequiredCheckRow> = match serde_json::from_slice(stdout) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return RequiredChecks::Indeterminate(format!(
+                "diagnostic required-check JSON is malformed or has an unknown row shape: {error}"
+            ));
+        }
+    };
+    if rows.is_empty() {
+        return RequiredChecks::Absent;
+    }
+    if let Some(row) = rows.iter().find(|row| {
+        row.name.is_empty()
+            || row.state.is_empty()
+            || !matches!(
+                row.bucket.as_str(),
+                "pass" | "fail" | "pending" | "skipping" | "cancel"
+            )
+    }) {
+        return RequiredChecks::Indeterminate(format!(
+            "diagnostic required-check row has an unknown shape: name={:?}, state={:?}, \
+             bucket={:?}",
+            row.name, row.state, row.bucket
+        ));
+    }
+    if rows
+        .iter()
+        .all(|row| matches!(row.bucket.as_str(), "pass" | "skipping"))
+    {
+        RequiredChecks::RacedNowGreen(rows)
+    } else {
+        RequiredChecks::Blocked(rows)
+    }
+}
+
+/// Run the unchanged plain command as the sole Green authority. A nonzero
+/// result gets exactly one structured diagnostic reread; that reread can
+/// explain a refusal but never approve it.
+pub(crate) fn required_checks(repo: &Path, pr: u64) -> RequiredChecks {
+    let argv = required_checks_argv(pr);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let plain = match gh_capture(repo, &args) {
+        Ok(output) => output,
+        Err(error) => {
+            return RequiredChecks::Indeterminate(format!(
+                "authoritative plain required-check read failed to start: {error:#}"
+            ));
+        }
+    };
+    if plain.status.success() {
+        return RequiredChecks::Green;
+    }
+    let argv = required_checks_diagnostic_argv(pr);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match gh_capture(repo, &args) {
+        Ok(output) => classify_required_checks(output.status.code(), &output.stdout),
+        Err(error) => RequiredChecks::Indeterminate(format!(
+            "diagnostic required-check read failed to start: {error:#}"
+        )),
+    }
+}
+
 pub(crate) fn gh(repo: &Path, args: &[&str]) -> Result<Value> {
-    let output = command(repo, args).output().context("run gh")?;
+    let output = gh_capture(repo, args)?;
     if !output.status.success() {
         bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
     }
@@ -52,7 +213,7 @@ pub(crate) fn gh(repo: &Path, args: &[&str]) -> Result<Value> {
 /// none of them can go through [`gh`], which parses stdout as JSON. Only
 /// the exit status is meaningful here; stdout is discarded.
 pub(crate) fn gh_write(repo: &Path, args: &[&str]) -> Result<()> {
-    let output = command(repo, args).output().context("run gh")?;
+    let output = gh_capture(repo, args)?;
     if !output.status.success() {
         bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
     }
@@ -275,6 +436,75 @@ pub(crate) fn load_spec(
 mod tests {
     use super::*;
     use crate::cmd_review::git::testrepo;
+
+    #[test]
+    fn required_check_argv_pins_the_pr_and_diagnostic_fields() {
+        assert_eq!(
+            required_checks_argv(4242),
+            ["pr", "checks", "4242", "--required"]
+        );
+        assert_eq!(
+            required_checks_diagnostic_argv(4242),
+            [
+                "pr",
+                "checks",
+                "4242",
+                "--required",
+                "--json",
+                "name,state,bucket"
+            ]
+        );
+    }
+
+    #[test]
+    fn required_check_output_is_classified_without_human_stderr() {
+        for exit in [Some(0), Some(1), Some(8), Some(9), None] {
+            let RequiredChecks::Indeterminate(message) = classify_required_checks(exit, b"") else {
+                panic!("empty output with {exit:?} must be indeterminate");
+            };
+            for expected in [
+                "no structured report",
+                "retry",
+                "waiting for CI",
+                "GitHub connectivity",
+                "repository access",
+            ] {
+                assert!(
+                    message.contains(expected),
+                    "missing {expected:?}: {message}"
+                );
+            }
+            assert!(!message.contains("no required-check rows"), "{message}");
+        }
+        assert_eq!(
+            classify_required_checks(Some(0), b"[]"),
+            RequiredChecks::Absent
+        );
+        let blocked = br#"[{"name":"build","state":"FAILURE","bucket":"fail"},
+            {"name":"test","state":"PENDING","bucket":"pending"}]"#;
+        assert!(matches!(
+            classify_required_checks(Some(0), blocked),
+            RequiredChecks::Blocked(rows)
+                if rows.iter().map(|row| row.bucket.as_str()).collect::<Vec<_>>()
+                    == ["fail", "pending"]
+        ));
+        let raced = br#"[{"name":"build","state":"SUCCESS","bucket":"pass"},
+            {"name":"docs","state":"SKIPPED","bucket":"skipping"}]"#;
+        assert!(matches!(
+            classify_required_checks(Some(1), raced),
+            RequiredChecks::RacedNowGreen(rows) if rows.len() == 2
+        ));
+        for result in [
+            classify_required_checks(Some(0), b"{"),
+            classify_required_checks(Some(9), b"[]"),
+            classify_required_checks(
+                Some(0),
+                br#"[{"name":"CI Gate","state":"SUCCESS","bucket":"mystery"}]"#,
+            ),
+        ] {
+            assert!(matches!(result, RequiredChecks::Indeterminate(_)));
+        }
+    }
 
     #[test]
     fn closing_keywords_ignore_mentions_and_use_first_closing_issue() {

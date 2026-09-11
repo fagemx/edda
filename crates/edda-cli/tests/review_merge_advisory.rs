@@ -69,6 +69,7 @@ struct Fixture {
     gh: PathBuf,
     repo: PathBuf,
     merged_marker: PathBuf,
+    calls_marker: PathBuf,
 }
 
 impl Fixture {
@@ -118,17 +119,35 @@ impl Fixture {
             std::fs::write(fixtures.join(name), text).expect("write fixture");
         }
 
+        std::fs::write(fixtures.join("checks.json"), "[]").expect("write checks fixture");
         let gh = stub(&bin);
         let merged_marker = fixtures.join("merged.txt");
+        let calls_marker = fixtures.join("calls.txt");
         Self {
             _dir: dir,
             gh,
             repo,
             merged_marker,
+            calls_marker,
         }
     }
 
     fn run(&self, extra: &[&str]) -> (i32, String, String) {
+        self.run_with_checks(extra, 0, 0, "[]")
+    }
+
+    fn run_with_checks(
+        &self,
+        extra: &[&str],
+        plain_exit: i32,
+        diagnostic_exit: i32,
+        diagnostic_stdout: &str,
+    ) -> (i32, String, String) {
+        std::fs::write(
+            self._dir.path().join("fixtures/checks.json"),
+            diagnostic_stdout,
+        )
+        .expect("write diagnostic checks fixture");
         let out = Command::new(env!("CARGO_BIN_EXE_edda"))
             .arg("review")
             .arg("merge")
@@ -138,7 +157,9 @@ impl Fixture {
             .current_dir(&self.repo)
             .env("EDDA_GH_BIN", &self.gh)
             .env("GH_FIXTURE_DIR", self._dir.path().join("fixtures"))
-            .env("GH_CHECKS_EXIT", "0")
+            .env("GH_CHECKS_EXIT", plain_exit.to_string())
+            .env("GH_CHECKS_JSON_EXIT", diagnostic_exit.to_string())
+            .env("EDDA_REPO", "fagemx/edda")
             .env("EDDA_STORE_ROOT", self._dir.path().join("store"))
             .env("EDDA_SESSION_ID", "review-merge-advisory-probe")
             .stdin(Stdio::null())
@@ -150,6 +171,10 @@ impl Fixture {
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
     }
+
+    fn calls(&self) -> String {
+        std::fs::read_to_string(&self.calls_marker).expect("read gh calls")
+    }
 }
 
 /// Write the stub `gh` the verb is pointed at with `EDDA_GH_BIN`. Anything
@@ -159,14 +184,19 @@ fn stub(bin: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         let bat = r#"@echo off
+echo %*>>"%GH_FIXTURE_DIR%\calls.txt"
+if not "%GH_REPO%"=="fagemx/edda" ( echo GH_REPO not forwarded 1>&2 & exit /b 9 )
 if "%1 %2"=="pr view" ( type "%GH_FIXTURE_DIR%\pr-%3.json" & exit /b 0 )
 if "%1 %2"=="pr list" ( type "%GH_FIXTURE_DIR%\open.json" & exit /b 0 )
-if "%1 %2"=="pr checks" ( exit /b %GH_CHECKS_EXIT% )
+if "%1 %2"=="pr checks" goto checks
 if "%1 %2"=="pr merge" ( echo merged>"%GH_FIXTURE_DIR%\merged.txt" & exit /b 0 )
 if "%1 %2"=="api --paginate" goto comments
 if "%1"=="api" ( type "%GH_FIXTURE_DIR%\.check-runs.json" & exit /b 0 )
 echo unexpected gh call: %* 1>&2
 exit /b 9
+:checks
+if "%5"=="--json" ( type "%GH_FIXTURE_DIR%\checks.json" & exit /b %GH_CHECKS_JSON_EXIT% )
+exit /b %GH_CHECKS_EXIT%
 :comments
 for /f "tokens=5 delims=/" %%A in ("%3") do type "%GH_FIXTURE_DIR%\comments-%%A.json"
 exit /b 0
@@ -179,10 +209,17 @@ exit /b 0
     {
         use std::os::unix::fs::PermissionsExt;
         let sh = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$GH_FIXTURE_DIR/calls.txt"
+[ "$GH_REPO" = 'fagemx/edda' ] || { echo 'GH_REPO not forwarded' >&2; exit 9; }
 case "$1 $2" in
   'pr view') cat "$GH_FIXTURE_DIR/pr-$3.json" ;;
   'pr list') cat "$GH_FIXTURE_DIR/open.json" ;;
-  'pr checks') exit "${GH_CHECKS_EXIT:-0}" ;;
+  'pr checks')
+    if [ "$5" = '--json' ]; then
+      cat "$GH_FIXTURE_DIR/checks.json"
+      exit "${GH_CHECKS_JSON_EXIT:-0}"
+    fi
+    exit "${GH_CHECKS_EXIT:-0}" ;;
   'pr merge') echo merged > "$GH_FIXTURE_DIR/merged.txt" ;;
   'api --paginate')
     n=$(printf '%s' "$3" | sed -n 's|.*/issues/\([0-9]*\)/comments$|\1|p')
@@ -227,6 +264,124 @@ fn a_dirty_neighbour_is_printed_and_does_not_refuse_the_green_subject() {
         stdout.contains(&format!("review accepted: PR #{SUBJECT} @ {HEAD}")),
         "{stdout}"
     );
+    let calls = f.calls();
+    let check_calls: Vec<String> = calls
+        .lines()
+        .filter(|line| line.starts_with("pr checks"))
+        .map(|line| line.replace('"', ""))
+        .collect();
+    assert_eq!(
+        check_calls,
+        [format!("pr checks {SUBJECT} --required")],
+        "plain success must be the sole Green authority and skip the diagnostic"
+    );
+}
+
+#[test]
+fn required_check_diagnostics_refuse_every_observed_shape_without_squashing() {
+    let blocked = r#"[{"name":"build","state":"FAILURE","bucket":"fail"},
+        {"name":"test","state":"PENDING","bucket":"pending"}]"#;
+    let raced = r#"[{"name":"build","state":"SUCCESS","bucket":"pass"},
+        {"name":"docs","state":"SKIPPED","bucket":"skipping"}]"#;
+    for (label, diagnostic_exit, diagnostic_stdout, expected_exit, messages) in [
+        (
+            "exit 1 empty stdout",
+            1,
+            "",
+            2,
+            &[
+                "no structured report",
+                "retry",
+                "waiting for CI",
+                "GitHub connectivity",
+                "repository access",
+            ][..],
+        ),
+        (
+            "exit 8 empty stdout",
+            8,
+            "",
+            2,
+            &[
+                "no structured report",
+                "retry",
+                "waiting for CI",
+                "GitHub connectivity",
+                "repository access",
+            ][..],
+        ),
+        (
+            "empty JSON array",
+            0,
+            "[]",
+            1,
+            &["no required-check rows"][..],
+        ),
+        (
+            "failed and pending rows despite JSON exit 0",
+            0,
+            blocked,
+            1,
+            &["build (bucket=fail", "test (bucket=pending"][..],
+        ),
+        (
+            "all-pass race",
+            0,
+            raced,
+            1,
+            &[
+                "state changed during the read",
+                "run `edda review merge` again",
+            ][..],
+        ),
+        ("malformed JSON", 0, "{", 2, &["JSON is malformed"][..]),
+        (
+            "API error shape",
+            1,
+            r#"{"message":"rate limit"}"#,
+            2,
+            &["unknown row shape"][..],
+        ),
+        ("unexpected exit", 9, "[]", 2, &["exited unexpectedly"][..]),
+    ] {
+        let f = Fixture::new(&open_set(), &lgtm_on_head());
+        let (code, stdout, stderr) =
+            f.run_with_checks(&["--merge"], 1, diagnostic_exit, diagnostic_stdout);
+        assert_eq!(
+            code, expected_exit,
+            "{label}: stdout: {stdout}\nstderr: {stderr}"
+        );
+        for message in messages {
+            assert!(
+                stderr.contains(message),
+                "{label}: missing {message:?}: {stderr}"
+            );
+        }
+        if diagnostic_stdout.is_empty() {
+            assert!(
+                !stderr.contains("no required-check rows are currently reported"),
+                "{label}: empty stdout falsely claimed absence: {stderr}"
+            );
+        }
+        assert!(
+            !f.merged_marker.exists(),
+            "{label}: a refusal issued gh pr merge"
+        );
+        let calls = f.calls();
+        let check_calls: Vec<String> = calls
+            .lines()
+            .filter(|line| line.starts_with("pr checks"))
+            .map(|line| line.replace('"', ""))
+            .collect();
+        assert_eq!(
+            check_calls,
+            [
+                format!("pr checks {SUBJECT} --required"),
+                format!("pr checks {SUBJECT} --required --json name,state,bucket"),
+            ],
+            "{label}: required-check argv did not preserve the exact PR and field order"
+        );
+    }
 }
 
 // Round 4's P0, measured the same way: the walk's own (creation) order reads a

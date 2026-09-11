@@ -1545,7 +1545,8 @@ edda review merge --pr 1105                  # --check is the default
 edda review merge --pr 1105 --merge --body-file .edda/merge-receipt.md
 ```
 
-The conditions run in order, and the first failure rejects with exit 1:
+The conditions run in order. A failed precondition rejects with exit 1;
+an unreadable or malformed answer rejects with exit 2:
 
 1. The PR is `OPEN` and its head is a 40-hex SHA.
 2. The latest trusted §7 review — ordered by `updated_at`, so an edited
@@ -1557,7 +1558,21 @@ The conditions run in order, and the first failure rejects with exit 1:
    Requested.
 4. Malformed §7 comments number zero (#917 — the union reads success
    precisely because a blocking round is invisible to it).
-5. Required checks are green.
+5. Required checks are green. The sole authority for green is a successful
+   plain `gh pr checks <PR> --required` invocation. If it refuses, Edda makes
+   one diagnostic read with `--required --json name,state,bucket`, but that
+   read can explain a refusal only; it can never approve the merge. A
+   successfully decoded empty array (`[]`) means no required-check rows are
+   reported and refuses with exit 1; its message tells the operator to wait
+   for CI or check whether the PR base is covered by a ruleset.
+   Failed/pending/cancelled rows and rows that raced to all passing/skipping
+   also refuse with exit 1, with the race asking for a fresh invocation.
+   Zero-byte diagnostic stdout on any exit means no structured report was
+   returned, not that rows are absent. It refuses as indeterminate with exit
+   2 and suggests retrying after waiting and checking GitHub connectivity and
+   repository access. Malformed JSON, an unknown row shape, an unexpected
+   exit, or a failed read also refuses as indeterminate with exit 2.
+   Classification never depends on gh's human stderr wording.
 6. The squash subject matches the commit convention
    `<type>(<scope>): <description>` (GH-1100): `type` is one of
    `feat|fix|docs|refactor|test|chore`, and a violation is rejected with the
@@ -1612,6 +1627,6 @@ may be passed explicitly.
 | Exit | Meaning |
 |---|---|
 | 0 | Accepted — merged, when `--merge` was given |
-| 1 | A precondition failed |
-| 2 | A read failed, or the invocation itself is malformed — an unreadable answer is never an approval |
+| 1 | A precondition failed, including a decoded empty required-check array, blocked rows, or raced rows |
+| 2 | A read failed or was indeterminate (including zero-byte diagnostic stdout on any exit), or the invocation itself is malformed — an unreadable answer is never an approval |
 
