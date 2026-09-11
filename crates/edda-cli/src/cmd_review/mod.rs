@@ -198,17 +198,25 @@ fn run_inner(args: &ReviewArgs, cwd: &Path) -> Result<Reviewed> {
         });
         anyhow::ensure!(continued, "--resume requires the persisted Pi conversation; refusing a new session with the old UUID");
     }
-    let launcher = build_launcher(
-        args.agent,
-        LauncherOptions {
-            verbose: false,
-            transcript_dir: None,
-            persistent_codex_threads: args.resume,
-            session_dir,
-            resume: args.resume && args.agent == AgentKind::Claude,
-        },
-    )?;
+    let launcher = build_launcher(args.agent, review_launcher_options(args, session_dir))?;
     tokio::runtime::Runtime::new()?.block_on(run_with(prepared, args, launcher.as_ref()))
+}
+
+fn review_launcher_options(
+    args: &ReviewArgs,
+    session_dir: Option<std::path::PathBuf>,
+) -> LauncherOptions {
+    LauncherOptions {
+        verbose: false,
+        transcript_dir: None,
+        // The first Codex product review must persist its newly created
+        // session→thread binding so a later --resume has something real to
+        // resume. Only resumed review is strict; first review may start.
+        persistent_codex_threads: args.agent == AgentKind::Codex,
+        require_codex_thread: args.agent == AgentKind::Codex && args.resume,
+        session_dir,
+        resume: args.resume && args.agent == AgentKind::Claude,
+    }
 }
 
 fn pi_session_continues(dir: &std::path::Path, session: &str, cwd: &std::path::Path) -> bool {
@@ -283,7 +291,29 @@ fn review_scratch(prepared: &prepare::Prepared) -> std::path::PathBuf {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)] // Resume preflight is adjacent to its persisted-history regression.
 mod pi_resume_tests {
-    use super::pi_session_continues;
+    use super::{pi_session_continues, review_launcher_options, AgentKind, ReviewArgs};
+
+    #[test]
+    fn product_review_launcher_option_matrix_preserves_each_backend_contract() {
+        for (agent, resume, persist_codex, require_codex, native_resume) in [
+            (AgentKind::Pi, false, false, false, false),
+            (AgentKind::Pi, true, false, false, false),
+            (AgentKind::Claude, false, false, false, false),
+            (AgentKind::Claude, true, false, false, true),
+            (AgentKind::Codex, false, true, false, false),
+            (AgentKind::Codex, true, true, true, false),
+        ] {
+            let args = ReviewArgs {
+                agent,
+                resume,
+                ..Default::default()
+            };
+            let options = review_launcher_options(&args, None);
+            assert_eq!(options.persistent_codex_threads, persist_codex);
+            assert_eq!(options.require_codex_thread, require_codex);
+            assert_eq!(options.resume, native_resume);
+        }
+    }
 
     #[test]
     fn persisted_pi_history_must_match_session_cwd_and_have_resumable_context() {

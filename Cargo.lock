@@ -824,6 +824,7 @@ dependencies = [
  "edda-transcript",
  "globset",
  "hex",
+ "libc",
  "ratatui",
  "rusqlite",
  "serde",

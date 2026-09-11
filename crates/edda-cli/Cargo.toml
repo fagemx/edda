@@ -54,6 +54,10 @@ time.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 tracing-subscriber = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Direct because review context safe-open uses O_NOFOLLOW/O_NONBLOCK by name.
+libc = "0.2"
+
 [features]
 default = ["tui"]
 tui = ["ratatui", "crossterm"]

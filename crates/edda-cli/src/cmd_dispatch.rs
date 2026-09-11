@@ -590,10 +590,9 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         LauncherOptions {
             verbose: false,
             transcript_dir: None,
-            // Dispatch is the persistence scope (GH-535): a caller-chosen
-            // --session-id must resume the conversation a previous dispatch
-            // recorded.
+            // Dispatch persists caller-chosen session ids for resume (GH-535).
             persistent_codex_threads: true,
+            require_codex_thread: false,
             session_dir: args.session_dir.as_ref().map(std::path::PathBuf::from),
             resume: args.resume,
         },

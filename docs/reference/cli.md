@@ -1215,23 +1215,32 @@ spec; an explicit `--spec <path|#issue>` takes precedence.
 `--context-file <path>` optionally supplies controller-selected untrusted
 supporting context. A relative path resolves at the invocation working directory;
 an absolute path is allowed. Edda accepts an empty file or at most 32,768 bytes
-of valid UTF-8, preserving BOM, whitespace and newlines exactly. It checks the
-final component with symlink metadata, refuses symlinks and non-regular files,
-opens and rechecks the handle, then performs one bounded read of at most 32,769
-bytes. It never truncates, follows a final symlink, recursively reads references,
-or discovers a context file automatically.
+of valid UTF-8, preserving BOM, whitespace and newlines exactly. It lstats the
+final component, refuses symlinks/reparse points and non-regular files, then
+safe-opens it without following the final component (`O_NOFOLLOW|O_NONBLOCK` on
+Unix; `FILE_FLAG_OPEN_REPARSE_POINT` on Windows). Edda fstats the handle and
+compares the before/path-after/handle identities (device+inode on Unix; a
+stable-std metadata identity while the Windows handle denies write/delete
+sharing) before one bounded read of at most 32,769 bytes.
+A changed identity omits the input. It never truncates, follows a final
+symlink/reparse point, recursively reads references, or discovers a context file
+automatically.
 
 A valid file is hashed and rendered from that same in-memory buffer. The brief
 adds one JSON-escaped `SUPPORTING CONTEXT` DATA object after trusted review rules
 and engine qualification, carrying the actual prepared head SHA, SHA-256 digest,
 `untrusted supporting context` trust label and exact content. The digest is
-provenance for bytes read, not truth or authority. Only digest/provenance enters
-existing verdict notes; raw context is not added to an event field or blob.
-The context cannot alter subject identity, spec trust, evidence, gates,
-checklist measures, verdict rules or reviewer tools.
+provenance for bytes read, not truth or authority. Edda's system-added provenance contains only the digest and selected path; it
+does not copy the selected file into a separate event field or context blob.
+This is not complete redaction: the reviewer can quote or reformat any input in
+existing verdict fields, and the existing raw-response blob stores that reviewer
+output just as it can store text derived from SPEC or DIFF. The context cannot
+alter subject identity, spec trust, evidence, gates, checklist measures, verdict
+rules or reviewer tools.
 
-Missing, unreadable, invalid UTF-8, oversized, directory, symlink or other
-non-regular input omits the whole optional context and continues the review.
+Missing, unreadable, invalid UTF-8, oversized, directory, symlink/reparse,
+changed identity or other non-regular input omits the whole optional context and
+continues the review.
 A stable reason is written to existing verdict notes and an `edda review:
 warning:` line on stderr; `--json` stdout remains one JSON object. With no flag,
 prompt, notes, filesystem behavior and launch behavior remain the legacy path.
@@ -1249,11 +1258,15 @@ resuming, an explicit `--session-id` must match the prior ledger-recorded
 reviewer session. `--resume` requires that prior review and reuses its
 reviewer session for the newly prepared subject; each new head gets a new round
 and an old LGTM is not current-head acceptance. Pi requires its persisted
-conversation, Claude uses native resume, and Codex retains its mapped thread.
-A host-only conversation cannot be resumed through product `--resume`. If the
-native conversation is unavailable, omit `--resume`, choose a distinct reviewer
-UUID, and pass current context with prior findings as an explicit replacement;
-never reuse an empty or old UUID to imitate continuity. `--thinking` selects
+conversation and Claude uses native resume. A first Codex product review persists
+its session-to-thread mapping; Codex `--resume` requires that mapping and refuses
+a missing or server-rejected thread without starting fresh under the old UUID.
+A rejected stale binding is durably removed. Ordinary `edda dispatch` keeps its
+best-effort persist/fallback behavior, while `edda conduct` remains
+non-persistent and non-strict. A host-only conversation cannot be resumed through
+product `--resume`. If the native conversation is unavailable, omit `--resume`,
+choose a distinct reviewer UUID, and pass current context with prior findings as
+an explicit replacement; never reuse an empty or old UUID to imitate continuity. `--thinking` selects
 pi's thinking level; Claude and Codex reject the option rather than silently
 ignoring it.
 

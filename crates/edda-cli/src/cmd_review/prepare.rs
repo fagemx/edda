@@ -4,13 +4,25 @@ use edda_core::{ReviewRefs, ReviewSpec, ReviewVerdictPayload};
 use edda_ledger::Ledger;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::File,
+    fs::{File, Metadata, OpenOptions},
     io::Read,
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
 const CONTEXT_MAX_BYTES: usize = 32 * 1024;
 const CONTEXT_READ_LIMIT: u64 = (CONTEXT_MAX_BYTES + 1) as u64;
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x0000_0001;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SupportingContext {
@@ -73,39 +85,119 @@ fn metadata_error_reason(path: &Path, error: &std::io::Error) -> &'static str {
     "missing"
 }
 
-fn read_context(
+fn open_error_reason(error: &std::io::Error) -> &'static str {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return "symlink";
+    }
+    if error.kind() == std::io::ErrorKind::NotFound {
+        "missing"
+    } else {
+        "unreadable"
+    }
+}
+
+#[cfg(unix)]
+fn open_context_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_context_file(path: &Path) -> std::io::Result<File> {
+    // OPEN_REPARSE_POINT opens the final component itself instead of following
+    // it. The metadata checks below then reject every reparse point, not only
+    // the symlink tags that std recognizes.
+    OpenOptions::new()
+        .read(true)
+        // Deny write/delete sharing while the selected handle is open, so
+        // pathname replacement cannot occur after the identity recheck.
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(windows)]
+fn file_identity(metadata: &Metadata) -> (u32, u64, u64, u64, u64) {
+    // Stable std does not expose volume serial + file index yet. This
+    // conservative metadata identity is paired with delete/write sharing
+    // denial on the opened handle; any observable mismatch fails closed.
+    (
+        metadata.file_attributes(),
+        metadata.creation_time(),
+        metadata.last_access_time(),
+        metadata.last_write_time(),
+        metadata.file_size(),
+    )
+}
+
+#[cfg(unix)]
+fn is_reparse_point(_: &Metadata) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &Metadata) -> bool {
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn validate_regular_metadata(
+    metadata: &Metadata,
+    resolved: &Path,
+) -> std::result::Result<(), ContextOmission> {
+    if metadata.file_type().is_symlink() || is_reparse_point(metadata) {
+        return Err(omission("symlink", resolved.to_path_buf()));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(omission("non-regular", resolved.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn read_context_after_lstat(
     path: &Path,
     cwd: &Path,
+    after_lstat: impl FnOnce(&Path),
 ) -> std::result::Result<SupportingContext, ContextOmission> {
     let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
     };
-    let metadata = std::fs::symlink_metadata(&resolved)
+    let before = std::fs::symlink_metadata(&resolved)
         .map_err(|error| omission(metadata_error_reason(&resolved, &error), resolved.clone()))?;
-    if metadata.file_type().is_symlink() {
-        return Err(omission("symlink", resolved));
-    }
-    if !metadata.file_type().is_file() {
-        return Err(omission("non-regular", resolved));
-    }
-    let mut file = File::open(&resolved).map_err(|error| {
-        omission(
-            if error.kind() == std::io::ErrorKind::NotFound {
-                "missing"
-            } else {
-                "unreadable"
-            },
-            resolved.clone(),
-        )
-    })?;
+    validate_regular_metadata(&before, &resolved)?;
+    let before_identity = file_identity(&before);
+
+    after_lstat(&resolved);
+
+    let mut file = open_context_file(&resolved)
+        .map_err(|error| omission(open_error_reason(&error), resolved.clone()))?;
     let opened = file
         .metadata()
         .map_err(|_| omission("unreadable", resolved.clone()))?;
-    if !opened.file_type().is_file() {
-        return Err(omission("non-regular", resolved));
+    validate_regular_metadata(&opened, &resolved)?;
+    let opened_identity = file_identity(&opened);
+
+    // Re-lstat the path while the safe handle is open. Comparing all three
+    // identities catches regular-file replacement between either pathname
+    // check and open; no bytes are read unless the selected path still names
+    // the exact regular file that was inspected before open.
+    let after = std::fs::symlink_metadata(&resolved)
+        .map_err(|error| omission(metadata_error_reason(&resolved, &error), resolved.clone()))?;
+    validate_regular_metadata(&after, &resolved)?;
+    let after_identity = file_identity(&after);
+    if before_identity != opened_identity || after_identity != opened_identity {
+        return Err(omission("changed", resolved));
     }
+
     let mut bytes = Vec::new();
     (&mut file)
         .take(CONTEXT_READ_LIMIT)
@@ -117,6 +209,13 @@ fn read_context(
     let digest = hex::encode(Sha256::digest(&bytes));
     let text = String::from_utf8(bytes).map_err(|_| omission("invalid-utf8", resolved))?;
     Ok(SupportingContext { digest, text })
+}
+
+fn read_context(
+    path: &Path,
+    cwd: &Path,
+) -> std::result::Result<SupportingContext, ContextOmission> {
+    read_context_after_lstat(path, cwd, |_| {})
 }
 
 pub(crate) struct Prepared {
@@ -431,6 +530,12 @@ mod tests {
         read_context(path, cwd).expect_err("context omitted").reason
     }
 
+    fn omitted_after_lstat(path: &Path, cwd: &Path, hook: impl FnOnce(&Path)) -> &'static str {
+        read_context_after_lstat(path, cwd, hook)
+            .expect_err("context omitted")
+            .reason
+    }
+
     #[test]
     fn bounded_context_preserves_exact_utf8_bytes_and_accepts_empty() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -487,9 +592,24 @@ mod tests {
         assert_eq!(omitted(&blocker.join("child"), root), "unreadable");
     }
 
+    #[test]
+    fn regular_file_replaced_after_lstat_is_rejected_as_changed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let selected = temp.path().join("selected");
+        let original = temp.path().join("original");
+        std::fs::write(&selected, b"approved facts").expect("selected");
+        assert_eq!(
+            omitted_after_lstat(&selected, temp.path(), |path| {
+                std::fs::rename(path, &original).expect("retain original identity");
+                std::fs::write(path, b"replacement facts").expect("replacement");
+            }),
+            "changed"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn symlink_and_nonregular_context_are_rejected_before_open() {
+    fn symlink_and_nonregular_context_are_rejected_without_following_or_blocking() {
         use std::os::unix::{fs::symlink, net::UnixListener};
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -502,11 +622,42 @@ mod tests {
         let socket = temp.path().join("socket");
         let _listener = UnixListener::bind(&socket).expect("unix socket");
         assert_eq!(omitted(&socket, temp.path()), "non-regular");
+        assert_eq!(omitted(Path::new("/dev/null"), temp.path()), "non-regular");
+
+        let selected = temp.path().join("selected");
+        let original = temp.path().join("original");
+        let secret = temp.path().join("secret");
+        std::fs::write(&selected, b"approved facts").expect("selected");
+        std::fs::write(&secret, [0xff]).expect("secret");
+        assert_eq!(
+            omitted_after_lstat(&selected, temp.path(), |path| {
+                std::fs::rename(path, &original).expect("retain original");
+                symlink(&secret, path).expect("replacement symlink");
+            }),
+            "symlink",
+            "the replacement target must be rejected before its secret bytes are read"
+        );
+
+        let fifo = temp.path().join("fifo");
+        let fifo_original = temp.path().join("fifo-original");
+        std::fs::write(&fifo, b"approved facts").expect("fifo placeholder");
+        assert_eq!(
+            omitted_after_lstat(&fifo, temp.path(), |path| {
+                std::fs::rename(path, &fifo_original).expect("retain fifo placeholder");
+                let status = std::process::Command::new("mkfifo")
+                    .arg(path)
+                    .status()
+                    .expect("run mkfifo");
+                assert!(status.success(), "mkfifo failed: {status}");
+            }),
+            "non-regular",
+            "O_NONBLOCK must make a FIFO replacement return instead of waiting for a writer"
+        );
     }
 
     #[cfg(windows)]
     #[test]
-    fn final_component_symlink_is_rejected_when_privilege_is_available() {
+    fn final_component_replacement_symlink_is_rejected_when_privilege_is_available() {
         use std::os::windows::fs::symlink_file;
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -522,6 +673,20 @@ mod tests {
             return;
         }
         assert_eq!(omitted(&link, temp.path()), "symlink");
+
+        let selected = temp.path().join("selected");
+        let original = temp.path().join("original");
+        let secret = temp.path().join("secret");
+        std::fs::write(&selected, b"approved facts").expect("selected");
+        std::fs::write(&secret, [0xff]).expect("secret");
+        assert_eq!(
+            omitted_after_lstat(&selected, temp.path(), |path| {
+                std::fs::rename(path, &original).expect("retain original");
+                symlink_file(&secret, path).expect("replacement symlink");
+            }),
+            "symlink",
+            "OPEN_REPARSE_POINT must reject the link before reading secret bytes"
+        );
     }
 
     #[test]

@@ -33,11 +33,15 @@ merge policy remain canonical.
    one explicitly selected concise facts file when useful; it remains untrusted
    supporting data. Capability-check `edda review --help` before using optional
    `--context-file`; otherwise omit it with a visible limitation or use an
-   already-permitted direct route. Every push invalidates the old verdict.
+   already-permitted direct route. Reviewer output may quote this data into
+   existing verdict fields and the existing raw-response blob. Every push
+   invalidates the old verdict.
 6. Review-requested fixes return to an author/fixer. Prefer the same reviewer
    agent and real native conversation for the new head, with updated context
-   and product `--resume`; Pi persisted history, Claude resume and Codex thread
-   mapping remain required. Product resume cannot continue a host-only session.
+   and product `--resume`; Pi persisted history and Claude resume remain
+   required. A first Codex product round persists its thread mapping; Codex
+   resume refuses a missing/rejected mapping without a fresh old-UUID thread.
+   Product resume cannot continue a host-only session.
    If history is missing, allocate a distinct replacement UUID, omit `--resume`,
    include prior findings and say replacement. The fixer never becomes judge.
 7. Follow-up review covers the delta, prior findings, affected direct consumers,

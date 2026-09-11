@@ -78,7 +78,7 @@ impl AgentLauncher for Reviewer {
                 result_text: Some("LGTM".into()),
             });
         }
-        let verdict = if self.answer.starts_with("mutate-") {
+        let verdict = if self.answer.starts_with("mutate-") || self.answer == "echo-context" {
             "lgtm"
         } else {
             self.answer
@@ -88,7 +88,15 @@ impl AgentLauncher for Reviewer {
         } else {
             serde_json::json!([])
         };
-        let value = serde_json::json!({"subject_seen":head, "verdict":verdict,"findings":findings,"checklist":[{"item":"changed file","result":"na","measure":"read b.txt; no execution claimed"}],"escalations":[],"model_self_report":"untrusted-name","notes":""});
+        let reviewer_notes = if self.answer == "echo-context" {
+            supporting_context(prompt)["content"]
+                .as_str()
+                .expect("context text")
+                .to_owned()
+        } else {
+            String::new()
+        };
+        let value = serde_json::json!({"subject_seen":head, "verdict":verdict,"findings":findings,"checklist":[{"item":"changed file","result":"na","measure":"read b.txt; no execution claimed"}],"escalations":[],"model_self_report":"untrusted-name","notes":reviewer_notes});
         Ok(PhaseResult::AgentDone {
             cost_usd: self.cost,
             result_text: Some(format!("```edda-review-verdict/v1\n{value}\n```")),
@@ -309,6 +317,57 @@ async fn context_uses_one_prepared_buffer_for_first_resume_and_replacement() {
     assert_eq!(replacement.refs.round, Some(3));
     assert_ne!(replacement.reviewer.session_id, first.reviewer.session_id);
     assert_eq!(replacement.verdict, "lgtm");
+}
+
+#[tokio::test]
+async fn reviewer_echo_may_persist_but_system_adds_only_digest_provenance() {
+    let (_temp, root, mut args) = fixture(true);
+    let context = "ADVERSARIAL_CONTEXT_ECHO_165";
+    std::fs::write(root.join("facts.md"), context).unwrap();
+    args.context_file = Some("facts.md".into());
+    let reviewer = Reviewer::new("echo-context", Some(0.01));
+    let (payload, event_id, _) =
+        run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+            .await
+            .unwrap();
+
+    // Reviewer-controlled existing fields may echo/reformat untrusted input.
+    assert!(payload.notes.as_deref().unwrap().contains(context));
+    let system_provenance = payload
+        .notes
+        .as_deref()
+        .unwrap()
+        .lines()
+        .find(|line| line.starts_with("Review context:"))
+        .expect("system provenance note");
+    assert!(system_provenance.contains("sha256="));
+    assert!(!system_provenance.contains(context));
+
+    let ledger = edda_ledger::Ledger::open(&root).unwrap();
+    let saved = ledger.get_event(&event_id).unwrap().unwrap();
+    let fields = saved.payload.as_object().expect("review payload object");
+    for absent in [
+        "context",
+        "context_file",
+        "raw_context",
+        "supporting_context",
+    ] {
+        assert!(
+            !fields.contains_key(absent),
+            "Edda must not add a separate raw-context field: {absent}"
+        );
+    }
+    assert_eq!(
+        saved.refs.blobs.len(),
+        1,
+        "only the existing raw-response blob"
+    );
+    let raw_path =
+        edda_ledger::blob_store::blob_get_path(&ledger.paths, &saved.refs.blobs[0]).unwrap();
+    assert!(
+        std::fs::read_to_string(raw_path).unwrap().contains(context),
+        "the existing raw reviewer response truthfully retains the echo"
+    );
 }
 
 #[tokio::test]

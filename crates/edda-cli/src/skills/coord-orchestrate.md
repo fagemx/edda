@@ -269,7 +269,9 @@ never use `--trust-spec` for rationale. Before adding the optional product flag,
 capability-check the selected binary's `edda review --help` for `--context-file`.
 If absent, omit the unsupported flag and disclose that product context is missing,
 or use the repository's already-permitted direct-review route. Never install,
-upgrade or add a fallback wrapper automatically.
+upgrade or add a fallback wrapper automatically. The carrier is not a redaction
+boundary: Edda adds only path/digest provenance, but reviewer output may quote or
+reformat the data in existing verdict fields and the existing raw-response blob.
 
 For a first product round, pass the current facts when supported:
 
@@ -280,9 +282,11 @@ edda review --pr "$PR" --agent "$REVIEW_AGENT" --model "$REVIEW_MODEL" \
 
 For a follow-up on a new subject SHA, prefer the same reviewer agent and real
 native conversation, update the facts, and add `--resume`. Product continuity
-must remain real: Pi needs its persisted conversation, Claude its native resume,
-and Codex its mapped thread. The old SHA's LGTM never applies to the new head.
-A host-only reviewer session cannot be resumed through product `--resume`.
+must remain real: Pi needs its persisted conversation and Claude its native
+resume. A first Codex product round persists its mapped thread; Codex `--resume`
+strictly requires that mapping and never starts fresh under the old UUID when it
+is missing or rejected. The old SHA's LGTM never applies to the new head. A
+host-only reviewer session cannot be resumed through product `--resume`.
 
 If the native conversation is missing, launch a replacement without `--resume`,
 allocate a distinct reviewer UUID, and pass current facts including prior
