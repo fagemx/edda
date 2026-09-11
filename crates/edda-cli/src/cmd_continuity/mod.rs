@@ -306,8 +306,7 @@ fn restore(
     let ledger = Ledger::open_existing(workspace_root)?;
     let current_git = git::gather_git_metadata(checkout);
     let (entry, warnings) = if let Some(capsule_id) = capsule_id {
-        let selection = repository_selection(checkout, None)?;
-        (ledger.continuity_capsule(capsule_id)?, selection.warnings)
+        (ledger.continuity_capsule(capsule_id)?, Vec::new())
     } else {
         let paths = edda_ledger::EddaPaths::discover(workspace_root);
         let current_id = edda_store::continuity::derive_portable_repository_identity(

@@ -351,6 +351,119 @@ fn durable_reverse_aliases_drive_list_and_make_ambiguity_visible_without_writes(
 }
 
 #[test]
+fn exact_restore_bypasses_corrupt_and_secret_bearing_alias_sidecars() {
+    let repo = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    initialize(repo.path());
+    configure_key(repo.path(), "round2/exact-restore");
+    let saved = save(
+        repo.path(),
+        store.path(),
+        &write_input(files.path(), "input.json", "exact", "keep reading"),
+    );
+    let capsule_id = saved["capsule_id"].as_str().unwrap();
+    let alias_path = store.path().join("portable_repositories.json");
+
+    std::fs::write(&alias_path, b"{corrupt alias JSON").unwrap();
+    let corrupt_before = std::fs::read(&alias_path).unwrap();
+    let restored = successful_json(&run(
+        repo.path(),
+        store.path(),
+        &["continuity", "restore", capsule_id, "--json"],
+    ));
+    assert_eq!(restored["capsule"]["capsule_id"], capsule_id);
+    assert_eq!(std::fs::read(&alias_path).unwrap(), corrupt_before);
+
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+    std::fs::write(
+        &alias_path,
+        format!(
+            r#"{{"version":1,"repositories":{{"repo_{}":{{"local":{{"{secret}":true}}}}}}}}"#,
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let secret_before = std::fs::read(&alias_path).unwrap();
+    let restored = run(
+        repo.path(),
+        store.path(),
+        &["continuity", "restore", capsule_id, "--json"],
+    );
+    assert!(restored.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert!(!combined.contains(secret));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&restored.stdout).unwrap()["capsule"]["capsule_id"],
+        capsule_id
+    );
+    assert_eq!(std::fs::read(&alias_path).unwrap(), secret_before);
+
+    let poisoned_read = run(repo.path(), store.path(), &["continuity", "list", "--json"]);
+    assert!(!poisoned_read.status.success());
+    let error = String::from_utf8_lossy(&poisoned_read.stderr);
+    assert!(error.contains("secret content refused in portable repository alias registry"));
+    assert!(!error.contains(secret));
+}
+
+#[test]
+fn suspicious_checkout_alias_warning_is_redacted_and_registry_stays_readable() {
+    let safe_repo = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    initialize(safe_repo.path());
+    configure_key(safe_repo.path(), "round2/safe-alias");
+    save(
+        safe_repo.path(),
+        store.path(),
+        &write_input(files.path(), "safe.json", "safe", "continue safe"),
+    );
+    let alias_path = store.path().join("portable_repositories.json");
+    let before = std::fs::read(&alias_path).unwrap();
+
+    let parent = tempfile::tempdir().unwrap();
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+    let suspicious_repo = parent.path().join(secret);
+    std::fs::create_dir(&suspicious_repo).unwrap();
+    initialize(&suspicious_repo);
+    configure_key(&suspicious_repo, "round2/refused-alias");
+    let saved = run(
+        &suspicious_repo,
+        store.path(),
+        &[
+            "continuity",
+            "save",
+            "--file",
+            write_input(files.path(), "suspicious.json", "suspicious", "continue")
+                .to_str()
+                .unwrap(),
+            "--json",
+        ],
+    );
+    assert!(saved.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&saved.stdout),
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert!(combined.contains("portable repository alias was not recorded"));
+    assert!(combined.contains("secret content refused in portable repository clone path"));
+    assert!(!combined.contains(secret));
+    assert_eq!(std::fs::read(&alias_path).unwrap(), before);
+
+    let later_read = successful_json(&run(
+        safe_repo.path(),
+        store.path(),
+        &["continuity", "list", "--json"],
+    ));
+    assert_eq!(later_read["capsules"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn read_only_continuity_git_queries_do_not_refresh_the_index() {
     let repo = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();

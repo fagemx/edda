@@ -69,16 +69,20 @@ pub fn derive_portable_repository_identity(
 
 pub fn record_portable_alias(portable_repo_id: &str, checkout: &Path) -> anyhow::Result<()> {
     edda_core::continuity::validate_portable_repo_id(portable_repo_id)?;
-    let _lock = lock_file(&alias_lock_path())?;
-    let mut registry = load_aliases()?;
-    let version_changed = registry.version != 1;
-    registry.version = 1;
-    let local_project_id = project_id(checkout);
     let clone_path = checkout
         .canonicalize()
         .unwrap_or_else(|_| checkout.to_path_buf())
         .to_string_lossy()
         .to_string();
+    edda_core::continuity::validate_raw_secrets(
+        clone_path.as_bytes(),
+        "portable repository clone path",
+    )?;
+    let local_project_id = project_id(checkout);
+    let _lock = lock_file(&alias_lock_path())?;
+    let mut registry = load_aliases()?;
+    let version_changed = registry.version != 1;
+    registry.version = 1;
     let inserted = registry
         .repositories
         .entry(portable_repo_id.to_string())
@@ -90,6 +94,7 @@ pub fn record_portable_alias(portable_repo_id: &str, checkout: &Path) -> anyhow:
         return Ok(());
     }
     let bytes = serde_json::to_vec_pretty(&registry)?;
+    edda_core::continuity::validate_raw_secrets(&bytes, "portable repository alias registry")?;
     write_atomic(&alias_path(), &bytes)
 }
 
@@ -291,6 +296,33 @@ mod tests {
             std::fs::read(store.path().join("portable_repositories.json")).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn suspicious_clone_path_is_rejected_before_registry_mutation() {
+        let store = crate::test_support::isolated_store_root().unwrap();
+        let safe_checkout = tempfile::tempdir().unwrap();
+        let portable_repo_id = format!("repo_{}", "a".repeat(64));
+        record_portable_alias(&portable_repo_id, safe_checkout.path()).unwrap();
+        let registry_path = store.path().join("portable_repositories.json");
+        let before = std::fs::read(&registry_path).unwrap();
+
+        let parent = tempfile::tempdir().unwrap();
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let suspicious_checkout = parent.path().join(secret);
+        std::fs::create_dir(&suspicious_checkout).unwrap();
+        let error = record_portable_alias(&portable_repo_id, &suspicious_checkout)
+            .expect_err("secret-shaped clone paths must be refused");
+
+        assert!(error
+            .to_string()
+            .contains("secret content refused in portable repository clone path"));
+        assert!(!error.to_string().contains(secret));
+        assert_eq!(std::fs::read(&registry_path).unwrap(), before);
+        assert!(resolve_portable_aliases(safe_checkout.path())
+            .unwrap()
+            .portable_repo_ids
+            .contains(&portable_repo_id));
     }
 
     #[test]
