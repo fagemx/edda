@@ -139,7 +139,6 @@ pub(crate) fn qualify(payload: &mut ReviewVerdictPayload, engine: &Qualification
         (payload.verdict == "unreviewed", "unreviewed"),
         (payload.spec.mode != "spec-backed", "spec-convention-only"),
         (payload.gates.status == "undeclared", "gates-undeclared"),
-        (payload.gates.status == "unverified", "gates-unverified"),
         (payload.gates.status == "red", "gates-red"),
         (
             payload.reviewer.model_observed == "unknown",
@@ -342,6 +341,24 @@ mod tests {
         qualify(&mut payload, &engine(true));
         assert!(payload.disqualifiers.contains(&"escalation-pending".into()));
         assert_eq!(exit_code(&payload), 3);
+    }
+
+    #[test]
+    fn unverified_gate_evidence_is_advisory_but_red_and_undeclared_block() {
+        let mut advisory = qualified_payload_with_findings(vec![]);
+        advisory.gates.status = "unverified".into();
+        qualify(&mut advisory, &engine(true));
+        assert!(advisory.qualified, "{:?}", advisory.disqualifiers);
+        assert_eq!(exit_code(&advisory), 0);
+
+        for (status, reason) in [("red", "gates-red"), ("undeclared", "gates-undeclared")] {
+            let mut blocked = qualified_payload_with_findings(vec![]);
+            blocked.gates.status = status.into();
+            qualify(&mut blocked, &engine(true));
+            assert!(!blocked.qualified);
+            assert!(blocked.disqualifiers.contains(&reason.to_owned()));
+            assert_eq!(exit_code(&blocked), 3);
+        }
     }
 
     #[test]

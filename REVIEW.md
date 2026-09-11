@@ -9,6 +9,16 @@ gates:
   - "cargo clippy --workspace --all-targets -- -D warnings"
   - "cargo test --workspace"
   - "sh scripts/lint-markdown-content.sh"
+ci_gates:
+  "cargo fmt --all --check": ["Format"]
+  "cargo clippy --workspace --all-targets -- -D warnings":
+    - "Clippy (ubuntu-latest)"
+    - "Clippy (windows-latest)"
+    - "Clippy (macos-latest)"
+  "cargo test --workspace":
+    - "Test (ubuntu-latest)"
+    - "Test (macos-latest)"
+  "sh scripts/lint-markdown-content.sh": ["Format"]
 ran_allowlist:
   - "edda "
   - "gh "
@@ -23,7 +33,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.6`
+- Spec version: `review-spec-v1.7`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -384,16 +394,33 @@ sh scripts/lint-markdown-content.sh; echo "exit=$?"
 # review-spec:check-end
 
 **U6 — gates: READ before RAN. P0 when CI is deterministically red.** The L1
-receipt is exact-head CI itself — `CI run <id> @ <sha>` — and the workspace
-Cargo `gates:` entries above are READ from its job results, never RAN by the
-reviewer (`ladder` L1: CI is the workspace gate; C5 is the only Cargo gate RAN
-here; non-Cargo gates such as U5 remain RAN where §5 routes them).
-RAN only what the CI jobs do not cover, and **state the reason for any rerun of
-a recorded gate** (`ladder`, L2 row). A coverage gap earns a focused check for
-that gap, not a full rerun; a full local rerun needs a stated reason (red or
-absent exact-head CI, or grounds to distrust it). Deterministically red CI
-already blocks the SHA — audit and request changes instead of spending a full
-run; if the red is environmental, rerun only the failed job.
+receipt is exact-head CI itself — `CI run <id> @ <sha>` — and `ci_gates:` maps
+each declared gate command to the exact check-run names that evidence it. One
+mapped row covers one declared gate only when every listed exact-head job
+succeeds; any mapped failure is red. A missing, pending, neutral, or skipped
+job leaves that row pending/unverified — skipped may satisfy the required `CI
+Gate`'s set-level path-filter rule, but it never becomes a green per-gate
+claim. A missing mapping remains visibly uncovered. Final status is a
+per-declared-gate union, not a coarse source-level lattice: any red receipt,
+required-CI row, mapped row, or non-timeout failed RAN is globally red.
+Otherwise every declared gate must have a green receipt or mapped row, or a
+successful stored non-timeout RAN for that same command. Different sources may
+cover different gates. A green required-CI row remains visible set-level
+evidence but covers no declared gate; any gate without eligible green evidence
+keeps the set unverified. Unknown evidence is advisory; deterministically red
+mapped or required CI remains blocking.
+
+The workspace Cargo `gates:` entries above are READ from those job results,
+never RAN by the reviewer (`ladder` L1: CI is the workspace gate; C5 is the
+only Cargo gate RAN here; non-Cargo gates such as U5 remain RAN where §5
+routes them). `ran_allowlist` is unchanged: reviewer execution capability is
+not a fallback for unavailable CI evidence. RAN only what the CI jobs do not
+cover, and **state the reason for any rerun of a recorded gate** (`ladder`, L2
+row). A coverage gap earns a focused check for that gap, not a full rerun; a
+full local rerun needs a stated reason (red or absent exact-head CI, or grounds
+to distrust it). Deterministically red CI already blocks the SHA — audit and
+request changes instead of spending a full run; if the red is environmental,
+rerun only the failed job.
 
 # review-spec:check U6
 ```sh
@@ -803,7 +830,7 @@ One comment per round, pinned to the reviewed full SHA
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
 - reviewer_session: <per-PR UUID the lane was launched with>
-- spec: review-spec-v1.6
+- spec: review-spec-v1.7
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - shadow: true|false  (documentation for a SHADOW round: true requires the heading suffix ` (SHADOW)` — `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; the suffix is the only marker, this field never substitutes for it; a SHADOW round is never a verdict — §8)
@@ -859,6 +886,10 @@ rather than overwriting it.
   round is answered by a `Review Response: Round N` that names the new full SHA
   and the gates it ran (`loop` item 4).
 - P2 alone never blocks.
+- `gates.status = unverified` is visible advisory evidence, not by itself a
+  reason to withhold LGTM. `gates.status = red` or `undeclared` still prevents
+  a qualified LGTM; mapped red is blocking, and skipped is never a green
+  per-gate claim.
 - An LGTM with a non-empty `escalations:` field is provisional (§6.4).
 - Every push invalidates this verdict (`loop` item 5). A draft/ready flip, a
   label, or a status change is not a push and reruns nothing (`ladder`, L3).
@@ -1016,6 +1047,17 @@ mechanical.
   code — except when every named script is absent, which is `ERROR`, not a
   silent PASS, so a check that verified nothing is never mistaken for one
   that passed (the #950 failure mode, in the opposite direction).
+- `review-spec-v1.7` (2026-09-11, issue #1136 d-001): front matter gains the
+  generic `ci_gates` declared-command → exact check-name map. Exact-head mapped
+  jobs aggregate into one row per gate: all success is green, any failure is
+  red, and missing/pending/neutral/skipped is unverified. Final status unions
+  eligible green evidence per declared gate across receipts, mapped rows, and
+  successful stored non-timeout RAN; every gate must be covered, while any red
+  evidence globally dominates. Required checks stay visible as set-level
+  evidence, but required green covers no declared gate. Unverified gate
+  evidence becomes advisory; red and undeclared remain qualification blockers.
+  `ran_allowlist` is unchanged because execution capability is not a fallback
+  for unavailable evidence.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they

@@ -128,13 +128,16 @@ pub(crate) fn collect_evidence(
         vec![]
     };
     let set = evidence::gate_set(&prepared.fm, &args.gates, &verify);
-    let (mut status, mut read, uncovered) =
+    let (_, mut read, mut uncovered) =
         evidence::read_gates(&prepared.ledger, &prepared.subject.head_sha, &set)?;
     if let Some(pr) = args.pr {
         let checks = evidence::gh_required_checks(&prepared.repo, pr, &prepared.subject.head_sha)?;
-        let (ci, rows) = evidence::read_ci(&checks);
-        status = evidence::combine_gate_status(&status, ci.as_deref());
-        read.extend(rows);
+        let (_, required_rows) = evidence::read_ci(&checks);
+        read.extend(required_rows);
+        let (_, mapped_rows, mapped_gates) =
+            evidence::read_ci_job_map(&checks, &set, &prepared.fm.ci_gates);
+        read.extend(mapped_rows);
+        evidence::remove_mapped_uncovered(&mut uncovered, &mapped_gates);
     }
     let (ran, notes) = if args.run_gates {
         evidence::ran_gates(
@@ -149,8 +152,7 @@ pub(crate) fn collect_evidence(
         (vec![], vec![])
     };
     prepared.notes.extend(notes);
-    status =
-        evidence::combine_gate_status(&status, evidence::ran_status(&set.cmds, &ran).as_deref());
+    let status = evidence::gate_status(&set.cmds, &read, &ran);
     let diff = git::git(
         &prepared.repo,
         &[

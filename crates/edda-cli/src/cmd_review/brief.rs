@@ -24,6 +24,8 @@ pub(crate) struct FrontMatter {
     #[serde(default)]
     pub gates: Vec<String>,
     #[serde(default)]
+    pub ci_gates: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     pub ran_allowlist: Vec<String>,
     #[serde(default)]
     pub independence: Option<String>,
@@ -220,16 +222,27 @@ mod tests {
     fn current_and_old_frontmatter_keep_rules_and_verbatim_gates() {
         for version in [1, 2] {
             let text = format!(
-                "---\r\nedda_review: {version}\r\ngates: ['echo \"a  b\"']\r\n---\r\nRules"
+                "---\r\nedda_review: {version}\r\ngates: ['echo \"a  b\"']\r\nci_gates:\r\n  'echo \"a  b\"': [Linux, macOS]\r\n---\r\nRules"
             );
             let (fm, body, note) = parse_review_md(&text);
             assert_eq!(fm.gates, ["echo \"a  b\""]);
+            assert_eq!(fm.ci_gates["echo \"a  b\""], ["Linux", "macOS"]);
             assert_eq!(body, text);
             assert!(note.is_none());
         }
         assert!(parse_review_md("---\nedda_review: 99\n---\nRules")
             .2
             .is_some());
+    }
+
+    #[test]
+    fn malformed_ci_gate_mapping_empties_all_machine_fields() {
+        let (fm, _, note) = parse_review_md(
+            "---\nedda_review: 2\ngates: [test]\nci_gates: [not-a-map]\n---\nRules",
+        );
+        assert!(fm.gates.is_empty());
+        assert!(fm.ci_gates.is_empty());
+        assert!(note.is_some_and(|note| note.contains("machine fields empty")));
     }
     #[test]
     fn overlapping_code_is_protected_and_untrusted_contract_is_escaped() {

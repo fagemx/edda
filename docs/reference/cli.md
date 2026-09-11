@@ -1236,12 +1236,25 @@ round. With the flag the policy is `model` and any independence other than
 `verified` disqualifies it.
 
 Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
-When GitHub reports no required checks yet, review still launches and CI evidence
-remains absent/unverified; any red evidence wins. `--run-gates` opts in
-to execution of trusted declared commands, bounded by `--max-ran-sec` (300 by
-default). Cargo gates require an existing `CARGO_TARGET_DIR` build lane.
-`--trust-spec` authorizes issue verify commands; explicit issue selection by
-itself does not. Local specification paths are operator-trusted.
+`REVIEW.md` may map a declared gate command under `ci_gates` to a list of exact
+check-run names. One `ci-job-map` row then reports that gate: every named job at
+the reviewed SHA must succeed for green; any failure is red; missing, pending,
+neutral, or skipped stays pending/unverified. Required-check rows remain visible
+set-level evidence, including their path-filter skip semantics, but required
+green covers no declared gate. Final status is computed per declared gate:
+every gate needs a green receipt or mapped row, or a successful stored
+non-timeout RAN for that same command; those sources may collectively cover the
+set. Unmapped gates remain uncovered. When GitHub reports no required checks
+yet, mapped jobs are not fetched or used, review still launches, and CI
+evidence remains absent/unverified. Unverified gate evidence is advisory for
+review qualification; `red` and `undeclared` still disqualify, and any red
+evidence wins across receipts, required CI, mapped CI, and non-timeout failed
+RAN. `ran_allowlist` is unchanged because reviewer execution capability is not
+the fallback for unavailable evidence. `--run-gates` opts in to execution
+of trusted declared commands, bounded by `--max-ran-sec` (300 by default).
+Cargo gates require an existing `CARGO_TARGET_DIR` build lane. `--trust-spec`
+authorizes issue verify commands; explicit issue selection by itself does not.
+Local specification paths are operator-trusted.
 
 | Exit | Meaning |
 |---|---|
