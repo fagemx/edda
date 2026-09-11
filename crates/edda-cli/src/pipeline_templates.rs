@@ -1,14 +1,15 @@
 //! Pipeline template selection and YAML rendering.
 //!
-//! Generates conductor-compatible YAML plans from task intake context.
-//! Templates reference existing skills (/issue-plan, /issue-action, /pr-review).
+//! Generates conductor-compatible one-phase routes from task intake context.
+//! Both routes delegate implementation and delivery to `/issue-action`, which
+//! follows the canonical `delivery-flow/1` operating contract.
 
-/// Pipeline type determines which phases are included.
+/// Pipeline type determines how acceptance is established in the delivery phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineType {
-    /// plan → approval → implement → pr-review → approval
+    /// Reuse an accepted plan, or clarify acceptance boundedly before implementation.
     Standard,
-    /// implement → pr-review → approval (skip plan phase)
+    /// Skip a separate planning phase, but never skip clear acceptance.
     QuickFix,
 }
 
@@ -21,90 +22,31 @@ pub fn select_pipeline(intent: &str, labels: &[String]) -> PipelineType {
     }
 }
 
-/// Render the issue-derived lookup shared by the implementation gate and review prompt.
-fn linked_open_pr_lookup(issue_id: u64) -> String {
-    format!(
-        r#"gh pr list --state open --limit 1000 --json url,closingIssuesReferences --jq '[.[] | select(any(.closingIssuesReferences[]?; .number == {issue_id}))] as $matches | if ($matches | length) != 1 then error("expected exactly one open PR linked to issue #{issue_id}") elif (($matches[0].url | type) != "string" or (($matches[0].url | test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$")) | not)) then error("linked PR has malformed GitHub URL") else $matches[0].url end'"#
-    )
-}
-
-/// Render a Standard pipeline plan as YAML.
+/// Render a Standard pipeline as one terminal implementation/delivery phase.
 pub fn render_standard_plan(issue_id: u64, title: &str, url: &str) -> String {
     let escaped_title = escape_yaml(title);
-    let linked_pr_lookup = linked_open_pr_lookup(issue_id);
     format!(
         r#"name: pipeline-issue-{issue_id}
-purpose: "Automated pipeline for issue #{issue_id}: {escaped_title}"
+purpose: "Delivery route for issue #{issue_id}: {escaped_title}"
 
 phases:
-  - id: plan
+  - id: delivery
     prompt: |
-      Run /issue-plan {issue_id} to research, innovate, and plan for this issue.
+      Follow coord-orchestrate's delivery-flow/1 operating contract.
+      Run /issue-action {issue_id} to implement and deliver the accepted outcome.
       Issue: {escaped_title}
       URL: {url}
-    on_fail: ask
-
-  - id: plan-approval
-    prompt: |
-      The plan for issue #{issue_id} has been created.
-      Write an approval_request event using:
-        edda draft propose --title "Plan for #{issue_id}" --purpose "Approve implementation plan"
-      Then wait for human approval.
-    depends_on: [plan]
-    check:
-      - type: wait_until
-        check:
-          type: edda_event
-          event_type: approval
-        interval_sec: 30
-        timeout_sec: 86400
-        backoff: linear
-    on_fail: ask
-
-  - id: implement
-    prompt: |
-      Run /issue-action {issue_id} to implement the approved plan.
-      Issue: {escaped_title}
-      URL: {url}
+      Standard acceptance: reuse an accepted plan when one exists; otherwise
+      perform bounded acceptance clarification in this same phase before
+      implementation. Do not create a separate planning or approval phase, and
+      do not implement while acceptance remains materially unclear.
       Validate with the repository's current focused author/L0 policy.
-      Before this phase completes, create or update exactly one open PR through
-      existing authorization and link its closingIssuesReferences to issue
-      #{issue_id}. If that is unavailable, report the blocker; do not claim that
-      a local candidate is a PR. Do not merge.
-    depends_on: [plan-approval]
-    check:
-      - type: cmd_succeeds
-        cmd: >-
-          {linked_pr_lookup}
-    on_fail: ask
-
-  - id: pr-review
-    prompt: |
-      Independently resolve the open PR linked to issue #{issue_id} by running:
-        {linked_pr_lookup}
-      Use its sole stdout URL for /pr-review, then verify code quality, test
-      coverage, and adherence to the plan. Refuse a gh error, zero linked open
-      PRs, multiple linked open PRs, or a malformed GitHub PR URL. Report the
-      blocker; do not run /pr-review. No implementation output is transferred to
-      this phase, and it does not merge.
-    depends_on: [implement]
-    on_fail: ask
-
-  - id: pr-approval
-    prompt: |
-      The PR for issue #{issue_id} has been reviewed.
-      Write an approval_request event for the repository's merge authority.
-      Then wait for its decision. This pipeline, its worker, and its reviewer
-      never gain merge authority and never merge the PR.
-    depends_on: [pr-review]
-    check:
-      - type: wait_until
-        check:
-          type: edda_event
-          event_type: approval
-        interval_sec: 30
-        timeout_sec: 86400
-        backoff: linear
+      Complete only to the output authorized by the assigned brief: a truthful
+      local candidate, commit, or authorized PR. Report any unavailable
+      publication path as a blocker instead of overstating the result.
+      Conductor completion records only this implementation/delivery phase. It
+      is not independent review, task completion, or merge, and grants no
+      review or merge authority.
     on_fail: ask
 "#,
         issue_id = issue_id,
@@ -113,58 +55,31 @@ phases:
     )
 }
 
-/// Render a QuickFix pipeline plan as YAML (skips plan phase).
+/// Render a QuickFix pipeline as one terminal implementation/delivery phase.
 pub fn render_quickfix_plan(issue_id: u64, title: &str, url: &str) -> String {
     let escaped_title = escape_yaml(title);
-    let linked_pr_lookup = linked_open_pr_lookup(issue_id);
     format!(
         r#"name: pipeline-issue-{issue_id}
-purpose: "Quick fix pipeline for issue #{issue_id}: {escaped_title}"
+purpose: "Quick fix delivery route for issue #{issue_id}: {escaped_title}"
 
 phases:
-  - id: implement
+  - id: delivery
     prompt: |
-      Run /issue-action {issue_id} to implement the fix.
+      Follow coord-orchestrate's delivery-flow/1 operating contract.
+      Run /issue-action {issue_id} to implement and deliver the fix.
       Issue: {escaped_title}
       URL: {url}
+      QuickFix skips a separate planning phase, but never skips clear
+      acceptance. Reuse the accepted outcome when it is clear; if acceptance
+      is materially unclear, clarify it boundedly in this same phase before
+      implementation.
       Validate with the repository's current focused author/L0 policy.
-      Before this phase completes, create or update exactly one open PR through
-      existing authorization and link its closingIssuesReferences to issue
-      #{issue_id}. If that is unavailable, report the blocker; do not claim that
-      a local candidate is a PR. Do not merge.
-    check:
-      - type: cmd_succeeds
-        cmd: >-
-          {linked_pr_lookup}
-    on_fail: ask
-
-  - id: pr-review
-    prompt: |
-      Independently resolve the open PR linked to issue #{issue_id} by running:
-        {linked_pr_lookup}
-      Use its sole stdout URL for /pr-review, then verify the fix is correct and
-      tests pass. Refuse a gh error, zero linked open PRs, multiple linked open
-      PRs, or a malformed GitHub PR URL. Report the blocker; do not run
-      /pr-review. No implementation output is transferred to this phase, and it
-      does not merge.
-    depends_on: [implement]
-    on_fail: ask
-
-  - id: pr-approval
-    prompt: |
-      The PR for issue #{issue_id} has been reviewed.
-      Write an approval_request event for the repository's merge authority.
-      Then wait for its decision. This pipeline, its worker, and its reviewer
-      never gain merge authority and never merge the PR.
-    depends_on: [pr-review]
-    check:
-      - type: wait_until
-        check:
-          type: edda_event
-          event_type: approval
-        interval_sec: 30
-        timeout_sec: 86400
-        backoff: linear
+      Complete only to the output authorized by the assigned brief: a truthful
+      local candidate, commit, or authorized PR. Report any unavailable
+      publication path as a blocker instead of overstating the result.
+      Conductor completion records only this implementation/delivery phase. It
+      is not independent review, task completion, or merge, and grants no
+      review or merge authority.
     on_fail: ask
 "#,
         issue_id = issue_id,
@@ -202,99 +117,75 @@ mod tests {
         assert_eq!(select_pipeline("fix", &labels), PipelineType::Standard);
     }
 
-    #[test]
-    fn render_standard_plan_valid_yaml() {
-        let yaml = render_standard_plan(42, "feat: add auth", "https://github.com/o/r/issues/42");
-        let plan: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("should be valid YAML");
-        assert_eq!(plan["name"].as_str().unwrap(), "pipeline-issue-42");
+    fn parsed(yaml: &str) -> serde_yaml::Value {
+        serde_yaml::from_str(yaml).expect("rendered pipeline should be valid YAML")
     }
 
-    #[test]
-    fn render_standard_plan_has_required_phases() {
-        let yaml = render_standard_plan(1, "test", "https://example.com");
-        let plan: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        let phases = plan["phases"].as_sequence().unwrap();
-        let ids: Vec<&str> = phases.iter().map(|p| p["id"].as_str().unwrap()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "plan",
-                "plan-approval",
-                "implement",
-                "pr-review",
-                "pr-approval"
-            ]
-        );
-    }
-
-    fn phase<'a>(plan: &'a serde_yaml::Value, id: &str) -> &'a serde_yaml::Value {
-        plan["phases"]
+    fn assert_single_delivery_phase(yaml: &str, issue_id: u64) {
+        let plan = parsed(yaml);
+        let phases = plan["phases"]
             .as_sequence()
-            .unwrap()
-            .iter()
-            .find(|phase| phase["id"].as_str() == Some(id))
-            .unwrap()
-    }
+            .expect("phases should be a list");
+        assert_eq!(phases.len(), 1, "pipeline must stay a one-phase thin route");
 
-    #[test]
-    fn implementation_and_review_independently_require_one_linked_open_pr() {
-        for (issue_id, yaml) in [
-            (
-                7,
-                render_standard_plan(7, "standard", "https://example.com/7"),
-            ),
-            (8, render_quickfix_plan(8, "quick", "https://example.com/8")),
+        let delivery = &phases[0];
+        assert_eq!(delivery["id"].as_str(), Some("delivery"));
+        assert!(delivery["depends_on"].is_null());
+        assert!(delivery["check"].is_null());
+        assert!(delivery["gate"].is_null());
+
+        let prompt = delivery["prompt"].as_str().expect("delivery prompt");
+        assert!(prompt.contains("delivery-flow/1"));
+        assert!(prompt.contains(&format!("/issue-action {issue_id}")));
+        assert!(prompt.contains("focused author/L0 policy"));
+        assert!(prompt.contains("local candidate, commit, or authorized PR"));
+        assert!(prompt.contains("not independent review, task completion, or merge"));
+        assert!(prompt.contains("grants no\nreview or merge authority"));
+
+        for forbidden in [
+            "plan-approval",
+            "pr-review",
+            "pr-approval",
+            "wait_until",
+            "cmd_succeeds",
+            "closingIssuesReferences",
+            "gh pr list",
+            "gh pr merge",
+            "cargo test --workspace",
+            "create or update exactly one open PR",
         ] {
-            let plan: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-            let implement = phase(&plan, "implement");
-            let implement_prompt = implement["prompt"].as_str().unwrap();
-            assert!(implement_prompt.contains("create or update exactly one open PR"));
-            assert!(implement_prompt.contains("closingIssuesReferences"));
-            assert!(implement_prompt.contains("focused author/L0 policy"));
-            assert!(implement_prompt.contains("Do not merge"));
-
-            let checks = implement["check"].as_sequence().unwrap();
-            assert_eq!(checks.len(), 1);
-            assert_eq!(checks[0]["type"].as_str(), Some("cmd_succeeds"));
-            let check_cmd = checks[0]["cmd"].as_str().unwrap();
-            assert_eq!(check_cmd, linked_open_pr_lookup(issue_id));
-            assert!(check_cmd.starts_with("gh pr list --state open"));
-            assert!(check_cmd.contains("closingIssuesReferences"));
-            assert!(check_cmd.contains(&format!(".number == {issue_id}")));
-            assert!(check_cmd.contains("if ($matches | length) != 1 then error"));
-            assert!(check_cmd.contains("linked PR has malformed GitHub URL"));
-            assert!(check_cmd.contains("^https://github[.]com/"));
-            assert!(!check_cmd.contains(" || "));
-            assert_eq!(check_cmd.matches("gh pr list").count(), 1);
-            assert!(!yaml.contains("cargo test --workspace"));
-
-            let review_prompt = phase(&plan, "pr-review")["prompt"].as_str().unwrap();
-            assert!(review_prompt.contains("Independently resolve"));
-            assert!(review_prompt.contains(check_cmd));
-            assert!(review_prompt.contains("Refuse a gh error"));
-            assert!(review_prompt.contains("zero linked open"));
-            assert!(review_prompt.contains("multiple linked open"));
-            assert!(review_prompt.contains("malformed GitHub PR URL"));
-            assert!(review_prompt.contains("blocker"));
-            assert!(review_prompt.contains("do not run"));
-            assert!(review_prompt.contains("No implementation output is transferred"));
-            assert!(!review_prompt.contains("returned by the implementation phase"));
-
-            let approval_prompt = phase(&plan, "pr-approval")["prompt"].as_str().unwrap();
-            assert!(approval_prompt.contains("never gain merge authority"));
-            assert!(approval_prompt.contains("never merge the PR"));
+            assert!(
+                !yaml.contains(forbidden),
+                "one-phase route revived forbidden lifecycle text: {forbidden}"
+            );
         }
     }
 
     #[test]
-    fn render_quickfix_plan_skips_plan_phase() {
+    fn standard_is_one_delivery_phase_with_bounded_acceptance() {
+        let yaml = render_standard_plan(42, "feat: add auth", "https://github.com/o/r/issues/42");
+        assert_single_delivery_phase(&yaml, 42);
+        let prompt = parsed(&yaml)["phases"][0]["prompt"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(prompt.contains("Standard acceptance: reuse an accepted plan"));
+        assert!(prompt.contains("otherwise\nperform bounded acceptance clarification"));
+        assert!(prompt.contains("same phase before\nimplementation"));
+        assert!(prompt.contains("do not implement while acceptance remains materially unclear"));
+    }
+
+    #[test]
+    fn quickfix_is_one_delivery_phase_without_skipping_acceptance() {
         let yaml = render_quickfix_plan(5, "fix: null ptr", "https://example.com");
-        let plan: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        let phases = plan["phases"].as_sequence().unwrap();
-        let ids: Vec<&str> = phases.iter().map(|p| p["id"].as_str().unwrap()).collect();
-        assert!(!ids.contains(&"plan"));
-        assert!(!ids.contains(&"plan-approval"));
-        assert!(ids.contains(&"implement"));
+        assert_single_delivery_phase(&yaml, 5);
+        let prompt = parsed(&yaml)["phases"][0]["prompt"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(prompt.contains("QuickFix skips a separate planning phase"));
+        assert!(prompt.contains("never skips clear\nacceptance"));
+        assert!(prompt.contains("clarify it boundedly in this same phase"));
     }
 
     #[test]
@@ -310,15 +201,18 @@ mod tests {
     }
 
     #[test]
-    fn render_plan_parses_with_conductor() {
-        let yaml = render_standard_plan(10, "feat: test", "https://example.com");
-        // Use conductor's parse_plan to validate full compatibility
-        let result = edda_conductor::plan::parser::parse_plan(&yaml);
-        assert!(
-            result.is_ok(),
-            "conductor parse_plan failed: {:?}",
-            result.err()
-        );
+    fn both_routes_parse_with_conductor() {
+        for yaml in [
+            render_standard_plan(10, "feat: test", "https://example.com"),
+            render_quickfix_plan(11, "fix: test", "https://example.com"),
+        ] {
+            let result = edda_conductor::plan::parser::parse_plan(&yaml);
+            assert!(
+                result.is_ok(),
+                "conductor parse_plan failed: {:?}",
+                result.err()
+            );
+        }
     }
 
     #[test]

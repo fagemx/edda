@@ -13,6 +13,7 @@ self_check="$root/.claude/skills/pr-review-loop/SKILL.md"
 agents="$root/AGENTS.md"
 runbook="$root/docs/guides/operator-runbook.md"
 templates="$root/crates/edda-cli/src/pipeline_templates.rs"
+cli_main="$root/crates/edda-cli/src/main.rs"
 phase_core="$root/crates/edda-core/src/agent_phase.rs"
 phase_bridge="$root/crates/edda-bridge-claude/src/agent_phase.rs"
 
@@ -114,16 +115,18 @@ audit_routes() {
     require_text "$action" 'read `edda task show <id>`'
     require_text "$action" 'If acceptance is materially unclear'
     require_text "$action" 'record its behavior and counterexample lenses together'
-    require_text "$action" 'active `edda pipeline` caller is narrower'
-    require_text "$action" 'create or update exactly one open PR'
-    require_text "$action" '`closingIssuesReferences` links this numeric issue'
-    require_text "$action" 'check independently resolves'
-    require_text "$action" 'review phase repeats the same issue-derived lookup'
-    require_text "$action" 'implementation output'
-    require_text "$action" 'malformed URL refuses review'
+    require_text "$action" 'active `edda pipeline` caller is only a one-phase compatibility'
+    require_text "$action" 'it does not require PR-only output'
+    require_text "$action" 'Standard reuses an accepted plan'
+    require_text "$action" 'QuickFix skips a separate planning phase but never'
+    require_text "$action" 'skips clear acceptance.'
+    require_text "$action" 'Conductor completion means only that implementation/'
+    require_text "$action" 'it is not independent review, task completion or merge'
     require_text "$action" 'focused author/L0 policy'
-    require_text "$action" 'grants no merge authority'
-    reject_regex "$action" 'edda pipeline[^.\n]*local candidate[^.\n]*(sufficient|complete|instead)'
+    require_text "$action" 'gain no merge authority'
+    reject_text "$action" 'create or update exactly one open PR'
+    reject_text "$action" 'closingIssuesReferences'
+    reject_regex "$action" 'edda pipeline[^.]*(must|required to|only)[^.]*(create|return|deliver)[^.]*(PR|pull request)'
 
     require_text "$self_check" 'It is not an'
     require_text "$self_check" '**Behavior lens:**'
@@ -148,29 +151,48 @@ audit_direct_consumers() {
     require_text "$runbook" '`WorkReceiptV1`'
     require_text "$runbook" 'legacy post-Done correction'
     require_text "$runbook" '| `edda pipeline` |'
-    require_text "$runbook" '`cmd_succeeds` machine check'
-    require_text "$runbook" 'review phase 不接前一 phase output'
-    require_text "$runbook" '`gh` error／零筆／多筆／malformed URL 都拒絕'
-    require_text "$runbook" 'pipeline／worker／reviewer 都不合併'
+    require_text "$runbook" '單 phase compatibility route'
+    require_text "$runbook" '一個 terminal implementation／delivery phase'
+    require_text "$runbook" '`delivery-flow/1`'
+    require_text "$runbook" 'Standard 重用 accepted plan'
+    require_text "$runbook" 'QuickFix 略過獨立 planning phase，但不略過 clear acceptance'
+    require_text "$runbook" 'local candidate、commit 或 authorized PR'
+    require_text "$runbook" 'Conductor completion 不是 independent review、task completion 或 merge'
+    require_text "$runbook" 'pipeline／worker／reviewer 都無 merge authority'
+    reject_text "$runbook" '`cmd_succeeds` machine check'
+    reject_text "$runbook" 'closingIssuesReferences'
 
     template_product="$tmp/template-product.rs"
     awk '/^#\[cfg\(test\)\]/{exit} {print}' "$templates" >"$template_product"
-    require_text "$template_product" 'fn linked_open_pr_lookup(issue_id: u64) -> String'
-    require_text "$template_product" 'gh pr list --state open --limit 1000'
-    require_text "$template_product" '--json url,closingIssuesReferences --jq'
-    require_text "$template_product" 'if ($matches | length) != 1 then error'
-    require_text "$template_product" 'linked PR has malformed GitHub URL'
-    require_text "$template_product" '^https://github[.]com/'
-    require_text "$template_product" 'create or update exactly one open PR through'
-    require_text "$template_product" 'Independently resolve the open PR linked to issue'
-    require_text "$template_product" 'Refuse a gh error, zero linked open'
-    require_text "$template_product" 'do not run /pr-review'
-    require_text "$template_product" 'No implementation output is transferred'
+    [ "$(grep -F -c 'phases:' "$template_product")" -eq 2 ] || \
+        fail 'pipeline templates must each render exactly one phases list'
+    [ "$(grep -E -c '^  - id:' "$template_product")" -eq 2 ] || \
+        fail 'pipeline templates must contain no downstream phase'
+    [ "$(grep -F -c '  - id: delivery' "$template_product")" -eq 2 ] || \
+        fail 'Standard and QuickFix must each render exactly one delivery phase'
+    require_text "$template_product" "Follow coord-orchestrate's delivery-flow/1 operating contract."
+    require_text "$template_product" 'Run /issue-action {issue_id} to implement and deliver'
+    require_text "$template_product" 'Standard acceptance: reuse an accepted plan'
+    require_text "$template_product" 'bounded acceptance clarification'
+    require_text "$template_product" 'QuickFix skips a separate planning phase, but never skips clear'
+    require_text "$template_product" 'local candidate, commit, or authorized PR'
     require_text "$template_product" "repository's current focused author/L0 policy"
-    require_text "$template_product" 'never gain merge authority and never merge the PR'
-    reject_text "$template_product" 'returned by the implementation phase'
+    require_text "$template_product" 'Conductor completion records only this implementation/delivery phase'
+    require_text "$template_product" 'is not independent review, task completion, or merge'
+    require_text "$template_product" 'review or merge authority'
+    reject_regex "$template_product" 'id:[[:space:]]*(plan|plan-approval|pr-review|pr-approval|review|approval)'
+    reject_text "$template_product" 'depends_on:'
+    reject_regex "$template_product" '^[[:space:]]*(check|gate):'
+    reject_text "$template_product" 'wait_until'
+    reject_text "$template_product" 'cmd_succeeds'
+    reject_text "$template_product" 'closingIssuesReferences'
+    reject_regex "$template_product" 'gh[[:space:]]+pr[[:space:]]+(list|view)'
     reject_text "$template_product" 'cargo test --workspace'
     reject_regex "$template_product" 'gh[[:space:]]+pr[[:space:]]+merge'
+    reject_regex "$template_product" '(must|required to|only)[^.]*(create|return|deliver)[^.]*(PR|pull request)'
+
+    require_text "$cli_main" 'One-phase issue implementation/delivery compatibility route'
+    reject_text "$cli_main" 'Auto-execution pipeline — skill chain with approval gates'
 
     # AgentPhase is a live direct caller of issue-action, not a historical doc.
     require_text "$phase_core" 'AgentPhase::Implement => "/issue-action".to_string()'
@@ -257,10 +279,10 @@ expect_route_failure 'revived route loop despite thin-route text'
 pipeline=$original_pipeline
 
 original_action=$action
-cp "$original_action" "$tmp/action-bad.md"
-printf '%s\n' 'For edda pipeline, a local candidate is sufficient instead of a PR.' >>"$tmp/action-bad.md"
-action="$tmp/action-bad.md"
-expect_route_failure 'pipeline caller allowed to omit PR despite positive handoff text'
+cp "$original_action" "$tmp/action-pr-only-bad.md"
+printf '%s\n' 'For edda pipeline, completion must create and return a PR.' >>"$tmp/action-pr-only-bad.md"
+action="$tmp/action-pr-only-bad.md"
+expect_route_failure 'pipeline caller revived mandatory PR-only completion despite truthful alternatives'
 action=$original_action
 
 original_self_check=$self_check
@@ -271,13 +293,67 @@ expect_route_failure 'author self-check raw merge despite no-merge text'
 self_check=$original_self_check
 
 original_templates=$templates
+
+mutate_template_after_route() {
+    addition=$1
+    output=$2
+    awk -v addition="$addition" '
+        {print}
+        !done && /Follow coord-orchestrate.s delivery-flow\/1 operating contract\./ {
+            print addition
+            done = 1
+        }
+    ' "$original_templates" >"$output"
+}
+
 awk '
-    /^#\[cfg\(test\)\]/{print "// Active phase check: cargo test --workspace"}
+    !done && /^  - id: delivery/ {
+        print "  - id: pr-review"
+        print "    prompt: Revived downstream review phase."
+        done = 1
+    }
     {print}
-' "$original_templates" >"$tmp/templates-bad.rs"
-templates="$tmp/templates-bad.rs"
-expect_consumer_failure 'pipeline template duplicate workspace gate despite focused prose'
+' "$original_templates" >"$tmp/templates-review-phase-bad.rs"
+templates="$tmp/templates-review-phase-bad.rs"
+expect_consumer_failure 'pipeline template revived downstream review phase despite route keywords'
+
+awk '
+    {print}
+    !done && /^  - id: delivery/ {
+        print "    check:"
+        print "      - type: wait_until"
+        done = 1
+    }
+' "$original_templates" >"$tmp/templates-wait-gate-bad.rs"
+templates="$tmp/templates-wait-gate-bad.rs"
+expect_consumer_failure 'pipeline template revived wait gate despite route keywords'
+
+mutate_template_after_route '      gh pr list --state open --json url,closingIssuesReferences' \
+    "$tmp/templates-linked-pr-bad.rs"
+templates="$tmp/templates-linked-pr-bad.rs"
+expect_consumer_failure 'pipeline template revived linked-PR shell despite route keywords'
+
+mutate_template_after_route '      cargo test --workspace' "$tmp/templates-workspace-bad.rs"
+templates="$tmp/templates-workspace-bad.rs"
+expect_consumer_failure 'pipeline template revived unconditional workspace gate despite focused route'
+
+mutate_template_after_route '      gh pr merge 77 --squash' "$tmp/templates-raw-merge-bad.rs"
+templates="$tmp/templates-raw-merge-bad.rs"
+expect_consumer_failure 'pipeline template revived raw merge despite no merge authority'
+
+mutate_template_after_route '      Completion must create and return a PR.' \
+    "$tmp/templates-pr-only-bad.rs"
+templates="$tmp/templates-pr-only-bad.rs"
+expect_consumer_failure 'pipeline template revived mandatory PR-only completion despite alternatives'
 templates=$original_templates
+
+original_cli_main=$cli_main
+cp "$original_cli_main" "$tmp/cli-main-approval-chain-bad.rs"
+printf '%s\n' '/// Auto-execution pipeline — skill chain with approval gates' \
+    >>"$tmp/cli-main-approval-chain-bad.rs"
+cli_main="$tmp/cli-main-approval-chain-bad.rs"
+expect_consumer_failure 'pipeline CLI help revived approval-gate chain despite thin route'
+cli_main=$original_cli_main
 
 original_runbook=$runbook
 cp "$original_runbook" "$tmp/runbook-current-control.md"
@@ -322,70 +398,6 @@ if [ -n "${EDDA_BIN:-}" ]; then
     command -v jq >/dev/null 2>&1 || fail 'jq is required for JSON recovery fixtures'
     "$EDDA_BIN" --version >/dev/null 2>&1 || fail "EDDA_BIN is not runnable: $EDDA_BIN"
 
-    linked_pr_gate() {
-        issue=$1
-        filter=$(printf \
-            '[.[] | select(any(.closingIssuesReferences[]?; .number == %s))] as $matches | if ($matches | length) != 1 then error("expected exactly one open PR linked to issue #%s") elif (($matches[0].url | type) != "string" or (($matches[0].url | test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$")) | not)) then error("linked PR has malformed GitHub URL") else $matches[0].url end' \
-            "$issue" "$issue")
-        gh pr list --state open --limit 1000 \
-            --json url,closingIssuesReferences --jq "$filter" >/dev/null
-    }
-
-    expect_linked_pr_gate_failure() {
-        name=$1
-        if linked_pr_gate 77 >/dev/null 2>&1; then
-            fail "linked-PR machine gate accepted invalid case: $name"
-        fi
-    }
-
-    mkdir -p "$tmp/fake-gh-bin"
-    cat >"$tmp/fake-gh-bin/gh" <<'SH'
-#!/bin/sh
-set -eu
-[ "$#" -eq 10 ] || exit 64
-[ "$1" = pr ] && [ "$2" = list ] && [ "$3" = --state ] && [ "$4" = open ] || exit 64
-[ "$5" = --limit ] && [ "$6" = 1000 ] || exit 64
-[ "$7" = --json ] && [ "$8" = url,closingIssuesReferences ] && [ "$9" = --jq ] || exit 64
-[ -n "${10}" ] || exit 64
-[ "${FAKE_GH_ERROR:-0}" = 0 ] || exit 23
-jq -r "${10}" "$FAKE_GH_FIXTURE"
-SH
-    chmod +x "$tmp/fake-gh-bin/gh"
-    original_path=$PATH
-    PATH="$tmp/fake-gh-bin:$PATH"
-    export PATH
-
-    printf '%s\n' '[]' >"$tmp/pr-zero.json"
-    FAKE_GH_FIXTURE="$tmp/pr-zero.json"
-    FAKE_GH_ERROR=0
-    export FAKE_GH_FIXTURE FAKE_GH_ERROR
-    expect_linked_pr_gate_failure zero
-
-    printf '%s\n' '[{"url":"https://github.com/acme/widget/pull/9","closingIssuesReferences":[{"number":77}]}]' \
-        >"$tmp/pr-one.json"
-    FAKE_GH_FIXTURE="$tmp/pr-one.json"
-    export FAKE_GH_FIXTURE
-    linked_pr_gate 77 || fail 'linked-PR machine gate refused exactly one valid match'
-
-    printf '%s\n' '[{"url":"https://github.com/acme/widget/pull/9","closingIssuesReferences":[{"number":77}]},{"url":"https://github.com/acme/widget/pull/10","closingIssuesReferences":[{"number":77}]}]' \
-        >"$tmp/pr-multiple.json"
-    FAKE_GH_FIXTURE="$tmp/pr-multiple.json"
-    export FAKE_GH_FIXTURE
-    expect_linked_pr_gate_failure multiple
-
-    printf '%s\n' '[{"url":"https://github.com/acme/widget/issues/77","closingIssuesReferences":[{"number":77}]}]' \
-        >"$tmp/pr-malformed.json"
-    FAKE_GH_FIXTURE="$tmp/pr-malformed.json"
-    export FAKE_GH_FIXTURE
-    expect_linked_pr_gate_failure malformed-url
-
-    FAKE_GH_ERROR=1
-    export FAKE_GH_ERROR
-    expect_linked_pr_gate_failure gh-error
-    FAKE_GH_ERROR=0
-    PATH=$original_path
-    export FAKE_GH_ERROR PATH
-    printf 'linked-PR machine gate zero/one/multiple/malformed/gh-error proof passed\n'
     repo="$tmp/repo"
     export EDDA_STORE_ROOT="$tmp/store"
     mkdir -p "$repo/work" "$repo/briefs" "$EDDA_STORE_ROOT"

@@ -538,7 +538,7 @@ enum Command {
         #[command(subcommand)]
         cmd: cmd_prs::PrsCmd,
     },
-    /// Auto-execution pipeline — skill chain with approval gates
+    /// One-phase issue implementation/delivery compatibility route
     Pipeline {
         #[command(subcommand)]
         cmd: PipelineCmd,

@@ -35,20 +35,16 @@ issued the verdict. Before handoff, perform the canonical single combined
 author self-check and record its behavior and counterexample lenses together.
 
 Completion follows the assigned brief: it may be a local candidate, commit or
-PR. The active `edda pipeline` caller is narrower: its implementation phase must
-create or update exactly one open PR through existing authorization and ensure
-its `closingIssuesReferences` links this numeric issue. The pipeline's machine
-check independently resolves and validates that exact GitHub PR URL; the later
-review phase repeats the same issue-derived lookup because implementation output
-is not transferred between phases. A `gh` error, no linked open PR, multiple
-linked open PRs, or a malformed URL refuses review. If the forge write is
-unavailable, report the blocker instead of returning a local candidate as though
-a PR exists. This requirement grants no merge authority to the pipeline, worker
-or reviewer.
+authorized PR. An active `edda pipeline` caller is only a one-phase compatibility
+route into this skill and `delivery-flow/1`; it does not require PR-only output.
+Standard reuses an accepted plan or, when it is absent, clarifies acceptance
+boundedly in that same phase. QuickFix skips a separate planning phase but never
+skips clear acceptance. Conductor completion means only that implementation/
+delivery phase returned; it is not independent review, task completion or merge.
 
 Record truthful receipt/evidence and blockers. Validate with the repository's
 current focused author/L0 policy; do not add an unconditional full-workspace
 gate. Do not infer task completion from dispatch success, invent acceptance,
 directly merge, or make a full local workspace run merely because a candidate
-SHA froze. Independent current-head review and merge authority remain entirely
-with repository policy.
+SHA froze. The pipeline, worker and reviewer gain no merge authority; independent
+current-head review and merge authority remain entirely with repository policy.

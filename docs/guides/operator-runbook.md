@@ -28,8 +28,8 @@ local/generated state，不 force-track。
 | 已 assigned／resume | `edda task show <id>`，讀 reachable brief、舊 result 與 source，做原角色；不重開 planning／formation |
 | controller resume 已有 plan | 先讀 rail owner、active map、task JSON、dispatch/session 與 PR/source evidence，再選 next action |
 | `issue-pipeline --skip-plan` | 重用已有 acceptance，不是略過 acceptance；`--no-merge` 只停止，不給 merge authority |
-| `issue-action` | 保留 issue acceptance／owner／fix context，再進 generic flow；若 caller 是 active `edda pipeline`，implementation 必須建立／更新唯一 open PR，並讓 `closingIssuesReferences` 連到 numeric issue |
-| `edda pipeline` | product template 透過 `issue-action` 實作；依本 repo focused L0 驗證；implementation 的 `cmd_succeeds` machine check 以 issue ID 要求唯一 linked open PR 與 exact GitHub PR URL，review phase 不接前一 phase output，而是獨立重跑相同 lookup；`gh` error／零筆／多筆／malformed URL 都拒絕進 `/pr-review`；pipeline／worker／reviewer 都不合併 |
+| `issue-action` | 保留 issue acceptance／owner／fix context，再進 generic flow；active `edda pipeline` 也只是進入 `delivery-flow/1` 的單 phase compatibility route，不要求只能交 PR |
+| `edda pipeline` | Standard／QuickFix 都只有一個 terminal implementation／delivery phase，透過 `issue-action` 並明確遵循 `delivery-flow/1`；Standard 重用 accepted plan，沒有 accepted plan 時在同 phase bounded acceptance clarification；QuickFix 略過獨立 planning phase，但不略過 clear acceptance；依本 repo focused L0 驗證，可按 assigned brief 如實交 local candidate、commit 或 authorized PR。Conductor completion 不是 independent review、task completion 或 merge；pipeline／worker／reviewer 都無 merge authority |
 | `pr-review-loop` | 只有 author self-check/fix；不是 independent verdict 或 merge loop |
 | 小型或一條 cohesive writer chain | 原 session 普通實作，不為儀式建 rail／fleet |
 | 兩個以上真正可並行 writers | 一個 controller 才啟用 `coord-orchestrate` formation；只有實際 artifact dependency 等待 |
