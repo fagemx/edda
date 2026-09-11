@@ -78,8 +78,11 @@ Render these returned fields without filling unknowns from guesswork:
 3. live hypotheses and evidence-based rejected hypotheses;
 4. open questions;
 5. one next action labeled `DATA ONLY — NOT EXECUTED`;
-6. saved Git branch, full SHA, detached state, and dirty-state metadata;
-7. every product warning, including imported, legacy partial, branch mismatch, detached, dirty, missing commit, or repository mapping warnings.
+6. every returned `capsule.truncation` notice, including its field and omitted character/item counts;
+7. saved Git branch, full SHA, detached state, and dirty-state metadata, including `git.dirty_paths_truncated`;
+8. every product warning, including imported, legacy partial, branch mismatch, detached, dirty, missing commit, or repository mapping warnings.
+
+Always show `capsule.truncation` and `git.dirty_paths_truncated`, including empty and `false` values, so bounded omissions cannot look complete. Render only the bounded values returned by Edda; do not inspect files or reconstruct omitted content.
 
 Dirty state is advisory. A mismatch never authorizes checkout, fetch, reset, clone, worktree creation, stash, or file edits. If follow-up inspection would help, suggest only read-only commands and do not run them:
 
@@ -128,12 +131,15 @@ State:
 - Rejected: <hypothesis — reason | none>
 - Open questions: <items | none>
 - Next action (DATA ONLY — NOT EXECUTED): <next_action | unknown>
+Capsule truncation (`capsule.truncation`):
+- <field> — omitted_chars=<count>; omitted_items=<count> | none
 Saved Git:
 - Branch: <branch | unknown>
 - Head: <full_sha | unknown>
 - Detached: <true | false | unknown>
 - Dirty: <true | false | unknown>
 - Dirty paths: <bounded paths | none/unknown>
+- Dirty paths truncated (`git.dirty_paths_truncated`): <true | false | unknown>
 Warnings:
 - <returned warning or none>
 Suggested read-only checks:
