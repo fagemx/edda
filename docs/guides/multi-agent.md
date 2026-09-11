@@ -191,7 +191,10 @@ One boundary worth stating: a worker's `--receipt` is **execution evidence**
 — proof of what was done and how it was verified. It is not acceptance. The
 formation (controller and verifier included) produces delivery candidates
 and evidence; sign-off belongs to whoever holds merge authority outside it,
-unless that authority was explicitly delegated.
+unless that authority was explicitly delegated. A repository standing merge
+rule is explicit delegation: when it grants the controller authority, the
+controller integrates immediately after final current-head LGTM and every rule
+condition holds, without another operator prompt.
 
 ## Monitoring
 

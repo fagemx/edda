@@ -206,7 +206,9 @@ Checks:
 Auto-fixes applied: <count> commits
 Final review posted.
 
-Ready for review; merge follows the recorded rule gate once LGTM lands.
+Ready for review; this skill returns control to its caller. A calling controller
+continues through the repository's existing R6 when current-head LGTM and the
+recorded gate already hold, without another operator prompt.
 ```
 
 ---
@@ -214,8 +216,9 @@ Ready for review; merge follows the recorded rule gate once LGTM lands.
 ## Important Notes
 
 1. **No Auto-Merge**: This skill checks and fixes CI failures — it does not
-   merge the PR. Merge follows the recorded rule gate (`docs/fleet/rules.md`
-   R6): current-head LGTM, `CI Gate` green, empty SHA window, P0=P1=0.
+   merge the PR. It returns control to its caller; a calling controller continues
+   through the recorded rule gate (`docs/fleet/rules.md` R6) when current-head
+   LGTM, `CI Gate` green, empty SHA window, and P0=P1=0 already hold.
 
 2. **Review Triggers**:
    - Initial review: If no existing review comment found

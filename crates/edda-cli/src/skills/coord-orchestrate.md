@@ -34,7 +34,11 @@ is reactive.
 The whole formation — you included — produces delivery candidates and
 **execution evidence**, not acceptance. A worker's `edda task done --receipt`
 proves what was done and how it was verified; sign-off belongs to whoever
-holds merge authority outside the formation, unless explicitly delegated.
+holds merge authority outside the formation, unless explicitly delegated. A
+repository standing merge rule is explicit delegation: when it grants the
+controller authority, the controller integrates immediately after final
+current-head LGTM and every rule condition holds, without another operator
+prompt.
 
 ## How to launch networked roles
 
@@ -153,10 +157,12 @@ Request: audit the whole scoped surface; publish no self-verdict from the implem
    `Changes Requested` requires the implementer's point-by-point `Review
    Response: Round N` for blocking findings, a new frozen SHA, and another
    review round. Publish final current-head LGTM with P0=0, P1=0 and exact
-   required gates → the merge authority integrates. For local-only delivery,
-   record the same round/response/verdict fields in the strongest durable local
-   carrier; do not invent a PR. Internal reports do not replace the durable
-   visible loop.
+   required gates → when a repository standing merge rule grants the controller
+   authority, you integrate immediately after every rule condition holds,
+   without another operator prompt; otherwise hand off to the actual merge
+   authority. For local-only delivery, record the same round/response/verdict
+   fields in the strongest durable local carrier; do not invent a PR. Internal
+   reports do not replace the durable visible loop.
 
 ## Traffic rules (messages WILL cross)
 
