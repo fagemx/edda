@@ -24,7 +24,8 @@
 | task 與 dispatch 非自動綁定 | cmd_dispatch::run_inner 僅 ACP 接受 task-id；legacy 讀 prompt-file | controller prestart；transport-specific carrier；worker normal settlement | A1 |
 | ACP task 新建後不能直接派 | cmd_dispatch_acp::preflight 要 Running、matching agent_kind、concrete roots；brief 只先注入 4096 bytes | 派前綁定可達 short entry/full card 與實際 policy；不借 legacy route 繞過 refusal | A1 |
 | 誤把無 retry 命令當無重試 | task_actions::start_task 接受 Failed；cmd_task 有 fail/start attempt=2 test | 相同 contract 同 ID start retry；changed assignment 新 key/map，不造 retry API | A1 |
-| dedup key 不等於 task update | task_actions::new_task 找到 key 就回傳舊紀錄 | 重啟 readback；替代工作明確 remap pending successors，不 fake done | A1 |
+| dedup key 不等於 task update | task_actions::new_task 找到 key 就回傳舊紀錄 | exact active decision + plan revision；fresh controller ask/list/show 恢復，替代工作 remap successors | A1 |
+| manual rail 與 reconcile 會競爭 | reconcile::plan_actions 選所有 eligible Ready/Failed/unleased Running，不過濾 plan；manual start 無 lease | task creation 前選唯一 rail owner；unknown/active opposite mode refuse；不宣稱機械互斥 | A1 |
 | 本機 plan／新 source 不等於安裝採用 | cmd_init::scaffold_skills 預設 skip existing；force 覆蓋全部五個 skills | 分開 local/published/adopted；owner selective update；不新增自動版本 gate | A1 |
 
 ## 2. Evidence snapshots
@@ -79,7 +80,8 @@ B2 不能假設 continuity 的不同 event 不需要 SDK 整合：必須獨立�
 | Timeout / funded call allowance | C1 啟動前 controller 綁定 | 不開 paid run；完成 offline preparation |
 | Native reviewer session still exists | A2／每次續審 | 明確 replacement，讀 prior facts，不能偽造 resume |
 | Selected entry/installed copy and binary identity | A1 caller/adoption；controller existing note | old/custom/unknown 可見，不推斷 main/全 host 已更新 |
-| Actual task mapping/reachable brief and dispatch carrier | controller 派工前，WORKFLOW §3/4 | 只停無法辨識的 launch；不猜 ID、跨機絕對路徑或 backend 支援 |
+| Actual task mapping/reachable brief and dispatch carrier | controller 派工前，WORKFLOW §3/4 | `delivery.active.<plan>` exact ask + plan_id task readback；不猜 ID/path/backend |
+| Rail owner and reconcile absence/ownership | task creation 前，operator/controller | opposite mode active/unknown 時不在該 rail 建立或啟動工作；其他交付不凍結 |
 
 ## 6. Decision status
 

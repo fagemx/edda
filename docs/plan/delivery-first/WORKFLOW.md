@@ -62,11 +62,75 @@ still reach the correct route, but unrelated procedure redesign is not this chan
 
 ## 3. Materialize executable work, not a batch of speculative tickets
 
-Controller owns the active plan-to-task mapping; it is one note/brief reference in existing
-carriers, not a new schema. Record card IDs -> actual rail IDs, active revision, actual
-plan/source full SHAs, owner, next action, result pointers and known exceptions. Reuse this
-on restart. Optional workflow marker + content digest identifies guidance read; unknown
-origin stays unknown, and a digest is identity, not authority or a launch requirement.
+### Choose one rail owner before creating tasks
+
+Current `edda reconcile` plans every eligible Ready/Failed or unleased Running task; it does
+not filter the active plan revision below. Manual `task start` writes no reconcile lease.
+Therefore automatic reconcile and a manual controller **cannot safely co-own one rail**.
+This is a current product limitation, not solved by worktree isolation or prose active maps.
+
+| Rail mode | Owner and permitted tasks | Refusal boundary |
+|---|---|---|
+| manual | one named controller creates/selects/starts/dispatches; worker settles; supports legacy/ACP/host routes | no scheduler/reconcile may select this rail; unknown ownership refuses task creation/launch |
+| reconcile | existing reconciler lease/runner exclusively starts, retries and settles tasks prepared for its Codex route | no manual start/dispatch/revision filtering; do not enqueue Pi/ACP/host or per-card no-retry work |
+
+Before manual task creation, the operator/controller establishes that the Edda scheduled
+reconciler is absent/disabled and no one-off reconciler or reconcile-owned attempt is live.
+On Windows, switching from installed scheduler uses the existing exact scheduler lifecycle
+(`edda reconcile --uninstall-scheduler`) only with operator authorization; its successful
+post-delete query is one input, not proof an already running process ended. Also inspect
+process/dispatch/task evidence and wait or resolve prior reconcile attempts. If absence or
+exclusive ownership cannot be established, do not create Ready manual tasks on that rail;
+return the local conflict. A durable exact-key decision records the selected caller mode before task creation:
+
+```bash
+edda decide "delivery.rail-owner.$PLAN_KEY=manual:$CONTROLLER_SESSION" \
+  --session "$CONTROLLER_SESSION" \
+  --reason "operator-authorized mode; scheduler/process/attempt evidence=<locations>"
+edda ask "delivery.rail-owner.$PLAN_KEY" --json
+```
+
+Use `reconcile` as the value only when that runner truly owns this plan; cite the actual
+operator authorization when one exists. The record is coordination evidence, not mechanical
+exclusion or authenticated authority. Unauthorized later reconcile invocation remains an
+exposed product limitation; do not claim exactly-once.
+
+Reconcile mode instead uses its actual configuration/lease lifecycle, including its global
+max-attempt behavior. It is not a fallback for cards whose backend, permission, budget or
+retry contract differs. C1 requires manual mode because it binds Pi and author no-retry.
+Changing modes requires operator authorization, scheduler/process/lease reconciliation and
+no unresolved task side effects. A1 adds guidance/refusal fixtures, not scheduler code.
+
+### Deterministic active map on existing carriers
+
+For manual mode, use one exact-key active decision plus task `plan_id`; do not use an
+unsearchable note. Let `PLAN_KEY` be a stable lowercase dotted slug, `PLAN_REV` a monotonic
+zero-padded revision (`r0001`), and `PLAN_ID="$PLAN_KEY/$PLAN_REV/$PLAN_SHA"`. Every task in
+that revision uses this exact plan ID and key `$PLAN_ID/$CARD_ID`. After creating/readback
+of the complete intended map, the named controller records:
+
+```bash
+edda decide "delivery.active.$PLAN_KEY=$PLAN_ID" --session "$CONTROLLER_SESSION" \
+  --reason "card-to-task: A1=#<id>, A3=#<id>; rail-owner=manual:<session>; replaces=<prior-or-none>"
+edda ask "delivery.active.$PLAN_KEY" --json
+edda task list --json
+```
+
+A repeated same decision key supersedes the prior active value in existing decision history.
+It is operational provenance, not ratified product acceptance, merge authority or a source
+of scope. A fresh controller starts with exact-key `edda ask`, requires one active value,
+filters task-list JSON by exact `plan_id`, reads every selected ID with task show, and checks
+card/source SHA, dependencies, owner/scope/brief and observed artifacts before launch. It
+must work from no prior chat. Missing/malformed/conflicting map means read-only recovery and
+operator/controller adjudication; only this plan's dispatch stops.
+
+A changed brief/owner/dependency gets the next revision. Recreate only needed pending tasks
+and successors, verify them, then supersede the active decision. Old task records remain
+history and are never selected by manual routes. Because reconcile ignores this map, do not
+use revision replacement while reconcile mode can select old Ready/Failed tasks: first let
+that owner reach a terminal safe boundary or perform an authorized switch to manual mode.
+Optional workflow marker + content digest identifies guidance read; unknown origin stays
+unknown, and digest is identity, not authority or a launch requirement.
 
 Before first delegated execution, bind source/worktree, exact write scope, acceptance,
 exclusions, receiver role, verification budget and build lane only if compiling. Place
@@ -79,14 +143,20 @@ invent an internal task edge. Split them when A1 candidate itself is the agreed 
 Create future tasks when their brief is concrete, not merely because a box exists in DAG.
 
 ```bash
-# Illustrative existing CLI; controller resolves variables and repeats --path as needed.
-# Run in the selected worktree/ledger; do not execute this example during plan editing.
-edda task new "$TITLE" --assignee "$OWNER" --plan "$PLAN_KEY" \
-  --brief "$BRIEF_REL" --path "$WRITE_SCOPE" --key "$EXECUTION_KEY"
+# MANUAL MODE only. Controller resolves variables and repeats --path as needed.
+# Legacy/host task: no ACP agent_kind claim.
+edda task new "$TITLE" --assignee "$OWNER" --plan "$PLAN_ID" \
+  --brief "$BRIEF_REL" --path "$WRITE_SCOPE" --key "$PLAN_ID/$CARD_ID"
+# Alternative ACP task is created separately, before start, with matching kind and
+# repository-relative CONCRETE existing roots (no glob). It is not the task above.
+edda task new "$ACP_TITLE" --assignee "$ACP_OWNER" --agent "$ACP_TARGET" \
+  --plan "$PLAN_ID" --brief "$ACP_BRIEF_REL" --path "$ACP_CONCRETE_ROOT" \
+  --key "$PLAN_ID/$ACP_CARD_ID"
 edda task show "$TASK_ID" --json
 # Separate successor only when its required predecessor has an actual task ID:
-edda task new "$NEXT_TITLE" --assignee "$OWNER" --plan "$PLAN_KEY" \
-  --brief "$NEXT_BRIEF_REL" --path "$NEXT_SCOPE" --after "$TASK_ID" --key "$NEXT_KEY"
+edda task new "$NEXT_TITLE" --assignee "$OWNER" --plan "$PLAN_ID" \
+  --brief "$NEXT_BRIEF_REL" --path "$NEXT_SCOPE" --after "$TASK_ID" \
+  --key "$PLAN_ID/$NEXT_CARD_ID"
 ```
 
 Capture returned ID and read it back. A stable key deduplicates creation ONLY: `new_task`
@@ -96,10 +166,12 @@ not a hidden edit behind a reused brief path. Do not parse human stderr into sta
 
 ## 4. Dispatch adapter: same responsibilities, different flags
 
-For delegated work, **controller starts the task immediately before launch**, after local
-input/capability/ownership checks. Worker reads it and does NOT start it again. This common
-convention works with ACP, whose preflight requires running. No auto-launch is performed
-by task new/start; no task completion is implied by dispatch `outcome=done`.
+In **manual rail mode**, controller starts immediately before launch, after map, input,
+capability, ownership and no-reconciler checks. Worker reads it and does NOT start it again.
+This convention works with ACP, whose preflight requires Running. In reconcile rail mode,
+only the reconciler owns start/launch/retry/settlement; none of the manual commands below
+apply. No auto-launch is performed by manual task new/start, and dispatch `outcome=done`
+does not imply task completion.
 
 | Backend | Carrier and prerequisites | Continuity | Not interchangeable |
 |---|---|---|---|
@@ -123,12 +195,13 @@ If they do not, choose a suitable authorized route before launch; no runtime fal
 may circumvent a denied permission or controlled ACP acceptance boundary.
 
 ```bash
-# Controller; inputs/capabilities checked first. Run in the SAME task ledger as worker.
-edda task start "$TASK_ID"
+# Manual controller; mode/map/inputs/capabilities checked first. Same task ledger as worker.
+edda task start "$LEGACY_TASK_ID"
 edda dispatch --agent pi --prompt-file "$PROMPT_FILE" --cwd "$WORKTREE" \
   --model "$PI_MODEL" --timeout-sec "$TIMEOUT_SEC" --json
-# Alternative ACP route (not a second launch of the task above):
-# edda dispatch --agent "$ACP_TARGET" --task-id "$TASK_ID" --cwd "$WORKTREE" --json
+# Alternative ACP route uses the separately created ACP_TASK_ID, not LEGACY_TASK_ID:
+# edda task start "$ACP_TASK_ID"
+# edda dispatch --agent "$ACP_TARGET" --task-id "$ACP_TASK_ID" --cwd "$WORKTREE" --json
 ```
 
 Use only installed help/source-proven options. Pin binary version/source separately from
@@ -140,10 +213,12 @@ must never be a way to evade an existing claim requirement.
 
 ## 5. Completion, restart and retry
 
-Worker owns normal done/fail with evidence. Controller records observed pre-launch failure
-or recovers a dead worker's terminal result only after reconciling actual source/process
-and task attempt. Do not have both writers race to settle a live task. CLI identity labels
-are not authenticated authority; this is caller discipline, not a new runtime guarantee.
+This section describes manual rail mode. Worker owns normal done/fail with evidence.
+Controller records observed pre-launch failure or recovers a dead worker's terminal result
+only after reconciling actual source/process/task attempt. Reconcile rail mode uses the
+existing lease/runner lifecycle instead—never mix rows from the two modes. Do not have
+both writers race to settle a live task. CLI identity labels/active decision are not
+authenticated authority; this is caller discipline, not a new runtime guarantee.
 
 | Observation | Action by controller / worker | Effect on others |
 |---|---|---|
@@ -153,7 +228,7 @@ are not authenticated authority; this is caller discipline, not a new runtime gu
 | definite stopped failure | worker fail, or controller fail after observing stopped/prelaunch failure | unrelated tasks proceed |
 | failed, same assignment/brief/scope, retry within existing authorization/budget | controller `task start` SAME ID: next attempt; reuse actual session only when valid | original successor edges remain correct |
 | running but silent, expired-looking lease or missing handle | inspect process, handle, task history, source and external effects; don't fail/relaunch on time alone | local unknown, not global freeze |
-| controller died after start but before confirmed spawn | reconcile first; only a proven non-running attempt may be failed/restarted | no exactly-once assertion |
+| controller died after start but before confirmed spawn | reconcile evidence first (do not invoke `edda reconcile`); only proven stopped attempt may be failed/restarted | no exactly-once assertion |
 | dispatch done but task still running/no adequate receipt | inspect artifacts; request/recover truthful receipt; not acceptance or merge permission | do not falsely unblock consumers |
 | done then metadata-only receipt correction | existing task done supports correction; do not treat as another execution | no new launch |
 | done then substantive fix needed | new linked fix task; old execution receipt remains history | dependent candidate must requalify |
@@ -163,13 +238,13 @@ through `start_task` accepting Failed. See `task_actions.rs::start_task` and
 `cmd_task.rs::fail_running_task_records_reason_and_start_retries`. Done cannot be restarted.
 
 Changed brief, assignee or dependency graph: stop/reconcile the old live attempt first,
-record replacement in the controller's active mapping, create a new key/task, and recreate
-only still-needed successors with the new predecessor IDs. No `task cancel`/dependency-edit
-CLI is claimed. Superseded ready/blocked tasks stay historical; controller excludes their
-IDs from selection, not falsifies done to unlock them. Other consumers must read that same
-active mapping; no competing auto-picker is authorized for this bundle. Do not add
-`--after <failed old task>` to its replacement. This is a recorded scheduling decision,
-not a new ledger status or authority token. Unknown side effects prevent only that retry.
+create/readback the next `PLAN_REV`, remap still-needed successors to new predecessor IDs,
+then supersede `delivery.active.$PLAN_KEY`. No task cancel/dependency-edit CLI is claimed.
+Old Ready/Blocked tasks stay historical; every manual entry reads the exact active decision
+and excludes old IDs, never falsifies done. If a competing reconciler/auto-picker can still
+select them, replacement is refused until authorized rail-mode switch/terminal cleanup.
+Do not add `--after <failed old task>` to its replacement. Unknown side effects prevent
+only that retry; active-map ambiguity prevents launch, not read-only recovery.
 
 A1 does not automatically retry or escalate model/cost. Existing authorization and bounded
 retry allowance control that choice; C1 specifically allows no correction/retry call.

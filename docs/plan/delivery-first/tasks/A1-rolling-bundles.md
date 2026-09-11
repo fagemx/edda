@@ -50,27 +50,37 @@ job/hook, new skill name, global installation or peer program edits. Do not forc
    issue-specific investigation and option meanings, especially --no-merge/--skip-plan.
    Delete their independent all-agent phase waits/fresh-fixer/merge loops, not just add a
    pointer beside contradictory instructions. Inbound affected callers still resolve.
-4. Implement WORKFLOW's caller protocol in guidance, not new code: active card-to-task map,
-   reachable brief, stable dedup key/readback, controller prestart, backend-specific launch,
-   worker receipt, restart reconciliation, failed-task same-ID start retry. Changed scope/
-   owner gets an explicit replacement mapping and remapped pending successors; no fake done.
-5. Keep same chain with one owner; review-ready candidate proceeds without unrelated work.
+4. Implement WORKFLOW's caller protocol in guidance, not new code. First select ONE rail
+   owner: manual named controller or existing reconciler. Manual mode refuses task creation/
+   launch unless scheduled/one-off reconcile and prior reconcile attempts are proven absent;
+   reconcile mode owns its actual Codex/retry lifecycle and receives no manual/per-card-
+   no-retry tasks. Add rail collision and mode-switch refusal cases to fixtures.
+5. For manual mode, use exact-key `delivery.active.<plan>` decision + exact plan_id revision
+   as the discoverable map. Fresh controller recovers via `edda ask` and task JSON without
+   chat. Add reachable brief, dedup key/readback, prestart, backend launch, worker receipt,
+   and same-ID Failed retry. Changed scope/owner gets next revision and remapped pending
+   successors before decision supersession; never fake done. Reconcile mode may not rely
+   on this map because its current planner does not filter it.
+6. Task creation is backend-aware. ACP creation includes matching `--agent acp:<target>` and
+   concrete existing scope roots before start; legacy/host task is separate. Fixture covers
+   task-new -> readback -> start -> ACP preflight and rejects reuse of a legacy task.
+7. Keep same chain with one owner; review-ready candidate proceeds without unrelated work.
    Existing source/claim permissions remain. Worktree isolation is not conflict immunity.
-6. Replace direct gh merge path with canonical product path under existing controller R6.
+8. Replace direct gh merge path with canonical product path under existing controller R6.
    Independent verdict and current-head rules remain; task done means stated output, not
    obligatory PR/merge. No extra author checks or per-transition board ceremonies are added.
-7. Remove imperative full-local-freeze and docs-only build-lane instructions in the listed
+9. Remove imperative full-local-freeze and docs-only build-lane instructions in the listed
    sources/entry summaries. Point to canonical ladder: author focused L0, L1 exact-head CI,
    verifier only uncovered focused checks including applicable Windows C5. No full local
    workspace run solely because a SHA froze.
-8. Specify existing init adoption, not magical update: fresh detected hosts get template;
-   existing custom files remain. Owner updates selected copy explicitly; never automatically
-   --force-skills all five. Marker/hash identifies what was read, not a new admission gate.
-9. Add V1/V6 fixtures with positive/negative cases. Static checks inspect active procedural
-   sections, allow quoted historical bad examples, catch duplicate active loops. Existing
-   init tests prove actual projection bytes and preserved custom files. Isolated real task
-   CLI fixtures prove start/fail/start increments attempts, key dedup does not update fields,
-   and only real dependency completion unlocks successors. No actual model/network launch.
+10. Specify existing init adoption, not magical update: fresh detected hosts get template;
+    existing custom files remain. Owner updates selected copy explicitly; never automatically
+    --force-skills all five. Marker/hash identifies what was read, not a new admission gate.
+11. Add V1/V6 fixtures with positive/negative cases. Static checks inspect active procedural
+    sections, allow quoted historical bad examples, catch duplicate active loops. Existing
+    init tests prove actual projection bytes and preserved custom files. Isolated task
+    fixtures prove deterministic active-map recovery, manual/reconcile refusal, same-ID
+    retries, ACP creation/preflight and dependency unlock. No actual model/network launch.
 
 ## Acceptance / commands
 
@@ -84,7 +94,8 @@ git diff --check
 New test is implemented here; not available before A1. V6 fixtures may use an explicitly
 bound freshly built `EDDA_BIN` and temporary isolated ledger/stores; never main task rail.
 Check every supported entry reaches equivalent next-action semantics; fake transports
-validate chosen arguments/lifecycle ownership, not claim a real backend was exercised.
+validate arguments/lifecycle, not a real backend. Validate rail-mode conflict refusal from
+actual reconcile planning behavior; do not claim prose gives mechanical mutual exclusion.
 
 Run focused `cargo test -p edda` and `cargo clippy -p edda --all-targets -- -D warnings`
 in the assigned lane: embedded content is a product blob and init tests compile. Follow

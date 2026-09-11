@@ -191,8 +191,10 @@ V6 is A1 change validation, not a required job or a per-task launch certificatio
 | A ready, B slow, C depends A | A can review, C waits only for its artifact, not B | V1 trace reused |
 | Thin pointer plus old active phase/fresh-fixer/merge loop | fixture FAILS; merely adding links is insufficient | mutated negative fixture |
 | Edda canonical and tracked project coord | identical repository blob content, local policy referenced not lost | source parity/inventory audit |
-| Changed owner/brief, pending old successors | replacement active mapping and new needed successor edges; no fake done/no after-failed-old | recovery trace |
-| Unmapped/superseded ready task | no dispatch by this controller; only active map candidates selected | selection trace |
+| Manual rail with active/unknown reconcile owner | refuse task creation/launch; no prose claim of safe coexistence | mode-selection negative fixture + source audit |
+| Reconcile rail | reconciler alone owns actual Codex start/retry/settlement; no manual/ACP/Pi/no-retry task enqueued | route fixture + source audit |
+| Changed owner/brief, pending old successors | next plan revision/map decision + new needed successor edges; no fake done/no after-failed-old | fresh-controller recovery trace |
+| Unmapped/superseded ready task | no manual dispatch; if reconcile can select it, replacement/mode switch refuses | selection/refusal trace |
 
 ### Real local substrate cases (no model/network)
 
@@ -201,29 +203,39 @@ Use a fresh A1-built `EDDA_BIN`, temporary repositories and per-child `EDDA_STOR
 Reuse existing focused test receipts where they prove the same fact; add only missing
 coverage to `scripts/test-delivery-guidance.sh` / cmd_init tests. Report actual commands.
 
-1. Real CLI new with a key twice yields same task ID/fields. Reusing key with changed
-   brief/owner does NOT update the record; controller fixture selects a new revision.
+1. In an isolated rail with no reconcile owner, real CLI new with a key twice yields same
+   ID/fields. Reusing key with changed brief/owner does NOT update it. Create/read back a
+   new plan revision, write `delivery.active.<plan>`, discard all prior chat, then a fresh
+   controller recovers exact active IDs with `edda ask <exact-key> --json`, task list/show.
+   Missing/malformed/conflicting map and unknown rail mode refuse launch.
 2. Controller start once; worker fixture reads running. A second start refuses. Fail then
    start same ID increments attempt; done cannot start. Source anchor:
    `cmd_task::fail_running_task_records_reason_and_start_retries`.
 3. Independent B remains ready while A failed; C after A remains blocked. Retrying and
    completing A with a real fixture receipt unlocks C; no process is auto-spawned.
-4. First/normal legacy launch record contains task-linked prompt-file; ACP launch record
-   requires prior running, matching agent_kind, concrete existing roots and relative brief.
-   Fake launcher verifies controller/worker never both start. No legacy --task-id, no Pi
+4. Legacy task creation/launch record contains task-linked prompt-file and no ACP substitution.
+   Separate ACP creation includes `--agent "$ACP_TARGET"`; readback proves agent_kind, then
+   start and real preflight require Running/matching kind/concrete existing roots/relative
+   brief. Omitting --agent or reusing legacy ID refuses before launch. Fake launcher verifies
+   controller/worker never both start. No legacy --task-id, no Pi
    --resume, no ACP substitute flags; do not imply fake transport tested a real model.
 5. ACP short injected entry has reachable full card; truncated/unavailable content is
    disclosed rather than treated as complete acceptance. READ relevant real preflight/
    task_prompt tests and inspect fixture-selected policy roots; no widening for convenience.
-6. Dispatch done plus running task/missing receipt leaves candidate unverified, not merged.
+6. `cmd_reconcile::plan_actions` source/fixture demonstrates it selects all eligible rail
+   tasks rather than active plan ID: manual guidance therefore refuses coexistence. A trace
+   with installed/active/unknown reconciler must never manual-start, retry C1 or dispatch
+   superseded tasks. Reconcile route does not manual start. Authorized switch waits for
+   scheduler post-delete plus no live reconcile process/attempt evidence; unknown refuses.
+7. Dispatch done plus running task/missing receipt leaves candidate unverified, not merged.
    Lost handle/lease-timeout-only fixture never auto-fails or relaunches. Definite stopped
    prelaunch failure is recorded once. Receipt-only correction is not a new attempt.
-7. Actual init in fresh detected .claude and .agents fixtures writes embedded bytes;
+8. Actual init in fresh detected .claude and .agents fixtures writes embedded bytes;
    existing custom skill remains unchanged; no-host fixture receives no skill projection.
    READ/reuse `init_scaffolds_coord_skills`, `init_scaffolds_codex_coord_skills`,
    `init_skips_existing_skills`; extend missing byte-parity assertions. Force-overwrites
    semantics remain covered by existing test, never exercised on user's installation.
-8. Old/custom/missing marker path preserves work and customization, reports actual source;
+9. Old/custom/missing marker path preserves work and customization, reports actual source;
    fixture must not call --force-skills or install a hook. Local-only plan receipt never
    becomes 'published' or 'all hosts adopted' based on a successful file check.
 

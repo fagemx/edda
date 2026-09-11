@@ -86,8 +86,9 @@ C consumes those existing interfaces and reports gaps; it must not grow a new ha
 ## Common execution instructions
 
 1. Read assigned task/card and relevant WORKFLOW route; do not rediscover all tracks.
-   Controller materializes only executable work, binds actual IDs/brief paths/active mapping,
-   and prestarts before launch; worker does not double-start. Use WORKFLOW §3–5 for recovery.
+   Controller first chooses manual OR reconcile rail owner. Manual mode materializes only
+   executable work, binds actual revision/IDs/briefs, then prestarts; worker does not
+   double-start. Reconcile mode uses only its lease/runner lifecycle. Use WORKFLOW §3–5.
 2. Pin actual current base and inspect applicable CI/receipts; inspect active peers/claims.
 3. Writer gets its own branch/worktree and the smallest accurate scope. Respect existing
    ownership; sharing a Git common dir does not isolate integration conflicts.
