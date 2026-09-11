@@ -52,9 +52,10 @@
 #           tail (the last pipeline stage is "grep -<flags>") printed nothing
 #           — grep found no offenders; or its "grep -c" tail printed a count
 #           — a count is data for the reviewer (C2 pairs it with the commit
-#           subjects), never adjudicated here; or, for a rule whose spec
-#           states the inverse signal (U3: "Empty output is the failure"),
-#           it printed at least one line.
+#           subjects), never adjudicated here. U3 has its own narrow shape: a
+#           present exact Issue:/Issues: line passes; a successful body read
+#           without one reports N.A.(non-blocking convention); and a failed
+#           body read is ERROR.
 #   FAIL    the block printed findings — a non-empty enumerator-grep output,
 #           an "exit=<nonzero>" tail line (U5, R3 print their exit), a
 #           "CANDIDATE" line (D1), or a "MISSING" line (D3) — or exited
@@ -243,7 +244,7 @@ ROUTED="$ROUTED "
 # rule table: <id>|<routing class>|<severity> — severities per §5 headings
 RULE_TABLE='U1|any|P0
 U2|any|P1
-U3|any|P1
+U3|any|P2
 U4|any|P1
 U5|any|P1
 U6|any|P0
@@ -333,7 +334,30 @@ run_block() { # <rule> <class> <severity> <blocks-file line> <marker attrs>
   # never reads the issue. Reporting them as FAIL marks every correctly formed
   # PR failed (GH-882 review round 1), so U2 joins D2 as reviewer input.
   rc=0
-  OUT=$(sh "$TMP/block.sh" 2>&1) || rc=$?
+  ERR=
+  # U3 must distinguish the exact line printed on stdout from gh diagnostics
+  # on stderr. Otherwise a successful body read with no line plus a warning
+  # could masquerade as a present line. Its command also deliberately avoids
+  # a gh|awk pipeline so the gh exit status reaches this branch unchanged.
+  if [ "$rule" = "U3" ]; then
+    sh "$TMP/block.sh" > "$TMP/block.stdout" 2> "$TMP/block.stderr" || rc=$?
+    OUT=$(cat "$TMP/block.stdout")
+    ERR=$(cat "$TMP/block.stderr")
+  else
+    OUT=$(sh "$TMP/block.sh" 2>&1) || rc=$?
+  fi
+
+  # Only a successful U3 body read can establish presence or absence. Any
+  # command failure stays ERROR/nonzero; P2 changes the missing convention,
+  # not transport, parse, or tool failures.
+  if [ "$rule" = "U3" ] && [ "$rc" -ne 0 ]; then
+    HAS_ERROR=1
+    if [ -n "$ERR" ]; then ev=$(printf '%s\n' "$ERR" | oneline)
+    elif [ -n "$OUT" ]; then ev=$(printf '%s\n' "$OUT" | oneline)
+    else ev="(no output)"; fi
+    print_row "$rule" "$2" "$3" "ERROR $rc" "$ev"
+    return
+  fi
 
   # A `fatal:` line is the command refusing to run at all — a bad range, a
   # missing ref, a broken repo. Inside a pipeline that text arrives as
@@ -364,6 +388,19 @@ run_block() { # <rule> <class> <severity> <blocks-file line> <marker attrs>
     return
   fi
 
+  # U3 is intentionally narrow: only the absent exact convention is
+  # nonblocking. A present line is the normal observed success, while the
+  # nonzero/error path returned above. Do not generalize this branch to all
+  # P2 rows or suppress another rule's aggregate failure.
+  if [ "$1" = "U3" ]; then
+    if [ -n "$OUT" ]; then
+      print_row "$rule" "$2" "$3" 'PASS' "exit=0; $(printf '%s\n' "$OUT" | oneline)"
+    else
+      print_row "$rule" "$2" "$3" 'N.A.(non-blocking convention)' 'exit=0; no exact Issue:/Issues: line'
+    fi
+    return
+  fi
+
   # Finding signals carried by printed lines (REVIEW.md §0: a piped check
   # signals by its output; U5 and R3 print their exit, D1 prints CANDIDATE,
   # D3 prints MISSING).
@@ -381,24 +418,12 @@ run_block() { # <rule> <class> <severity> <blocks-file line> <marker attrs>
   case "$last_body" in
     *'grep -c'*) countgrep=1 ;;
   esac
-  # Rules whose spec states the inverse signal: empty output is the failure
-  # (U3 — "Empty output is the failure", the missing `Issue: #N` line).
-  inverted=0
-  case "$1" in
-    U3) inverted=1 ;;
-  esac
-
   if [ -n "$badline" ]; then
     HAS_FAIL=1
     print_row "$rule" "$2" "$3" 'FAIL' "exit=$rc; $(printf '%s\n' "$badline" | oneline)"
     return
   fi
   if [ "$rc" -eq 0 ]; then
-    if [ "$inverted" -eq 1 ] && [ -z "$OUT" ]; then
-      HAS_FAIL=1
-      print_row "$rule" "$2" "$3" 'FAIL' 'exit=0; (no output) — empty output is the failure (REVIEW.md U3)'
-      return
-    fi
     if [ "$enumerator" -eq 1 ] && [ -n "$OUT" ]; then
       HAS_FAIL=1
       print_row "$rule" "$2" "$3" 'FAIL' "exit=0; $(printf '%s\n' "$OUT" | oneline)"
