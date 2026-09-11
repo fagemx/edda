@@ -20,7 +20,8 @@ pub enum PrsCmd {
         #[arg(long, default_value = "all")]
         state: String,
     },
-    /// Evaluate merge preconditions for a PR (current-head LGTM, green CI, SHA window)
+    /// Deprecated compatibility: live PRs forward to `edda review merge`;
+    /// --input/direct facts are advisory scalar diagnostics, not R6 evidence
     CheckMerge(merge_gate::CheckMergeArgs),
 }
 

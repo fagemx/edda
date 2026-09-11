@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Legacy merge-check compatibility converges on the product gate** — live `edda prs check-merge` forwards to `edda review merge`, while its retained host-agnostic scalar forms are explicitly deprecated advisory diagnostics and cannot merge (GH-1145)
+
 ## [0.6.1] - 2026-09-10
 
 ### Added

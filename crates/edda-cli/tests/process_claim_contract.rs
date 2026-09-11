@@ -1,12 +1,16 @@
-//! Contract tests for process object claims and merge gate claim protection (GH-581).
+//! Contract tests for process object claims and the deprecated offline
+//! `prs check-merge` advisory compatibility mode (GH-581, GH-1145).
 //!
 //! Verifies:
 //! 1. `edda claim review-pr570 --subject pr:570` records the subject on the board.
 //! 2. `edda claim check pr:570` detects the conflict (exit 1) when session is live.
 //! 3. `edda claim check pr:571` reports clear (exit 0).
-//! 4. `edda prs check-merge` refuses when PR subject is claimed by an active session (exit 1).
-//! 5. `edda prs check-merge --force` overrides the active claim and proceeds with a Claim Notice.
-//! 6. Stale session claims or unrelated subjects do not block merge gate.
+//! 4. `edda prs check-merge --input` refuses an active PR claim (exit 1).
+//! 5. Its offline `--force` overrides the claim and prints a Claim Notice.
+//! 6. Stale claims and unrelated subjects do not block the advisory report.
+//!
+//! Live PR forwarding deliberately has no claim gate; its process-boundary
+//! coverage lives in `prs_check_merge_compat.rs`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -188,7 +192,7 @@ fn claim_check_on_stale_session_subject_reports_clear() {
 
 #[test]
 #[allow(clippy::too_many_lines)] // 193 lines at #779; split tracked in none
-fn check_merge_refuses_claimed_pr_unless_force() {
+fn offline_check_merge_refuses_claimed_pr_unless_force() {
     let env = TestEnv::new();
     env.write_heartbeat("active-reviewer", 0); // live session
     let (code, _, _) = env.run_edda(&[
@@ -201,8 +205,8 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     ]);
     assert_eq!(code, 0);
 
-    // Prepare a valid MergeGateInput json file WITHOUT claimed_by.
-    // The gate will resolve the claim live from the coordination board for PR 570.
+    // Prepare a valid advisory MergeGateInput JSON file WITHOUT claimed_by.
+    // Offline compatibility resolves the claim from the board for PR 570.
     let input_json = serde_json::json!({
         "head_sha": "1234567890abcdef1234567890abcdef12345678",
         "pr": 570,
@@ -218,7 +222,7 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     let input_path = env.repo.join("input.json");
     std::fs::write(&input_path, input_json.to_string()).expect("write input.json");
 
-    // Case 1: Same session holding claim is allowed to merge (exit 0)
+    // Case 1: Same session holding claim gets a passing advisory report (exit 0)
     let (code_same, stdout_same, _) = env.run_edda_with_env(
         &[
             "prs",
@@ -234,9 +238,10 @@ fn check_merge_refuses_claimed_pr_unless_force() {
         "same session holding claim should pass: stdout={stdout_same}"
     );
     assert!(stdout_same.contains("PASS: Merge preconditions satisfied"));
+    assert!(stdout_same.contains("Deprecated advisory scalar diagnostics only"));
 
-    // Case 2: Other session trying to merge without --force -> REFUSED (exit 1)
-    // Board claim is detected directly by check-merge
+    // Case 2: Another session requesting the report without --force is refused.
+    // Board claim lookup remains only on the offline compatibility path.
     let (code_refused, _stdout_refused, stderr_refused) = env.run_edda_with_env(
         &[
             "prs",
@@ -254,7 +259,7 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     assert!(stderr_refused.contains("REFUSED"));
     assert!(stderr_refused.contains("PR is claimed by active session 'active-reviewer (label: 'review-pr570', subject: 'pr:570')' — use --force to override"));
 
-    // Case 3: Override with --force -> PASS with Claim Notice (exit 0)
+    // Case 3: Offline --force produces PASS with a Claim Notice (exit 0)
     let (code_force, stdout_force, stderr_force) = env.run_edda_with_env(
         &[
             "prs",
@@ -271,6 +276,7 @@ fn check_merge_refuses_claimed_pr_unless_force() {
         "force should allow merge: stderr={stderr_force} stdout={stdout_force}"
     );
     assert!(stdout_force.contains("PASS: Merge preconditions satisfied"));
+    assert!(stdout_force.contains("Deprecated advisory scalar diagnostics only"));
     assert!(stdout_force.contains("Claim Notice: Overriding process claim held by 'active-reviewer (label: 'review-pr570', subject: 'pr:570')' (--force specified)"));
 
     // Case 4: Another PR (571) is not claimed -> PASS without Claim Notice (exit 0)

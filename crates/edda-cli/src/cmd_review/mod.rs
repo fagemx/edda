@@ -119,6 +119,24 @@ pub fn run_cmd(cmd: ReviewCmd, cwd: &Path) -> Result<()> {
     }
 }
 
+/// Narrow compatibility seam for the deprecated live
+/// `edda prs check-merge <PR>` spelling.
+///
+/// Keep argument construction beside the product command so the compatibility
+/// route cannot acquire its own live verdict, CI, output, exit, or merge logic.
+pub(crate) fn run_merge_compat(pr: u64, execute: bool, json: bool, cwd: &Path) -> Result<()> {
+    merge::run(
+        MergeArgs {
+            pr,
+            merge: execute,
+            check: false,
+            body_file: None,
+            json,
+        },
+        cwd,
+    )
+}
+
 pub fn run(args: ReviewArgs, cwd: &Path) -> Result<()> {
     let result = run_inner(&args, cwd);
     match result {
