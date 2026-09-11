@@ -3,8 +3,9 @@
 //!
 //! `scripts/merge-reviewed-pr.sh` — now a one-line adapter over this verb —
 //! decided whether a PR may merge entirely in shell: the fleet-wide drift
-//! gate (GH-993), the trusted-review checks, the union rule (GH-769,
-//! GH-742), the malformed-comment refusal (#917), and required checks.
+//! gate (GH-993, advisory since #1124), the trusted-review checks, the union
+//! rule (GH-769, GH-742), the malformed-comment refusal (#917), and required
+//! checks.
 //! That is control flow, parsing, and a trust boundary — three for three
 //! against `mechanism.shell-role=one-line-adapter-only`. Every rule moves
 //! here, unit-tested in Rust rather than by fixture shell, and the merge
@@ -20,6 +21,15 @@
 //!   `review:*` label and the `Independent Review` status are `edda review
 //!   deliver`'s to write, which the reviewing session runs when it
 //!   delivers its own round.
+//! - **Cross-PR drift is advisory (#1124).** The walk still runs and every
+//!   line it produced still prints, and it refuses nothing: coupling one
+//!   merge to the whole open set made every PR hostage to unrelated ones, and
+//!   drift across the open set is not among R6's conditions. The subject PR's
+//!   own hold is enforced from the subject's own reads — mergeability in
+//!   stage 2 (R24 forbids reporting a `CONFLICTING` PR ready, and `--check`
+//!   is that report), an orphan Review Response after stage 3, the verdict's
+//!   pinning in stage 4 — so a walk that cannot read cannot hide any of them
+//!   (GH-1132 Round 2).
 //! - **#1100 is folded in.** The squash subject is always the PR title —
 //!   never the branch commit's own subject on a single-commit PR — and it
 //!   is validated against the commit convention before any merge executes,
@@ -81,8 +91,10 @@ pub(crate) trait Reads {
     fn pr(&self, pr: u64) -> Result<Pr>;
     /// The REST issue comments, newest-last, each with its `updated_at`.
     fn comments(&self, pr: u64) -> Result<Vec<TimedComment>>;
-    /// The fleet-wide drift walk (`edda review drift`'s own query).
-    fn drift(&self) -> Result<(Vec<String>, bool)>;
+    /// The fleet-wide drift walk (`edda review drift`'s own query). Stage 1
+    /// prints every line of it and refuses on none of it (#1124): the subject
+    /// PR's own hold is read from the subject, further down the stages.
+    fn drift(&self) -> Result<drift::Report>;
     /// Do the ruleset's required checks pass? (`gh pr checks --required`)
     fn checks_green(&self, pr: u64) -> Result<bool>;
     /// The `CI Gate` check-run URL for the receipt body, if resolvable.
@@ -95,6 +107,11 @@ pub(crate) struct Pr {
     pub head: String,
     pub state: String,
     pub title: String,
+    /// GitHub's mergeability answer (`MERGEABLE`, `CONFLICTING`, or the
+    /// not-yet-computed `UNKNOWN`). Read on the subject so R24's
+    /// "must not be CONFLICTING when reported ready" holds independently of
+    /// the fleet-wide drift walk (#1124 Round 2).
+    pub mergeable: String,
 }
 
 /// A REST issue comment plus the `updated_at` timestamp the
@@ -168,6 +185,29 @@ pub(crate) fn merge_subject(title: &str, pr: u64) -> String {
     }
 }
 
+/// Is this comment a SHADOW round by the gate's own marker — the heading
+/// suffix (`REVIEW.md` §8: "the suffix is the only marker, this field never
+/// substitutes for it")?
+///
+/// A calibration round is not a verdict, so it is never the review that
+/// decides a merge: it cannot approve one, and — pinned to an older SHA — it
+/// cannot refuse one either (#1124 Round 8). The marker is read off the FIRST
+/// heading-shaped line, the same line [`latest_review_round`] parses. A body
+/// whose heading does not PARSE is not a SHADOW round and stays a candidate:
+/// it has to block the gate rather than disappear from it (#917).
+fn is_shadow_round(body: &str) -> bool {
+    let lines: Vec<&str> = body
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    lines
+        .iter()
+        .copied()
+        .find(|line| heading_shaped(line))
+        .and_then(heading_parts)
+        .is_some_and(|(_, _, shadow)| shadow)
+}
+
 /// Is this the §7 `- escalations: none` line the merge gate requires?
 fn escalations_none(line: &str) -> bool {
     line.trim_end() == "- escalations: none"
@@ -189,11 +229,80 @@ fn receipt_body(pr: u64, head: &str, round: &str, ci: Option<&str>) -> String {
         "Squash merge of PR #{pr}, reviewed at {head}.\n\n\
          - verdict: LGTM (P0=0, P1=0), Round {round} (§7 comment, trusted author)\n\
          - union: pass over every §7 verdict pinned to this SHA (GH-769)\n\
-         - drift: clean across the open PR set (GH-993)\n\
+         - drift: advisory, not an R6 condition — the subject PR's own gate decides (#1124)\n\
          - required checks: green\n\
          - CI Gate: {}\n",
         ci.unwrap_or("run id not resolved"),
     )
+}
+
+/// R24's mergeability condition on the subject (GH-1124 Rounds 2-3): a
+/// `CONFLICTING` PR must not be reported ready — `--check` is that report —
+/// and an unreadable answer is never a green one. The match is exhaustive
+/// over the three values GitHub returns; everything else, including a missing
+/// or non-string field (both parse as an empty string), is exit 2. `UNKNOWN`,
+/// returned before GitHub has computed mergeability, is not a hold, matching
+/// the walk's own rule. Read on the subject, so a fleet walk that cannot read
+/// cannot hide it. `Err(exit_code)` after printing the refusal.
+fn mergeability_refusal(pr: u64, mergeable: &str) -> Result<(), i32> {
+    match mergeable {
+        "MERGEABLE" | "UNKNOWN" => Ok(()),
+        "CONFLICTING" => {
+            eprintln!(
+                "PR #{pr} is CONFLICTING — R24 requires mergeable != CONFLICTING before a PR \
+                 is reported ready; refusing (#1124)"
+            );
+            Err(1)
+        }
+        other => {
+            eprintln!(
+                "cannot read PR #{pr}'s mergeability (gh reported {other:?}) — an unread \
+                 answer is never a green one; refusing (#1124, R24)"
+            );
+            Err(2)
+        }
+    }
+}
+
+/// The subject PR's own holds, decided over the subject's own comments with
+/// the walk's own parsing — the same rule the walk applies, without a second
+/// read and without depending on the walk completing (#1124 Rounds 2, 4, 7):
+///
+/// - a `## Review Response: Round N` answering a round that was never posted
+///   (GH-993);
+/// - the newest AUTHORITATIVE §7 round in comment order pinned to an older
+///   SHA ([`drift::stale_authoritative`]) — authoritative only: a SHADOW round
+///   is not a verdict (`docs/fleet/rules.md` R18) and never enters the union,
+///   so it must not be able to hold the subject.
+///
+/// The second half is not decoration. The walk's reducer orders a PR's comments
+/// by creation and the merge gate's own latest-review selection
+/// ([`latest_review_round`]) orders them by GitHub's edit time, so an older
+/// head-pinned LGTM edited after a later authoritative verdict is newest by
+/// edit — stage 4 approves it — while the other ordering still reads the later
+/// verdict as newest, and stale. Two readings of the subject's own comments
+/// that disagree are not a green (Round 4's first P0) — but only verdicts get
+/// a reading at all (Round 7's P1).
+///
+/// `Err(1)` after printing the refusal.
+fn subject_hold_refusal(pr: u64, head: &str, comments: &[Comment]) -> Result<(), i32> {
+    if let Some(round) = drift::reduce(head, comments).1 {
+        eprintln!(
+            "PR #{pr} carries an orphan Review Response for Round {round} — a response to \
+             a round that was never posted (GH-993); refusing (#1124)"
+        );
+        return Err(1);
+    }
+    if let Some(sha) = drift::stale_authoritative(head, comments) {
+        eprintln!(
+            "PR #{pr}'s newest authoritative §7 round in comment order reads stale from {} — \
+             the walk orders these comments by creation and the merge gate orders them by edit, \
+             and two readings of the subject that disagree are not a green; refusing (#1124)",
+            &sha[..12]
+        );
+        return Err(1);
+    }
+    Ok(())
 }
 
 /// The latest trusted §7 review's own four checks, in the shell's order:
@@ -206,6 +315,10 @@ fn receipt_body(pr: u64, head: &str, round: &str, ci: Option<&str>) -> String {
 /// P0=0/P1=0 and is not Provisional. Latest is by `(updated_at, numeric
 /// id)` — GitHub's edit ordering, so an edited round returns to newest the
 /// way the shell's `sort_by([.updated_at, .id])` sorted it.
+///
+/// A SHADOW round ([`is_shadow_round`]) is never a candidate: it is not a
+/// verdict, so it decides nothing — neither approving nor, pinned to an older
+/// SHA, refusing (#1124 Round 8).
 ///
 /// `Ok(round)` on every check passing; `Err(exit_code)` after printing the
 /// refusal, mirroring `merge_inner`'s own stages.
@@ -220,6 +333,7 @@ fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<St
                 .body
                 .lines()
                 .any(|line| heading_shaped(line.trim_end_matches('\r')))
+            && !is_shadow_round(&t.comment.body)
     }) {
         // Fail closed on the REST keys this ordering is built from, as the
         // shell did: `error("trusted review lacks REST updated_at or numeric
@@ -295,8 +409,9 @@ fn latest_review_round(timed: &[TimedComment], pr: u64, head: &str) -> Result<St
 
 /// The whole merge decision, one enumerated order (R6). Fail-fast on the
 /// same stages the shell refused at, for the same reasons and in the same
-/// order: drift (whole open set, GH-993) before the PR's own facts before
-/// the review's own facts before the forge's required checks.
+/// order: the drift walk (stage 1, reported since #1124 and no longer a
+/// refusal stage) before the PR's own facts before the review's own facts
+/// before the forge's required checks.
 pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
     if args.merge && args.check {
         anyhow::bail!("--merge and --check are mutually exclusive; --check is the default");
@@ -322,24 +437,24 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
             anyhow::bail!("body file not found: {path}");
         }
     }
-    // 1. Fleet-wide drift (GH-993): the whole open set, not just this PR —
-    //    the same scope pi-controller-runbook named by policy.
+    // 1. Fleet-wide drift (GH-993) — printed for every PR, refused for none
+    //    (#1124): cross-PR drift is not an R6 condition, and while it refused,
+    //    every merge was hostage to the whole open set. The subject PR's own
+    //    hold is read from the subject below (its mergeability in stage 2, its
+    //    own orphan response after stage 3, its verdict pinning in stage 4),
+    //    so a walk that cannot read — or another PR's unreadable comments —
+    //    cannot hide it.
     match reads.drift() {
-        Err(error) => {
-            eprintln!("verdict-drift could not read PR state ({error:#}) — refusing until it can");
-            return Ok(2);
-        }
-        Ok((lines, not_ready)) if not_ready => {
-            for line in &lines {
-                eprintln!("{line}");
+        Ok(report) => {
+            let block = drift::advisory(&report.lines, report.any_holds);
+            if !block.is_empty() {
+                eprintln!("{block}");
             }
-            eprintln!(
-                "verdict-drift is not clean across the open PR set — refusing until every \
-                 open PR carries a verdict on its head (output above)"
-            );
-            return Ok(1);
         }
-        Ok(_) => {}
+        Err(error) => eprintln!(
+            "verdict-drift could not read PR state ({error:#}) — advisory unavailable; the \
+             subject PR's own reads above and below still decide (#1124)"
+        ),
     }
     // 2. The PR's own facts.
     let pr = match reads.pr(args.pr) {
@@ -357,6 +472,11 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
         eprintln!("invalid PR head {}", pr.head);
         return Ok(2);
     }
+    // R24's mergeability condition, read on the subject rather than inferred
+    // from the fleet walk (#1124 Rounds 2-3).
+    if let Err(code) = mergeability_refusal(args.pr, &pr.mergeable) {
+        return Ok(code);
+    }
     // 3. The verdict comments the union and the review checks read.
     let timed = match reads.comments(args.pr) {
         Ok(timed) => timed,
@@ -366,6 +486,13 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
         }
     };
     let comments: Vec<Comment> = timed.iter().map(|t| t.comment.clone()).collect();
+
+    // 3b. The subject's own holds, decided over the subject's own comments by
+    //     the walk's own reducer — the orphan response and the states that
+    //     hold (#1124 Rounds 2 and 4).
+    if let Err(code) = subject_hold_refusal(args.pr, &pr.head, &comments) {
+        return Ok(code);
+    }
 
     // 4. The latest trusted §7 review's own checks.
     let round = match latest_review_round(&timed, args.pr, &pr.head) {
@@ -513,7 +640,7 @@ pub(crate) fn pr_argv(pr: u64) -> Vec<String> {
         "view".to_owned(),
         pr.to_string(),
         "--json".to_owned(),
-        "headRefOid,state,title".to_owned(),
+        "headRefOid,state,title,mergeable".to_owned(),
     ]
 }
 
@@ -531,6 +658,7 @@ impl Reads for GhReads<'_> {
             head: value["headRefOid"].as_str().unwrap_or_default().to_owned(),
             state: value["state"].as_str().unwrap_or_default().to_owned(),
             title: value["title"].as_str().unwrap_or_default().to_owned(),
+            mergeable: value["mergeable"].as_str().unwrap_or_default().to_owned(),
         })
     }
 
@@ -557,7 +685,7 @@ impl Reads for GhReads<'_> {
             .collect())
     }
 
-    fn drift(&self) -> Result<(Vec<String>, bool)> {
+    fn drift(&self) -> Result<drift::Report> {
         drift::evaluate(
             self.cwd,
             std::env::var("EDDA_OPEN_PR_LIMIT")
@@ -660,8 +788,9 @@ mod tests {
         head: &'static str,
         state: &'static str,
         title: String,
+        mergeable: &'static str,
         comments: Vec<TimedComment>,
-        drift: Result<(Vec<String>, bool), String>,
+        drift: Result<drift::Report, String>,
         fail_comments: bool,
         checks_green: bool,
         merged: RefCell<Vec<(u64, String, String, String)>>,
@@ -679,8 +808,9 @@ mod tests {
                 head: HEAD,
                 state: "OPEN",
                 title: "fix(edda-cli): a merge the fleet already reviewed".into(),
+                mergeable: "MERGEABLE",
                 comments,
-                drift: Ok((vec![], false)),
+                drift: Ok(drift::Report::new(vec![], false)),
                 fail_comments: false,
                 checks_green: true,
                 merged: RefCell::new(Vec::new()),
@@ -698,6 +828,7 @@ mod tests {
                 head: self.head.into(),
                 state: self.state.into(),
                 title: self.title.clone(),
+                mergeable: self.mergeable.into(),
             })
         }
         fn comments(&self, pr: u64) -> Result<Vec<TimedComment>> {
@@ -708,7 +839,7 @@ mod tests {
             }
             Ok(self.comments.clone())
         }
-        fn drift(&self) -> Result<(Vec<String>, bool)> {
+        fn drift(&self) -> Result<drift::Report> {
             self.drift.clone().map_err(anyhow::Error::msg)
         }
         fn checks_green(&self, pr: u64) -> Result<bool> {
@@ -788,36 +919,224 @@ mod tests {
         assert_eq!(code, 1, "a malformed verdict comment was ignored");
     }
 
-    // case 6: an unrelated open PR with no verdict refuses everything
-    // (GH-993) — before the comments read or required checks are reached.
+    // #1124's split fixture: an open set where one unrelated PR drifted, over
+    // a subject whose own gate is green. The walk's lines still print
+    // (`drift::advisory`'s own test pins that) and no longer refuse, so the
+    // reads the shell stopped at are all reached — and the subject really
+    // merges: Round 4's second P0 was that `args(false)` never reached the
+    // squash branch, so this fixture proved only acceptance, not the merge the
+    // doneWhen claims.
     #[test]
-    fn a_dirty_open_set_refuses_before_the_prs_own_checks() {
+    fn a_dirty_open_set_is_advisory_and_the_green_subject_merges() {
         let mut fake = Fake::clean(lgtm());
-        fake.drift = Ok((
-            vec!["#9001 dddddddddddd main no verdict on head".into()],
+        fake.drift = Ok(drift::Report::new(
+            vec![
+                "#9001 dddddddddddd main no verdict on head".into(),
+                "#9002 eeeeeeeeeeee main LGTM".into(),
+            ],
             true,
         ));
-        let code = merge_inner(&args(false), &fake).unwrap();
-        assert_eq!(code, 1);
+        let code = merge_inner(&args(true), &fake).unwrap();
+        assert_eq!(code, 0, "an unrelated PR's drift refused this merge");
         assert!(
-            !*fake.reached_comments.borrow(),
-            "the comment read was reached after drift already refused"
+            *fake.reached_comments.borrow(),
+            "the subject's own review was never read"
         );
         assert!(
-            !*fake.reached_checks.borrow(),
-            "required checks were queried after drift already refused"
+            *fake.reached_checks.borrow(),
+            "the subject's own required checks were never asked"
+        );
+        let merged = fake.merged.borrow();
+        assert_eq!(
+            merged.len(),
+            1,
+            "the green subject never reached the squash"
+        );
+        assert_eq!(
+            (merged[0].0, merged[0].1.as_str()),
+            (4242, HEAD),
+            "the squash was not pinned to the subject's own head"
         );
     }
 
-    // case 7: the drift walk itself failing to read also refuses — a broken
-    // read must not wave every merge through clean.
+    // Round 4's first P0: the walk's reducer orders the subject's comments by
+    // creation, the merge gate's latest-review selection by GitHub's edit
+    // time. An older head-pinned LGTM edited after a later stale verdict is
+    // therefore newest for stage 4 — which approves — while the reducer still
+    // reads the stale verdict, which the walk calls a hold. Two readings of
+    // the subject that disagree are not a green.
     #[test]
-    fn a_failed_drift_read_refuses() {
+    fn an_edited_lgtm_cannot_outvote_the_stale_verdict_the_walk_still_reads() {
+        let fake = Fake::clean(vec![
+            // Created first, edited last: newest by `updated_at`, so this is
+            // the round stage 4 judges and approves.
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T12:00:00Z"),
+            // Created last, never edited: newest by comment order, and stale.
+            review(
+                2,
+                OLDER,
+                "Changes Requested, P0=0, P1=1",
+                "2026-09-08T11:00:00Z",
+            ),
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(
+            code, 1,
+            "edit order outvoted the walk's stale reading of the subject"
+        );
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after the subject's own hold already refused"
+        );
+    }
+
+    // Round 7's P1: the check above must not let a SHADOW round hold the
+    // subject. SHADOW rounds are not verdicts (`docs/fleet/rules.md` R18) and
+    // never enter the union, so one pinned to an older SHA — created after the
+    // authoritative round, the way a calibration round follows a review — must
+    // not turn the gate's own edit-ordered approval into a refusal.
+    #[test]
+    fn a_shadow_round_cannot_hold_the_subject() {
+        let mut shadow = review(2, OLDER, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z");
+        shadow.comment.body = format!(
+            "## Code Review: Round 2 (SHADOW) — PR #4242 @ {OLDER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)\n"
+        );
+        let fake = Fake::clean(vec![
+            // Authoritative, pinned to head, edited after the shadow round:
+            // newest by `updated_at`, so stage 4 judges and approves it.
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T12:00:00Z"),
+            // SHADOW, created last: newest by comment order, stale by pin.
+            shadow,
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 0, "a SHADOW round held the subject");
+        assert!(*fake.reached_checks.borrow());
+    }
+
+    // Round 8's P1: a SHADOW round is not a verdict, so it can never be the
+    // review that decides a merge — including when it is the newest by
+    // `updated_at`, where stage 4 used to select it and then refuse its older
+    // pin. The authoritative round decides instead, and the gate accepts.
+    #[test]
+    fn a_shadow_round_is_never_the_deciding_review() {
+        let mut shadow = review(2, OLDER, "LGTM (P0=0, P1=0)", "2026-09-08T12:00:00Z");
+        shadow.comment.body = format!(
+            "## Code Review: Round 2 (SHADOW) — PR #4242 @ {OLDER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)\n"
+        );
+        let fake = Fake::clean(vec![
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+            shadow,
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 0, "a SHADOW round decided the merge");
+        assert!(*fake.reached_checks.borrow());
+    }
+
+    // The other half of the split: the subject's OWN stale verdict still
+    // refuses. A guard rather than regression evidence — a single stale
+    // verdict named by the walk's line was also refused by the code this
+    // branch replaced, because back then ANY open PR's hold refused. The
+    // fixture above is the one that fails on the replaced code.
+    #[test]
+    fn the_subjects_own_stale_verdict_still_refuses() {
+        let mut fake = Fake::clean(vec![review(
+            1,
+            OLDER,
+            "LGTM (P0=0, P1=0)",
+            "2026-09-08T11:00:00Z",
+        )]);
+        fake.drift = Ok(drift::Report::new(
+            vec![format!(
+                "#4242 {} main stale from {}",
+                &HEAD[..12],
+                &OLDER[..12]
+            )],
+            true,
+        ));
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 1, "the subject's own drifted verdict was merged");
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after the subject's own hold already refused"
+        );
+    }
+
+    // Round 3's P0: a missing or non-string `mergeable` parses as an empty
+    // string, which is not the string CONFLICTING — so an exact comparison
+    // let an unread answer through. Anything outside GitHub's three values is
+    // now exit 2, and `UNKNOWN` stays a non-conflict.
+    #[test]
+    fn an_unreadable_mergeability_refuses() {
         let mut fake = Fake::clean(lgtm());
+        fake.mergeable = "";
+        assert_eq!(
+            merge_inner(&args(false), &fake).unwrap(),
+            2,
+            "an unread mergeability answer was treated as green"
+        );
+        assert!(
+            !*fake.reached_comments.borrow(),
+            "the refusal came after the review reads"
+        );
+    }
+
+    #[test]
+    fn an_unknown_mergeability_is_not_a_conflict() {
+        let mut fake = Fake::clean(lgtm());
+        fake.mergeable = "UNKNOWN";
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 0);
+    }
+
+    // Round 1's P0 (a CONFLICTING subject must not be reported ready) fixed
+    // through the subject's own read, and Round 2's P0 in the same fixture:
+    // the walk cannot read at all, and the refusal still holds — which is the
+    // whole point of not sourcing the subject's hold from the fleet walk.
+    #[test]
+    fn a_conflicting_subject_refuses_even_when_the_walk_cannot_read() {
+        let mut fake = Fake::clean(lgtm());
+        fake.mergeable = "CONFLICTING";
         fake.drift = Err("pr list failed".into());
         let code = merge_inner(&args(false), &fake).unwrap();
-        assert_eq!(code, 2);
-        assert!(!*fake.reached_comments.borrow());
+        assert_eq!(code, 1, "a CONFLICTING subject was reported ready");
+        assert!(
+            !*fake.reached_comments.borrow(),
+            "the refusal came after the review reads, not from the subject's own facts"
+        );
+    }
+
+    // GH-993's other hold on the subject, decided from the subject's own
+    // comments: a Review Response to a round that was never posted. Round 2's
+    // P0 named this state as uncovered.
+    #[test]
+    fn an_orphan_review_response_on_the_subject_refuses() {
+        let mut response = review(2, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T12:00:00Z");
+        response.comment.body = "## Review Response: Round 9
+
+Addressed in abc1234."
+            .into();
+        let fake = Fake::clean(vec![
+            review(1, HEAD, "LGTM (P0=0, P1=0)", "2026-09-08T11:00:00Z"),
+            response,
+        ]);
+        let code = merge_inner(&args(false), &fake).unwrap();
+        assert_eq!(code, 1, "an orphan Review Response was merged over");
+        assert!(
+            !*fake.reached_checks.borrow(),
+            "required checks were queried after the orphan check refused"
+        );
+    }
+
+    // case 7: the drift walk failing to read is advisory like the walk itself
+    // (#1124) — a fleet-wide read was never the subject's R6 gate, and making
+    // it a refusal put every merge behind one unrelated PR's readability.
+    #[test]
+    fn a_failed_drift_read_is_advisory() {
+        let mut fake = Fake::clean(lgtm());
+        fake.drift = Err("pr list failed".into());
+        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 0);
+        assert!(*fake.reached_checks.borrow());
     }
 
     // case 8's non-vacuous half: a clean drift state over a populated open
@@ -825,7 +1144,10 @@ mod tests {
     #[test]
     fn a_populated_clean_drift_state_does_not_block() {
         let mut fake = Fake::clean(lgtm());
-        fake.drift = Ok((vec!["#9002 eeeeeeeeeeee main LGTM".into()], false));
+        fake.drift = Ok(drift::Report::new(
+            vec!["#9002 eeeeeeeeeeee main LGTM".into()],
+            false,
+        ));
         assert_eq!(merge_inner(&args(false), &fake).unwrap(), 0);
     }
 
@@ -1271,7 +1593,13 @@ mod tests {
     fn pr_argv_names_the_pull_request_it_reads() {
         assert_eq!(
             pr_argv(4242),
-            vec!["pr", "view", "4242", "--json", "headRefOid,state,title"]
+            vec![
+                "pr",
+                "view",
+                "4242",
+                "--json",
+                "headRefOid,state,title,mergeable"
+            ]
         );
         // Stated separately from the equality above so the regression this
         // guards is named where it fails: a selector-less argv is the defect,

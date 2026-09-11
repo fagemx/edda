@@ -178,6 +178,48 @@ pub(crate) fn reduce(head: &str, comments: &[Comment]) -> (PrState, Option<Strin
     (state, orphan)
 }
 
+/// The SHA of the newest *authoritative* §7 round, when it is pinned to a
+/// different SHA than `head` — the merge gate's cross-check against its own
+/// edit-ordered latest-review selection (#1124 Round 4).
+///
+/// The same loop as [`reduce`], with SHADOW rounds skipped rather than allowed
+/// to become `newest`: a SHADOW round is not a verdict (`docs/fleet/rules.md`
+/// R18) and never enters the union, so one pinned to an older SHA cannot hold
+/// a subject that carries an authoritative head-pinned LGTM (#1124 Round 7).
+///
+/// SHADOW here is the heading suffix ALONE — `REVIEW.md` §8's rule, the one
+/// every other reader in the gate uses. [`reduce`] additionally honours a
+/// `- shadow: true` body line because the shell it ports did, but a round
+/// marked only in the body is still a verdict to `latest_review_round` and to
+/// the union, so skipping it here would let the gate merge under a stale round
+/// its own readers treat as authoritative (#1124 Round 8). The walk's line
+/// counts both markers, because it reports what is on the PR rather than what
+/// the gate may act on (GH-1134 tracks the walk's own ordering).
+pub(crate) fn stale_authoritative(head: &str, comments: &[Comment]) -> Option<String> {
+    let mut newest: Option<String> = None;
+    for comment in comments {
+        if !trusted_association(comment.author_association.as_deref()) {
+            continue;
+        }
+        let lines: Vec<&str> = comment
+            .body
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .collect();
+        let Some(first) = lines.first().copied() else {
+            continue;
+        };
+        let Some((_round, sha, shadow)) = heading_parts(first) else {
+            continue;
+        };
+        if shadow {
+            continue;
+        }
+        newest = Some(sha);
+    }
+    newest.filter(|sha| sha != head)
+}
+
 /// The exact line the shell printed for one PR — byte-compatible, because
 /// `daily-digest.sh` awk-parses `$4` and every field after it verbatim.
 pub(crate) fn line_for(row: &PrRow, state: &PrState, orphan: &Option<String>) -> String {
@@ -198,6 +240,27 @@ pub(crate) fn line_for(row: &PrRow, state: &PrState, orphan: &Option<String>) ->
 /// Does the line's state hold the PR (drift found)?
 fn holds(row: &PrRow, state: &PrState, orphan: &Option<String>) -> bool {
     state.holds() || row.mergeable == "CONFLICTING" || orphan.is_some()
+}
+
+/// The open set as `edda review merge` reports it (#1124): every line the
+/// walk produced, verbatim, and — only when some PR holds — the ruling that
+/// keeps the block from refusing. Cross-PR drift is not an R6 condition
+/// (`review.merge-drift-guard=advisory-not-an-r6-condition`), so a merge goes
+/// on to the subject PR's own gate; the walk still reaches the operator,
+/// which is the half a refusal must not be the only carrier of.
+pub(crate) fn advisory(lines: &[String], any_holds: bool) -> String {
+    let mut text = lines.join("\n");
+    if any_holds {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(
+            "verdict-drift is not clean across the open PR set — advisory only: cross-PR drift \
+             is not an R6 condition, and this merge is decided by the subject PR's own gate \
+             (#1124, GH-993)",
+        );
+    }
+    text
 }
 
 /// The `--limit` value this run uses: the flag, then EDDA_OPEN_PR_LIMIT
@@ -256,11 +319,32 @@ fn parse_open_prs(value: &serde_json::Value) -> Vec<PrRow> {
         .collect()
 }
 
+/// The drift walk's result: the lines the fleet report prints, and whether
+/// any open PR holds. `edda review merge` prints all of it and refuses on
+/// none of it (#1124): the subject PR's own hold is read from the subject —
+/// its mergeability, its own verdicts and its own orphan responses — so a
+/// walk that cannot read, or another PR's unreadable comments, cannot hide
+/// it (#1132 Round 2).
+#[derive(Debug, Clone)]
+pub(crate) struct Report {
+    pub lines: Vec<String>,
+    pub any_holds: bool,
+}
+
+impl Report {
+    pub(crate) fn new(lines: Vec<String>, any_holds: bool) -> Self {
+        Self { lines, any_holds }
+    }
+}
+
 /// The drift query over the whole open-PR set: one output line per PR and
 /// whether any PR is not ready. Split from [`run`] so `edda review merge`
-/// consults the same walk without a subprocess (GH-993's blocking scope is
-/// the whole open set, not the one PR being merged).
-pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
+/// consults the same walk without a subprocess. The walk's scope is the whole
+/// open set, which was never the subject of an R6 condition: since #1124
+/// `merge` reads it through [`advisory`] and the subject PR's own gate
+/// decides, where the shell this replaced refused every merge while any
+/// unrelated PR had drifted.
+pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<Report> {
     let argv = open_prs_argv(limit);
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     let value = gh(cwd, &args).context("list open PRs")?;
@@ -269,17 +353,17 @@ pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
         eprintln!("{warning}");
     }
     let mut lines = Vec::new();
-    let mut not_ready = false;
+    let mut any_holds = false;
     for row in &rows {
         let list = comments(cwd, row.number)
             .with_context(|| format!("read comments of PR #{}", row.number))?;
         let (state, orphan) = reduce(&row.head, &list);
         if holds(row, &state, &orphan) {
-            not_ready = true;
+            any_holds = true;
         }
         lines.push(line_for(row, &state, &orphan));
     }
-    Ok((lines, not_ready))
+    Ok(Report::new(lines, any_holds))
 }
 
 /// CLI entry point. Exit: 0 every open PR is ready, 1 drift found, 2 cannot
@@ -287,21 +371,21 @@ pub(crate) fn evaluate(cwd: &Path, limit: u64) -> Result<(Vec<String>, bool)> {
 pub fn run(args: DriftArgs, cwd: &Path) -> Result<()> {
     let limit = effective_limit(args.limit);
     match evaluate(cwd, limit) {
-        Ok((lines, not_ready)) => {
+        Ok(report) => {
             if args.json {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "prs": lines,
-                        "not_ready": not_ready,
+                        "prs": report.lines,
+                        "not_ready": report.any_holds,
                     })
                 );
             } else {
-                for line in &lines {
+                for line in &report.lines {
                     println!("{line}");
                 }
             }
-            if not_ready {
+            if report.any_holds {
                 std::process::exit(1);
             }
             Ok(())
@@ -414,6 +498,37 @@ mod tests {
         );
         let (state, _) = reduce(SHA, &[comment(&body, "OWNER")]);
         assert_eq!(state, PrState::ShadowOnly);
+    }
+
+    // Round 8's P0. `reduce` honours both SHADOW markers because the shell it
+    // ports did, and `case4b` above pins that. The merge gate does not: every
+    // other reader in it keys on the heading suffix (`REVIEW.md` §8 — "the
+    // suffix is the only marker, this field never substitutes for it"), so a
+    // round marked only in the body is a verdict to `latest_review_round` and
+    // the union. Skipping it here would let a subject merge under a stale
+    // round those readers treat as authoritative, which is the fail-open this
+    // test is named for.
+    #[test]
+    fn a_body_only_shadow_marker_is_still_an_authoritative_round() {
+        let body = format!(
+            "## Code Review: Round 2 — PR #1 @ {OTHER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)"
+        );
+        assert_eq!(
+            stale_authoritative(SHA, &[comment(&body, "OWNER")]),
+            Some(OTHER.to_owned())
+        );
+    }
+
+    // A guard rather than regression evidence: the suffix-marked round was
+    // already skipped before this round's fix.
+    #[test]
+    fn a_suffixed_shadow_round_is_not_a_stale_authoritative_round() {
+        let body = format!(
+            "## Code Review: Round 2 (SHADOW) — PR #1 @ {OTHER}\n\n- shadow: true\n\n### \
+             Verdict\n\nLGTM (P0=0, P1=0)"
+        );
+        assert_eq!(stale_authoritative(SHA, &[comment(&body, "OWNER")]), None);
     }
 
     #[test]
@@ -665,5 +780,63 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].mergeable, "CONFLICTING");
         assert_eq!(rows[1].mergeable, "", "absent mergeable annotates nothing");
+    }
+
+    // #1132 Round 2's P0 lives at this seam: `merge` must be able to tell the
+    // subject's own hold from another PR's, because only the subject's is
+    // still a refusal. `holds` is also where CONFLICTING enters a hold
+    // (R24), so a subject that is CONFLICTING lands in `holding`.
+    #[test]
+    fn the_report_separates_the_subject_from_the_open_set() {
+        let held = Report::new(vec!["#1 a main LGTM".into()], true);
+        assert!(held.any_holds && held.lines.len() == 1);
+        let clean = Report::new(vec![], false);
+        assert!(!clean.any_holds && clean.lines.is_empty());
+    }
+
+    #[test]
+    fn a_conflicting_row_is_a_hold_for_its_own_pr() {
+        let rows = [row(7, SHA, "main", "CONFLICTING")];
+        let list = [comment(
+            &verdict_line_body(SHA, "LGTM (P0=0, P1=0)"),
+            "OWNER",
+        )];
+        let (state, orphan) = reduce(SHA, &list);
+        assert!(holds(&rows[0], &state, &orphan));
+        assert_eq!(
+            line_for(&rows[0], &state, &orphan),
+            "#7 111111111111 main LGTM mergeable=CONFLICTING"
+        );
+    }
+
+    // #1124's fixture at the block's own seam: the walked lines survive into
+    // the merge's report verbatim, and only a hold adds the ruling. Whether
+    // the merge then refuses is `merge.rs`'s test — this pins that nothing
+    // the walk found stops being printed.
+    #[test]
+    fn the_advisory_keeps_every_line_and_names_the_ruling_only_on_a_hold() {
+        let lines = vec![
+            "#1122 bb06f359bd6e main stale from b800044d86fc".to_string(),
+            "#1114 52c540c0937b main LGTM".to_string(),
+        ];
+        let text = advisory(&lines, true);
+        assert!(
+            text.contains(&lines[0]) && text.contains(&lines[1]),
+            "the drifted or the clean PR's own line was dropped: {text}"
+        );
+        assert!(
+            text.contains("advisory only") && text.contains("#1124"),
+            "the hold does not name the ruling that keeps it advisory: {text}"
+        );
+        assert_eq!(
+            advisory(&lines, false),
+            lines.join("\n"),
+            "a walk with nothing holding must print its lines alone"
+        );
+        assert_eq!(advisory(&[], false), "", "an empty walk prints nothing");
+        assert!(
+            advisory(&[], true).starts_with("verdict-drift is not clean"),
+            "a hold with no lines must still not print a blank block"
+        );
     }
 }

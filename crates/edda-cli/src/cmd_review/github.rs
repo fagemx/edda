@@ -14,8 +14,24 @@ use std::process::Command;
 /// `{owner}/{repo}` REST templates — resolves against it, exactly as
 /// `gh --repo` would. `gh` itself honors `GH_REPO`; unset means ordinary
 /// cwd resolution, so running from a checkout keeps working untouched.
+/// The `gh` this verb runs: `EDDA_GH_BIN` when set, otherwise `gh` from PATH.
+///
+/// The override is the dispatch path's own seam (`claim_guard::run_gh`,
+/// GH-782), read here for the same reason it exists there: it is what makes a
+/// hermetic process-level test of a verb possible. A stub on PATH is not, on
+/// Windows, because a bare name reaches CreateProcess' own search — which
+/// finds a PE and not the batch shim a test can write — while every other host
+/// executable this crate runs goes through `evidence::process::executable`.
+/// An empty value names no binary, so it counts as unset.
+fn gh_bin() -> std::path::PathBuf {
+    std::env::var_os("EDDA_GH_BIN")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("gh"))
+}
+
 fn command(repo: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new("gh");
+    let mut command = Command::new(gh_bin());
     command.args(args).current_dir(repo);
     if let Some(name) = std::env::var_os("EDDA_REPO") {
         command.env("GH_REPO", name);

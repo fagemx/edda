@@ -86,10 +86,19 @@ pub enum ReviewCmd {
     },
     /// The merge preconditions, in the product (GH-1105; folds GH-1100)
     ///
-    /// Validates one PR against every precondition R6 names — fleet-wide
-    /// drift (GH-993), the latest trusted review pinned to head, the union
-    /// (GH-769/GH-742), malformed refusals (#917), required checks, and a
-    /// commit-conventional squash subject — without merging. `--merge`
+    /// Validates one PR against every precondition R6 names — the latest
+    /// trusted review pinned to head, the union (GH-769/GH-742), malformed
+    /// refusals (#917), required checks, and a commit-conventional squash
+    /// subject — without merging. The fleet-wide drift walk (GH-993) is
+    /// reported and printed, and refuses nothing: cross-PR drift is not an R6
+    /// condition and a refusal there made every merge hostage to the whole
+    /// open set. The subject PR's own holds still stop the merge, read from
+    /// the subject itself — `CONFLICTING` mergeability (R24 forbids reporting
+    /// it ready), an orphan Review Response, the newest authoritative §7 round
+    /// reading stale in the walk's comment order (its comment order and this
+    /// gate's edit order can disagree about which round is newest; SHADOW
+    /// rounds are not verdicts and cannot hold it), and a verdict that does
+    /// not pin head (#1124). `--merge`
     /// executes the squash with the validated subject and a gate-receipt
     /// body and requires operator authority. Read-only without it; never
     /// writes labels or statuses (deliver owns those).
