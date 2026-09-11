@@ -4,6 +4,7 @@ pub mod background_model;
 pub mod bundle;
 pub mod canon;
 mod cmd_event;
+pub mod continuity;
 pub mod decision;
 pub mod event;
 pub mod git;
