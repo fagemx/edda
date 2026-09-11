@@ -12,9 +12,10 @@ shell/gh access; an arbitrary PR comment link is not an accessible handoff carri
 
 ## Scope
 
-A1 guidance paths + narrowly conflicting author/fixer language in
-`.claude/skills/issue-action/SKILL.md` and `.claude/skills/pr-review-loop/SKILL.md`;
-extend `scripts/test-delivery-guidance.sh`. Minimal product wiring is also in scope:
+A1 canonical operating section and its projections; narrowly conflicting author/fixer
+language in `.claude/skills/issue-action/SKILL.md` and `.claude/skills/pr-review-loop/SKILL.md`.
+Preserve A1's thin routes and task lifecycle; do not recreate a second delivery loop.
+Extend `scripts/test-delivery-guidance.sh`. Minimal product wiring is also in scope:
 
 - `crates/edda-cli/src/cmd_review/args.rs`: optional `context_file: Option<PathBuf>`.
 - `prepare.rs`: load one bounded context buffer before dispatch, warnings/provenance.

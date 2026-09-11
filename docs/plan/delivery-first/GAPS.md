@@ -19,6 +19,13 @@
 | 已有成果尚未發布 | continuity train 的 program.md 記錄 S1/S2 local LGTM、無 exact-head CI | B2 採既有 commits 加 current-base consumer 驗證，不重做功能 | B2 |
 | Flash 沒有可比較的交付證據 | 大多 review elapsed/cost 未量測；S8 proof 在龐大 S6 後才被關注 | 一次有界歷史 bug trial，所有 failure/retry 都列入；不阻擋功能上市 | C1 |
 | 舊 merge caller 殘留 | pipeline Phase 4 教直接 `gh pr merge --squash` | controller 只使用 canonical `edda review merge`，保留 R6 checks | A1 |
+| 聊天建議未成標準契約 | d696bc8 的 A1 無唯一來源／完整入口與採用語義 | WORKFLOW 定義 bounded entry inventory；embedded 原文、project/host projections、薄入口 | A1 |
+| 小任務與 formation 入口混用 | coord-orchestrate description 限 parallel controller；AGENTS 已有 worker pack 入口 | 先分 assigned/resume/plan/solo/parallel 路由，不強制小任務開 formation | A1 |
+| task 與 dispatch 非自動綁定 | cmd_dispatch::run_inner 僅 ACP 接受 task-id；legacy 讀 prompt-file | controller prestart；transport-specific carrier；worker normal settlement | A1 |
+| ACP task 新建後不能直接派 | cmd_dispatch_acp::preflight 要 Running、matching agent_kind、concrete roots；brief 只先注入 4096 bytes | 派前綁定可達 short entry/full card 與實際 policy；不借 legacy route 繞過 refusal | A1 |
+| 誤把無 retry 命令當無重試 | task_actions::start_task 接受 Failed；cmd_task 有 fail/start attempt=2 test | 相同 contract 同 ID start retry；changed assignment 新 key/map，不造 retry API | A1 |
+| dedup key 不等於 task update | task_actions::new_task 找到 key 就回傳舊紀錄 | 重啟 readback；替代工作明確 remap pending successors，不 fake done | A1 |
+| 本機 plan／新 source 不等於安裝採用 | cmd_init::scaffold_skills 預設 skip existing；force 覆蓋全部五個 skills | 分開 local/published/adopted；owner selective update；不新增自動版本 gate | A1 |
 
 ## 2. Evidence snapshots
 
@@ -53,8 +60,9 @@ PR1147 還有 production expect blocker，所以不能把整輪成本歸給 U3�
 ## 4. Real boundaries that remain
 
 Task #139 的 S5 findings 含 acceptance authority、typed completion correlation、
-ACP attempt race、reconcile sandbox/scope 和 SDK spec pin。#140 正在處理前四項；
-#141 的 SDK 接合等待 #76 owner handoff。這些不是可刪文書。
+ACP attempt race、reconcile sandbox/scope 和 SDK spec pin。#140 承接前四項；
+本次 #143 的 task rail 顯示 #140 done，但這不是本 plan 對 S5 的獨立 acceptance。
+#141 的 SDK 接合仍等待 #76 owner handoff。這些不是可刪文書。
 
 B2 不能假設 continuity 的不同 event 不需要 SDK 整合：必須獨立核對該 slice
 自己的 registry/spec/SDK consumer，使用既有 owner 完成 producer-consumer 對接。
@@ -70,6 +78,8 @@ B2 不能假設 continuity 的不同 event 不需要 SDK 整合：必須獨立�
 | Flash provider/model/runtime/version | C1 操作者現有設定，由 controller 明示 | report unavailable；不猜 model ID 或讀出 secret |
 | Timeout / funded call allowance | C1 啟動前 controller 綁定 | 不開 paid run；完成 offline preparation |
 | Native reviewer session still exists | A2／每次續審 | 明確 replacement，讀 prior facts，不能偽造 resume |
+| Selected entry/installed copy and binary identity | A1 caller/adoption；controller existing note | old/custom/unknown 可見，不推斷 main/全 host 已更新 |
+| Actual task mapping/reachable brief and dispatch carrier | controller 派工前，WORKFLOW §3/4 | 只停無法辨識的 launch；不猜 ID、跨機絕對路徑或 backend 支援 |
 
 ## 6. Decision status
 
@@ -78,4 +88,5 @@ A1 流程修改、A2 可選資料輸入與 A3 policy delta 可分開交付。A3 
 B1 是現有 program 的具體
 release amendment，不要求新 program 或逐張 issue 的再次批准。
 
-相關定義：[SPEC.md](SPEC.md)、[CONTRACT.md](CONTRACT.md)。
+相關定義：[SPEC.md](SPEC.md)、[CONTRACT.md](CONTRACT.md)、[WORKFLOW.md](WORKFLOW.md)。
+最後一項是本次標準化 amendment，不是先前 d696bc8 LGTM 已涵蓋的內容。

@@ -100,12 +100,19 @@ type SliceReadiness = {
 | DF-07 | U3-only convention advisory；其他拒絕不變 | 不讓精簡擴張成全面放寬安全與驗收 | V3 negative cases |
 | DF-08 | usable slice 自己 closure，不等整 program；不假稱 program done | 防止 early delivery 與承諾失真互換 | V4 release matrix |
 | DF-09 | owner scope/SDK consumer/已有嘗試不得繞過 | 防止重複派工、競爭寫入、schema 不相容 | B1/B2 owner receipt + V4 |
+| DF-10 | 受支援入口共用一份 generic flow；投影／custom／採用狀態明確 | 否則每個 host 或舊入口繼續另定程序 | WORKFLOW §1/2/7 + V6 |
+| DF-11 | task/dispatch lifecycle owner 固定；重試與 replacement 區分 | 防止雙 start、假 done、重複啟動與失敗依賴永久阻塞 | WORKFLOW §3–5 + V6 |
 
-V1–V5 的執行步驟見 [VALIDATION.md](VALIDATION.md)。
+V1–V6 的執行步驟見 [VALIDATION.md](VALIDATION.md)。
 缺 facts profile 欄位本身不是拒絕一般開發的理由；若缺的是 merge 所需 head/authority，
 阻止的是該 merge 動作，來源是既有安全條件，不是這份新文件。
 
 ## 5. Existing surface mapping
+
+[WORKFLOW.md](WORKFLOW.md) 是 routing、caller lifecycle、backend adapter、issue timing
+與 adoption 的單一定義。使用既有 brief/receipt/note，不新增 mandatory task fields。
+Controller start、worker normal done/fail 是 caller convention，不是新 role enforcement；
+不覆蓋現有 runtime 的權限／controlled acceptance 拒絕。
 
 ```text
 BundlePlan prose -> existing task brief / issue acceptance
@@ -188,9 +195,10 @@ Replacement 需要新 identity；不能假造 restored session，也不應因此
   public JSON fields。Existing notes 承載 context provenance，缺資料不產生新 outcome。
 - A3 改 base REVIEW 的 U3 含義與既有 fixture expectations；legacy posted verdict
   仍按其原格式解讀，不抹除舊 finding 或重寫歷史。
-- Installed `.agents/` 是 generated/local state，不 force-track。分發的 coord skill
-  先改 `crates/edda-cli/src/skills/coord-orchestrate.md`，再按現有 init projection 驗證。
-  Project-only skills 在 `.claude/skills/`；caller inventory 要區分两種來源。
+- Installed `.agents/` 是 generated/local state，不 force-track。Canonical generic flow
+  在 `crates/edda-cli/src/skills/coord-orchestrate.md`；Edda repo 的同名 .claude skill
+  改為相同 projection。其他 project-only skills 只保留輸入／角色特定工作與薄路由。
+  現有 init 不會更新 existing files；採用與版本可見性按 WORKFLOW §7，不自動覆寫。
 - 發現 regression 用新修正/revert commit 回復該 scope；不 force push、reset peer tree、
   刪來源或恢復直接 gh merge。尚未 merge 的 candidate 保留。
 - B 使用 additive continuity API、legacy checkpoint compatibility；不做 destructive migration。

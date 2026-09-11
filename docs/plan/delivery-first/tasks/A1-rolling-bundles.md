@@ -1,50 +1,76 @@
-# A1 — Cohesive bundles and rolling progress
+# A1 — One operating flow, cohesive bundles and rolling progress
 
-> Owner: strong workflow implementer; retain this owner for A2/A3.
-> Depends on: none. Unblocks: A2. Delivery: usable guidance change.
-> Contract: DF-01, DF-02, DF-09 in [CONTRACT](../CONTRACT.md).
+> Owner: strong workflow implementer; retain this owner for A2, not necessarily A3.
+> Depends on: none. Unblocks: A2. Delivery: usable guidance and entry migration.
+> Contract: DF-01/02/09/10/11 in [CONTRACT](../CONTRACT.md).
 
 ## Read first / basis
+
+Read [WORKFLOW](../WORKFLOW.md) first: it owns routing, task lifecycle, backend adapters,
+issue timing and adoption semantics. Then [SPEC](../SPEC.md) sections 3–5 and V1/V6 in
+[VALIDATION](../VALIDATION.md). No fresh decomposition of these already defined cards.
 
 ```bash
 git rev-parse origin/main
 edda task list
 ```
 
-Read `.claude/skills/issue-pipeline/SKILL.md`, both tracked coord-orchestrate sources,
-`docs/guides/operator-runbook.md`, and [SPEC](../SPEC.md) sections 3–5.
-Use the exact base's current CI as READ, not a fresh workspace rebuild.
+Ground inputs: existing AGENTS, project/embedded coord skills, issue-pipeline/issue-action/
+pr-review-loop, operator-runbook, `cmd_init.rs::{SKILLS,scaffold_skills}`;
+READ `cmd_dispatch.rs::run_inner`, `cmd_dispatch_acp.rs` and `task_actions.rs` only to verify
+adapter/lifecycle claims. Current base CI is READ evidence, not a fresh workspace rebuild.
 
 ## Scope
 
-Write only pipeline, the project coord skill, embedded coord skill, relevant runbook
-routing paragraphs, and new `scripts/test-delivery-guidance.sh` (offline test, not wrapper).
-No task/dispatch/control code, no workflow/hook changes, no peer program plan edits.
+- `crates/edda-cli/src/skills/coord-orchestrate.md`: sole authored generic operating flow.
+- `.claude/skills/coord-orchestrate/SKILL.md`: tracked identical projection.
+- `.claude/skills/issue-pipeline/SKILL.md`, `issue-action/SKILL.md`,
+  `pr-review-loop/SKILL.md`: entry/dispatch/return routing only; A2 owns self-check details.
+- `AGENTS.md`: short entry route, obsolete task-start note and ambiguous local-freeze
+  wording only; refer to canonical project policy, do not replace its safety contract.
+- `docs/guides/operator-runbook.md`: entry/transport index and only necessary local policy
+  clauses preserved from the old project skill. No copied REVIEW procedure.
+- `scripts/test-delivery-guidance.sh` (new offline test, not launcher/wrapper).
+- `crates/edda-cli/src/cmd_init.rs`: tests only, to prove host projection/parity/preservation;
+  inline focused task/dispatch tests may be READ, not expanded into a runtime refactor.
+
+No task/dispatch/control runtime change, universal --task-id, schema, scheduler, workflow
+job/hook, new skill name, global installation or peer program edits. Do not force-track
+.agents. No production change to init overwrite/detection behavior or new version service.
 
 ## Implementation
 
-1. Replace per-phase all-agent wait with bundle-specific prerequisite progression.
-   A candidate may enter review while unrelated research continues. Limited reviewer
-   capacity queues only the candidate, not all implementation.
-2. Teach issue/task/PR separation and cohesive chain ownership. Preserve normal small-task
-   path; a multi-step feature does not require a new issue or session per step.
-3. Preserve actual source ownership and existing cross-machine coordination. Do not remove
-   existing claim safety while removing phase waits; do not add claims to ordinary tasks.
-4. Replace pipeline Phase 4 direct merge command with canonical product check/merge path,
-   controller-only under repository standing R6; never self-merge by worker/reviewer.
-   Generic shipped skill continues to defer to the host repository's actual policy.
-5. Correct build setup to assign separate allowed lanes only to sessions that compile;
-   docs-only controllers must not require CARGO_TARGET_DIR just to start. In BOTH tracked
-   coord-orchestrate sources, remove implementer instructions to run the full local gate
-   set on every frozen SHA. State the canonical ladder explicitly: author focused L0;
-   L1 exact-head CI; verifier runs only uncovered focused checks including Windows C5.
-   A freeze does not itself authorize a full local workspace rerun.
-6. Add offline static guidance fixture. Check active procedural sections for forbidden
-   blanket phase waits/direct merge/full-local-freeze instructions and for explicit
-   prerequisite progression plus author-L0/CI-L1/verifier-gap ownership. Fixture
-   should accept quoted historical bad examples without mistaking them for instructions.
-   Include a small A-ready/B-waiting/C-depends-A trace per V1. Label it a design/static
-   fixture, not proof that a live LLM obeys the guidance.
+1. Add `delivery-flow/1` operating section to the canonical embedded skill. Distinguish
+   assigned worker, controller resume, existing plan, ordinary solo work and real parallel
+   formation. Do not route small tasks through formation merely to claim one entry.
+2. Make project coord copy a projection. Inventory unique old clauses, preserve applicable
+   local obligations via canonical policy/runbook, remove contradictions. Generic source
+   defers to host verification/merge rules; Edda L0/CI/C5/R6 stays local.
+3. Turn listed old entries into thin routes for delivery orchestration. Preserve useful
+   issue-specific investigation and option meanings, especially --no-merge/--skip-plan.
+   Delete their independent all-agent phase waits/fresh-fixer/merge loops, not just add a
+   pointer beside contradictory instructions. Inbound affected callers still resolve.
+4. Implement WORKFLOW's caller protocol in guidance, not new code: active card-to-task map,
+   reachable brief, stable dedup key/readback, controller prestart, backend-specific launch,
+   worker receipt, restart reconciliation, failed-task same-ID start retry. Changed scope/
+   owner gets an explicit replacement mapping and remapped pending successors; no fake done.
+5. Keep same chain with one owner; review-ready candidate proceeds without unrelated work.
+   Existing source/claim permissions remain. Worktree isolation is not conflict immunity.
+6. Replace direct gh merge path with canonical product path under existing controller R6.
+   Independent verdict and current-head rules remain; task done means stated output, not
+   obligatory PR/merge. No extra author checks or per-transition board ceremonies are added.
+7. Remove imperative full-local-freeze and docs-only build-lane instructions in the listed
+   sources/entry summaries. Point to canonical ladder: author focused L0, L1 exact-head CI,
+   verifier only uncovered focused checks including applicable Windows C5. No full local
+   workspace run solely because a SHA froze.
+8. Specify existing init adoption, not magical update: fresh detected hosts get template;
+   existing custom files remain. Owner updates selected copy explicitly; never automatically
+   --force-skills all five. Marker/hash identifies what was read, not a new admission gate.
+9. Add V1/V6 fixtures with positive/negative cases. Static checks inspect active procedural
+   sections, allow quoted historical bad examples, catch duplicate active loops. Existing
+   init tests prove actual projection bytes and preserved custom files. Isolated real task
+   CLI fixtures prove start/fail/start increments attempts, key dedup does not update fields,
+   and only real dependency completion unlocks successors. No actual model/network launch.
 
 ## Acceptance / commands
 
@@ -55,15 +81,23 @@ sh scripts/lint-doc-citations.sh --tree
 git diff --check
 ```
 
-New test is implemented by this card; not available before it. V1 requires A to proceed
-before B and C to wait only for A. Same-file incompatible writes remain serialized.
+New test is implemented here; not available before A1. V6 fixtures may use an explicitly
+bound freshly built `EDDA_BIN` and temporary isolated ledger/stores; never main task rail.
+Check every supported entry reaches equivalent next-action semantics; fake transports
+validate chosen arguments/lifecycle ownership, not claim a real backend was exercised.
+
 Run focused `cargo test -p edda` and `cargo clippy -p edda --all-targets -- -D warnings`
-in the assigned lane because embedded skill content is a product blob; follow current L0
-format/file-length checks. Read exact-head CI at freeze, not another full local workspace run.
+in the assigned lane: embedded content is a product blob and init tests compile. Follow
+current L0 format/file-length checks. Read exact-head CI at freeze; no second full local
+workspace run. V6 live agent observation is optional, separately authorized evidence;
+absence is 'not observed', not a blocker on this guidance delivery.
 
 ## Delivery / rollback
 
-Conventional intent: `refactor(fleet): advance cohesive bundles without phase barriers`.
-May continue directly to A2 with same context before review; no forced task/PR split.
-If rolling guidance regresses ownership, fix/revert that guidance in a new commit without
-restoring direct unpinned merge or touching peer sources. Report actual cost, not estimates.
+Intent: `refactor(fleet): converge entry routes on one delivery flow`.
+A1 can use coherent subcommits (source/routes, adapter guidance, fixtures); not a new task
+per step. Continue directly to A2 in the same context before review if appropriate.
+A3 remains independently schedulable. Plan publication does not activate this behavior;
+actual source landing and selected host adoption are separate receipt facts.
+If regression occurs, fix/revert this scope in a new commit; preserve customized installs,
+peer sources and unmerged work. Do not restore unpinned merge or an old hidden phase loop.

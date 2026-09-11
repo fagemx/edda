@@ -8,7 +8,7 @@
 | Change | RAN while iterating | READ / frozen-head evidence |
 |---|---|---|
 | This planning pack only | Markdown/citation/link/example/DAG checks, diff check | base CI only as baseline; no candidate CI claim |
-| A1 embedded skill / A2 optional review input | focused `edda` L0 + guidance/context fixtures | exact-head CI; reviewer only uncovered checks |
+| A1 embedded skill/routes/projection tests / A2 optional review input | focused `edda` L0 + V1/V6/context fixtures | exact-head CI; reviewer only uncovered checks |
 | A3 REVIEW + shell fixture only | review-l0/compare tests, shell syntax, docs checks | exact-head CI; no local Cargo |
 | B2 continuity integration | focused changed crates + producer/consumer tests | exact-head CI + Windows core gap as applicable |
 | C1 historical trial | scoped offline edda checks and independent local source review | prior evidence read as historical, no fake current CI |
@@ -49,8 +49,9 @@ instructions to run a full local gate set for every frozen SHA; quoted historica
 remain distinguishable. No rule introduces a docs-only build lane prerequisite.
 
 Verification after A1: `sh scripts/test-delivery-guidance.sh` plus documented trace review.
-The test uses static positive/negative fixture text; no polling daemon, real agents,
-worktree cleanup or new CI job. C1 later samples whether the guidance works in practice.
+The V1 portion uses static positive/negative fixture text; no polling daemon, real agents,
+worktree cleanup or new CI job. V6 adds isolated CLI/projection proofs. C1 later samples
+whether the guidance works in practice, not all supported entries.
 
 ## 3. V2 — Self-check and review continuity (A2 / DF-03–06)
 
@@ -175,7 +176,66 @@ If no accepted outcome, cost-per-accepted-result is undefined, not zero. A match
 needs the same input/acceptance/model/allowance and separately identified guidance;
 small samples/historical patch familiarity must be disclosed. No benchmark must pass before B lands.
 
-## 7. Planning-pack validation (this document delivery)
+## 7. V6 — Repeatable entry, task adapter and adoption (A1 / DF-10/11)
+
+Canonical expected behavior is [WORKFLOW](WORKFLOW.md), not another inferred procedure.
+V6 is A1 change validation, not a required job or a per-task launch certification.
+
+### Text and entry cases (offline fixtures)
+
+| Input | Required result | Evidence class |
+|---|---|---|
+| Same assigned task through AGENTS/host skill/issue-action | read assigned brief/results, no new planning/formation | route fixture + active-section audit |
+| Existing plan through issue-pipeline versus direct controller | same ready work/dependencies; preserve --no-merge/--skip-plan intent | positive/negative route fixtures |
+| Solo tiny change | ordinary work, no mandatory rail/program/formation | route fixture |
+| A ready, B slow, C depends A | A can review, C waits only for its artifact, not B | V1 trace reused |
+| Thin pointer plus old active phase/fresh-fixer/merge loop | fixture FAILS; merely adding links is insufficient | mutated negative fixture |
+| Edda canonical and tracked project coord | identical repository blob content, local policy referenced not lost | source parity/inventory audit |
+| Changed owner/brief, pending old successors | replacement active mapping and new needed successor edges; no fake done/no after-failed-old | recovery trace |
+| Unmapped/superseded ready task | no dispatch by this controller; only active map candidates selected | selection trace |
+
+### Real local substrate cases (no model/network)
+
+Use a fresh A1-built `EDDA_BIN`, temporary repositories and per-child `EDDA_STORE_ROOT`;
+`init --no-hooks` still registers a project, so isolating only `.edda` is insufficient.
+Reuse existing focused test receipts where they prove the same fact; add only missing
+coverage to `scripts/test-delivery-guidance.sh` / cmd_init tests. Report actual commands.
+
+1. Real CLI new with a key twice yields same task ID/fields. Reusing key with changed
+   brief/owner does NOT update the record; controller fixture selects a new revision.
+2. Controller start once; worker fixture reads running. A second start refuses. Fail then
+   start same ID increments attempt; done cannot start. Source anchor:
+   `cmd_task::fail_running_task_records_reason_and_start_retries`.
+3. Independent B remains ready while A failed; C after A remains blocked. Retrying and
+   completing A with a real fixture receipt unlocks C; no process is auto-spawned.
+4. First/normal legacy launch record contains task-linked prompt-file; ACP launch record
+   requires prior running, matching agent_kind, concrete existing roots and relative brief.
+   Fake launcher verifies controller/worker never both start. No legacy --task-id, no Pi
+   --resume, no ACP substitute flags; do not imply fake transport tested a real model.
+5. ACP short injected entry has reachable full card; truncated/unavailable content is
+   disclosed rather than treated as complete acceptance. READ relevant real preflight/
+   task_prompt tests and inspect fixture-selected policy roots; no widening for convenience.
+6. Dispatch done plus running task/missing receipt leaves candidate unverified, not merged.
+   Lost handle/lease-timeout-only fixture never auto-fails or relaunches. Definite stopped
+   prelaunch failure is recorded once. Receipt-only correction is not a new attempt.
+7. Actual init in fresh detected .claude and .agents fixtures writes embedded bytes;
+   existing custom skill remains unchanged; no-host fixture receives no skill projection.
+   READ/reuse `init_scaffolds_coord_skills`, `init_scaffolds_codex_coord_skills`,
+   `init_skips_existing_skills`; extend missing byte-parity assertions. Force-overwrites
+   semantics remain covered by existing test, never exercised on user's installation.
+8. Old/custom/missing marker path preserves work and customization, reports actual source;
+   fixture must not call --force-skills or install a hook. Local-only plan receipt never
+   becomes 'published' or 'all hosts adopted' based on a successful file check.
+
+### Live observation is separate, not another delivery gate
+
+If a separately authorized real session uses a v1 entry, record input/task, selected
+host/path/marker/digest, source/binary identity, observed next actions and deviations in
+its ordinary receipt. No extra paid sessions, benchmark pass threshold or required report.
+No authorized runtime observation means **not observed**, not 'all agents conform'.
+C1 provides one specific path observation only; it cannot certify this entire matrix.
+
+## 8. Planning-pack validation (this document delivery)
 
 - Every task has exact paths, existing inputs, output, checks, owner and local stop scope.
 - IDs in DAG resolve to task cards, no cycles or hidden B/C prerequisites on A.
@@ -187,5 +247,7 @@ small samples/historical patch familiarity must be disclosed. No benchmark must 
 
 Run `sh scripts/lint-markdown-content.sh`, `sh scripts/lint-doc-citations.sh --tree`, and
 `git diff --check` with new docs included in the index so git-ls-files linters see them.
-Record results in the task #142 receipt. Docs-only: **no local Cargo gate**.
+Record amendment results in task #143; keep #142's original receipt historical.
+Docs-only: **no local Cargo gate**. Recheck command/behavior claims against pinned source;
+`--help` availability alone does not prove task state transitions or auto-launch.
 New-file validation is not exact-head CI; do not call an unpushed planning candidate CI-green.

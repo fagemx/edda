@@ -2,6 +2,7 @@
 
 > Status: implementation-ready proposal; runtime rules unchanged until their scoped changes land.
 > Types: [CONTRACT.md](CONTRACT.md) is the only definition site.
+> Entry/task/transport/recovery/adoption: [WORKFLOW.md](WORKFLOW.md) is the operating contract.
 
 ## 1. One sentence
 
@@ -26,6 +27,9 @@
 小任務不要求先建立 program、JSON、額外 task 或完整 dossier。
 新大型需求先有一個 program 紀錄，child issue 在邊界稳定／需對外追蹤時才建立。
 不重複建立 GH1141 或把六張執行卡機械轉成六張 issues。
+本機工作可先用 user/spec acceptance；正式 PR 在建立時連結清楚的 delivery acceptance，
+依現行 REVIEW metadata 規範行事。A3 未採用前沒有 convention 豁免。
+詳細 issue 時機與發布權限見 WORKFLOW §6；不是沒有 issue 就不能派工。
 
 ## 4. Decomposition algorithm (controller guidance)
 
@@ -74,6 +78,9 @@ accepted intent -> owner with facts -> implement + two self-check lenses
 
 沒有 launch evidence 時不能猜「沒跑」就再次啟動；沒有 heartbeat 也不能猜 process 已死。
 本輪不新增 exactly-once guarantee；不可判定的副作用維持局部 unknown，不重做 merge。
+以上是交付觀察，不是 task rail 的新狀態。WORKFLOW §4/5 定義 controller prestart、
+worker settlement、failed 同 ID start retry、changed-brief replacement。Dispatch done
+不等於 task done，更不等於 independent acceptance；無需另造 retry API。
 
 ## 6. Two self-check lenses, one author context
 

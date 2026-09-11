@@ -1,7 +1,7 @@
 # Executable tracks
 
 > Task IDs below are plan-local; no allocation of six GitHub issues or rail tasks is implied.
-> Read [SPEC.md](SPEC.md) and [CONTRACT.md](CONTRACT.md) before implementation.
+> Read [SPEC.md](SPEC.md), [CONTRACT.md](CONTRACT.md) and the [WORKFLOW](WORKFLOW.md) route relevant to your role.
 
 ## Layers and dependency DAG
 
@@ -26,7 +26,7 @@ Two compile-needed sessions use different allowed lanes; do not inherit one shar
 
 | Card | Owner profile | Input | Output | Depends on | Can begin |
 |---|---|---|---|---|---|
-| [A1](tasks/A1-rolling-bundles.md) | strong workflow implementer | current source + DF-01/02/09 | cohesive rolling skill path + offline fixture | none | immediately |
+| [A1](tasks/A1-rolling-bundles.md) | strong workflow implementer | current source + WORKFLOW / DF-01/02/09/10/11 | canonical source, thin entries, task adapters/recovery, adoption fixtures | none | immediately |
 | [A2](tasks/A2-review-continuity.md) | same A owner | A1 source + actual review carrier/resume behavior | optional context-file + two author lenses + native handoff | A1 | A1 candidate available |
 | [A3](tasks/A3-convention-policy.md) | A owner or disjoint policy worker | base REVIEW semantics | U3-only advisory rule + runner regression tests | none | immediately, capacity permitting |
 | [B1](tasks/B1-release-cut.md) | existing continuity controller | task113 / GH1141 / current stack | owner-adopted usable-slice amendment | none | read-only now; edit after permission |
@@ -42,14 +42,16 @@ record that guidance SHA as experimental, not current repository policy.
 
 | Surface | Writer / task | Responsibility |
 |---|---|---|
-| `.claude/skills/issue-pipeline/SKILL.md` | A owner / A1 then A2 | rolling dependencies, canonical merge, follow-up resume |
-| `.claude/skills/coord-orchestrate/SKILL.md` | A owner / A1 then A2 | project-specific decomposition and shared facts |
-| `crates/edda-cli/src/skills/coord-orchestrate.md` | A owner / A1 then A2 | shipped generic guidance, no repository-specific R6 enforcement |
-| `docs/guides/operator-runbook.md` | A owner / A1 then A2 | route table, not another duplicated procedure |
-| `.claude/skills/issue-action/SKILL.md` / `pr-review-loop/SKILL.md` | A owner / A2 | update only conflicting author/fixer self-check guidance |
-| `scripts/test-delivery-guidance.sh` (new test only) | A owner / A1 then A2 | static positive/negative guidance regression checks |
+| `.claude/skills/issue-pipeline/SKILL.md` | A owner / A1 then A2 | thin input route, no own phase/merge loop |
+| `.claude/skills/coord-orchestrate/SKILL.md` | A owner / A1 then A2 | tracked identical projection, not a second authored flow |
+| `crates/edda-cli/src/skills/coord-orchestrate.md` | A owner / A1 then A2 | sole generic operating flow; local policy retains authority |
+| `AGENTS.md` | A owner / A1 | startup/router pointer and obsolete start/freeze wording only |
+| `docs/guides/operator-runbook.md` | A owner / A1 then A2 | route/transport index and necessary preserved local policy |
+| `.claude/skills/issue-action/SKILL.md` / `pr-review-loop/SKILL.md` | A owner / A1 routing then A2 details | role-specific input/self-check, not parallel delivery loops |
+| `scripts/test-delivery-guidance.sh` (new test only) | A owner / A1 then A2 | static routes/negative cases and isolated task CLI fixtures |
+| `crates/edda-cli/src/cmd_init.rs` tests only | A owner / A1 | template projection parity and custom-file preservation, no production init change |
 | `crates/edda-cli/src/cmd_review/{args,prepare,brief,mod,tests}.rs` and direct struct fixtures | A owner / A2 | optional bounded context input/notes, no authority/schema change |
-| `docs/reference/cli.md` | A owner / A2, then agreed B2 consumer-doc handoff | review input reference; coordinate if B2 also needs edits |
+| `docs/reference/cli.md` | A owner / A2, then agreed B2 consumer-doc handoff; C1 in isolated historical checkout only | review input reference; coordinate live A/B edits |
 | `REVIEW.md` / `scripts/review-l0.sh` | A3 owner | U3 convention semantics only |
 | `scripts/test-review-l0.sh` | A owner / A3 | preserve failures, add U3 nonblocking case |
 | GH1141 plan + `docs/superpowers/continuity/program.md` | existing continuity owner / B1 | release amendment, no acceptance erasure |
@@ -83,7 +85,9 @@ C consumes those existing interfaces and reports gaps; it must not grow a new ha
 
 ## Common execution instructions
 
-1. Read your card and linked contract/validation cases only; no need to rediscover all tracks.
+1. Read assigned task/card and relevant WORKFLOW route; do not rediscover all tracks.
+   Controller materializes only executable work, binds actual IDs/brief paths/active mapping,
+   and prestarts before launch; worker does not double-start. Use WORKFLOW §3–5 for recovery.
 2. Pin actual current base and inspect applicable CI/receipts; inspect active peers/claims.
 3. Writer gets its own branch/worktree and the smallest accurate scope. Respect existing
    ownership; sharing a Git common dir does not isolate integration conflicts.
@@ -97,7 +101,8 @@ C consumes those existing interfaces and reports gaps; it must not grow a new ha
 
 ## Track acceptance / delivery units
 
-- A: V1/V2/V3 cases pass; source projections agree; canonical merge and safety unchanged.
+- A: V1/V2/V3/V6 cases pass; source projections and entry semantics agree; canonical merge
+  and safety unchanged. Record local/published/host-adopted separately; no automatic upgrade.
   Deliver one coherent guidance/policy PR or smaller usable PRs, independently of B/C.
 - B: local save/restore/skills and required bundle/consumer behavior proven at current head;
   no S3–S10 all-program waiting. Requires B1 adoption, own CI and final verdict.
