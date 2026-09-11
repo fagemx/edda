@@ -77,6 +77,9 @@ fn decode(output: &process::Output, allow_nonzero: bool) -> Result<Value> {
         !output.truncated,
         "GitHub evidence exceeds bounded JSON capture"
     );
+    if output.stdout.is_empty() && allow_nonzero && matches!(output.exit, 1 | 8) {
+        return Ok(Value::Array(vec![]));
+    }
     let value: Value = serde_json::from_slice(&output.stdout).context("GitHub evidence JSON")?;
     anyhow::ensure!(
         output.exit == 0 || (allow_nonzero && matches!(output.exit, 1 | 8) && value.is_array()),
@@ -151,6 +154,36 @@ mod tests {
             truncated: true,
         };
         assert!(decode(&output, true).is_err());
+    }
+
+    #[test]
+    fn empty_required_checks_are_tolerated_only_for_known_nonzero_exits() {
+        for exit in [1, 8] {
+            let output = process::Output {
+                exit,
+                timed_out: false,
+                stdout: vec![],
+                truncated: false,
+            };
+            assert_eq!(decode(&output, true).unwrap(), json!([]));
+            assert!(decode(&output, false).is_err());
+        }
+        for exit in [0, 2] {
+            let output = process::Output {
+                exit,
+                timed_out: false,
+                stdout: vec![],
+                truncated: false,
+            };
+            assert!(decode(&output, true).is_err());
+        }
+        let malformed = process::Output {
+            exit: 1,
+            timed_out: false,
+            stdout: b"not JSON".to_vec(),
+            truncated: false,
+        };
+        assert!(decode(&malformed, true).is_err());
     }
 
     #[test]

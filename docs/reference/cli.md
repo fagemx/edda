@@ -1236,7 +1236,8 @@ round. With the flag the policy is `model` and any independence other than
 `verified` disqualifies it.
 
 Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
-Missing checks remain unverified; any red evidence wins. `--run-gates` opts in
+When GitHub reports no required checks yet, review still launches and CI evidence
+remains absent/unverified; any red evidence wins. `--run-gates` opts in
 to execution of trusted declared commands, bounded by `--max-ran-sec` (300 by
 default). Cargo gates require an existing `CARGO_TARGET_DIR` build lane.
 `--trust-spec` authorizes issue verify commands; explicit issue selection by
