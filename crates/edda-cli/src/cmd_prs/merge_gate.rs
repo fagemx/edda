@@ -224,8 +224,7 @@ pub fn format_merge_report(result: &MergeGateResult) -> (String, String) {
 
     if result.can_merge {
         let _ = writeln!(stdout_buf, "PASS: Merge preconditions satisfied.");
-        writeln!(stdout_buf, "  Advisory: {ADVISORY_NOTICE}")
-            .expect("writing to String cannot fail");
+        stdout_buf.push_str(&format!("  Advisory: {ADVISORY_NOTICE}\n"));
         let _ = writeln!(stdout_buf, "  PR Head:     {}", result.head_sha);
         if let Some(author) = &result.pr_author {
             let _ = writeln!(stdout_buf, "  PR Author:   {author}");
@@ -260,8 +259,7 @@ pub fn format_merge_report(result: &MergeGateResult) -> (String, String) {
             "REFUSED: Merge preconditions not satisfied for head {}:",
             result.head_sha
         );
-        writeln!(stderr_buf, "  Advisory: {ADVISORY_NOTICE}")
-            .expect("writing to String cannot fail");
+        stderr_buf.push_str(&format!("  Advisory: {ADVISORY_NOTICE}\n"));
         if let Some(author) = &result.pr_author {
             let _ = writeln!(stderr_buf, "  PR Author:   {author}");
         }
