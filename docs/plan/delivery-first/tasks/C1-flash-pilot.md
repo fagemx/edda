@@ -1,7 +1,7 @@
 # C1 — One bounded Flash repair with observable handoff and cost
 
 > Owner: strong planner, one Flash author, independent reviewer; these describe this trial,
-> not new mandatory product roles. Depends on: A2 candidate guidance, not B2/A3/S5/node.
+> not new mandatory product roles. Depends on: A2 candidate guidance/product binary, not B2/A3/S5/node.
 > Delivery: pilot evidence; no duplicate issue/PR for a historical fix.
 
 ## Concrete task, not an invented future issue
@@ -18,7 +18,7 @@ Acceptance for the trial:
 - no stderr-text matching; existing argv/environment behavior is preserved.
 
 Allowed repair paths: `crates/edda-cli/src/cmd_review/github.rs`, corresponding narrow
-unit tests there, `crates/edda-cli/tests/review_merge_advisory.rs`, relevant CLI reference.
+unit tests there, `crates/edda-cli/tests/review_merge_advisory.rs`, `docs/reference/cli.md`.
 No merge authority/shell/CI/workflow modifications. No GitHub publication or real merge.
 This experiment replays a closed issue; it does not count as new shipped product value.
 
@@ -26,9 +26,10 @@ This experiment replays a closed issue; it does not count as new shipped product
 
 1. Check exact historical object exists; obtain it from PR1143's existing refs/history if
    necessary. Use a fresh isolated experimental checkout, never an active peer checkout.
-2. Bind actual installed runtime/provider/model/version, guidance source SHA, timeout,
-   single-call funded allowance, available build lane and store isolation. Record missing
-   cost reporting and budget enforcement capability. Never inspect or print secret values.
+2. Bind actual installed runtime/provider/model/version, guidance/product source SHA,
+   timeout, one funded author call and one separately funded independent review, available
+   build lane and store isolation. No correction call is authorized by this card. Record
+   missing cost reporting and budget enforcement capability. Never inspect or print secret values.
 3. Give the worker issue behavior and source starting points, not the already merged fix
    diff or gold patch. Reviewer can use final `10865bdcf503d7296ed6749318f781b00001dc13`
    as an oracle but compares behavior, not identical implementation.
@@ -57,10 +58,12 @@ TIMEOUT_SEC and spend allowance must be explicit before paid execution. Budget f
 are not represented here as a hard guarantee: repository evidence shows some backends
 report over-budget after spending. If a hard spend ceiling is required but the selected
 provider cannot enforce it, do not run; return unavailable for this attempt.
-Run one attempt first. At most one correction/resume within the already bound allowance;
-no automatic fallback to a more expensive model, repeated benchmark, or unbounded retry.
-Use backend-correct continuation: Pi dispatch repeats session ID; unlike product review,
-Pi dispatch does not accept the `--resume` flag. Reviewer uses its own review continuity.
+Run exactly one author attempt and one independent review. Check the corresponding
+funded allowance before each paid launch. No correction/resume, automatic stronger-model
+fallback or repeated benchmark is authorized. Record a requested correction as follow-up,
+not another call. Native resume remains covered by A2 fixtures, marked not exercised here.
+For future separately authorized experiments, Pi dispatch repeats session ID; unlike
+product review it does not accept --resume. Do not mix backend continuation semantics.
 
 ## Self-check / review / validation
 
@@ -78,9 +81,14 @@ cargo test -p edda --bin edda cmd_review
 ```
 
 Run focused edda lint/format under the current verification budget, no full workspace.
-Independent reviewer checks the actual modified source and offline evidence; one correction
-resumes author/reviewer contexts. No new PR, no use of live required-check API failure as
-permission to attempt merge. This is local-only evidence under existing local review rules.
+Author freezes the repair as a local experimental commit, no push/PR; capture that full
+result SHA. A current A2-built review binary (not the historical candidate executable)
+can review the input-to-result range with acceptance in --spec and author facts in the
+new --context-file. Bind that review-binary SHA/version separately. If author produces no
+candidate, record failure; any review of partial work is evidence, not a frozen-head LGTM.
+Independent reviewer checks actual source and offline evidence in its one funded call.
+No new PR, no live forge writes and no correction loop. This is local-only evidence under
+existing local review rules.
 
 ## Report at docs/evidence/delivery-first/pilot.md
 

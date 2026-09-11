@@ -11,7 +11,8 @@
 | 一 issue 一 fresh agent 導致上下文切碎 | 同 skill 的 per-issue planning、implementation、fresh fixer | 相同 call chain 用同一 owner；issue/task/PR 分開定義 | A1 |
 | Review continuity callers 漂移 | pipeline 返工命令沒有 `--resume`；`cmd_review/prepare.rs` 支援 prior session | 能 resume 就同 reviewer；不能時明示 replacement，不重用空 UUID 假裝延續 | A2 |
 | 隔離語義混淆 | REVIEW §1 允許 private ref；`cmd_review/mod.rs::run_with` 仍 create WorktreeGuard | direct reader 不需 worktree；產品自己的 guard 不拆；不額外包第二層 | A2 |
-| Facts 分享缺少使用方法 | `prepare::assemble` 已組 spec/ledger/evidence/diff，沒有通用作者 context flag | PR handoff／既有 task receipt 放可讀 facts；不得把它塞成 trusted spec | A2 |
+| Product facts carrier 缺失 | `prepare::assemble` 沒有作者 context 輸入；reviewer 無 shell/gh，不能自行取得任意 PR handoff | 補 optional --context-file，bounded data-only，直接進 brief 與既有 notes；不充當 trusted spec | A2 |
+| 舊本機 freeze gate 指示仍在 | 兩份 tracked coord skills 指示 implementer 每 frozen SHA 跑 full gate set | 明確改成 implementer focused L0、L1 exact-head CI、verifier focused C5；fixture 防回歸 | A1 |
 | 文書與缺陷等級混用 | REVIEW U3 自稱 convention miss 仍 P1；PR1147 已有 Closes 仍命中 | 只把 U3 exact-line convention 改 advisory；其他規則原樣 | A3 |
 | REVIEW prompt 約 58 KB | `brief::assemble` 完整嵌入 base REVIEW.md，diff budget 不限 spec 長度 | 先減 caller 儀式；規則投影不在本輪，避免新 compiler/安全漏讀 | deferred |
 | S10-before-carve 延後全部功能 | GH1141 plan §16 / S10 depends S1–S9 | owner 將 whole-program proof 與 usable-slice landing 分開 | B1 |
@@ -73,7 +74,8 @@ B2 不能假設 continuity 的不同 event 不需要 SDK 整合：必須獨立�
 ## 6. Decision status
 
 這些是使用者要求的 spec/plan 選擇，不是對現行 REVIEW/R6 的即刻 override。
-A1/A2 正常流程修改與 A3 policy delta 可分開交付。B1 是現有 program 的具體
+A1 流程修改、A2 可選資料輸入與 A3 policy delta 可分開交付。A3 無 A2 artifact 依賴。
+B1 是現有 program 的具體
 release amendment，不要求新 program 或逐張 issue 的再次批准。
 
 相關定義：[SPEC.md](SPEC.md)、[CONTRACT.md](CONTRACT.md)。

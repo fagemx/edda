@@ -34,9 +34,14 @@ No task/dispatch/control code, no workflow/hook changes, no peer program plan ed
    controller-only under repository standing R6; never self-merge by worker/reviewer.
    Generic shipped skill continues to defer to the host repository's actual policy.
 5. Correct build setup to assign separate allowed lanes only to sessions that compile;
-   docs-only controllers must not require CARGO_TARGET_DIR just to start.
+   docs-only controllers must not require CARGO_TARGET_DIR just to start. In BOTH tracked
+   coord-orchestrate sources, remove implementer instructions to run the full local gate
+   set on every frozen SHA. State the canonical ladder explicitly: author focused L0;
+   L1 exact-head CI; verifier runs only uncovered focused checks including Windows C5.
+   A freeze does not itself authorize a full local workspace rerun.
 6. Add offline static guidance fixture. Check active procedural sections for forbidden
-   blanket phase waits/direct merge and for explicit prerequisite progression. Fixture
+   blanket phase waits/direct merge/full-local-freeze instructions and for explicit
+   prerequisite progression plus author-L0/CI-L1/verifier-gap ownership. Fixture
    should accept quoted historical bad examples without mistaking them for instructions.
    Include a small A-ready/B-waiting/C-depends-A trace per V1. Label it a design/static
    fixture, not proof that a live LLM obeys the guidance.

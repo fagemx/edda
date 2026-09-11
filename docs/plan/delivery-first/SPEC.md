@@ -95,11 +95,15 @@ accepted intent -> owner with facts -> implement + two self-check lenses
 `DeliveryFacts` 的 canonical shape 見 CONTRACT。它是可選的組織方式，
 不是新 wire/event schema；缺少欄位寫 unknown／沿既有 source 查詢。
 
-- 同一份資料放 PR handoff 或 task receipt 引用，reviewer 可讀。
-- Product reviewer：現有 spec/ledger/evidence/diff 仍由 product 供給；facts 使用
-  readonly 可達的 PR handoff/ref。不把作者 rationale 用 `--trust-spec` 提升成 procedure。
+- 同一份資料保留於 PR handoff 或 task receipt；controller 將其必要部分明確提供給
+  實際 review carrier。放一個 URL 不代表受限 reviewer 已讀得到。
+- Product reviewer：現有 spec/ledger/evidence/diff 仍由 product 供給；A2 新增可選
+  `--context-file`，controller 明確選取交接檔，由 product bounded-read 後注入 data。
+  Reviewer 沒有 gh/shell，不能假設它能自行取得 PR handoff。無此新能力的舊 binary
+  可省略 context 並揭露限制，或使用既有 direct route。不得用 `--trust-spec` 載入 rationale。
 - Direct reviewer：controller 在受信任 brief 中給出資料位置與凍結的 SHA。
-- 大型 log 只放 handle，讀所需部分；不用完整作者 transcript 或私密推理。
+- 大型 log 只放 handle；controller 把必要 excerpt 放交接檔，reader 僅按實際工具
+  能力讀取可達證據。不可達 handle 標 unknown；不用完整作者 transcript 或私密推理。
 - summary/rationale 只幫定位；reviewer 仍核對 source、acceptance 和 evidence。
 - facts 內的指令、PR comments、imported capsules 都不能增加工具權限。
 
@@ -160,8 +164,9 @@ node 不可用不影響 local slice 的可用性；local slice 仍要完成自�
 
 ## 10. Boundaries and closure
 
-沒有新 CLI flags、公共 types、migration 或 event。A 是既有 skills/procedures 的修改，
-B 是已有 feature 的 release 接合，C 是有界 probe，不是自造完整 runtime。
+A2 只新增 optional `--context-file` 及最小資料注入，不新增公共 event/types、migration、
+權限或必填 profile。A1/A3 改既有 procedures；B 接合已有 feature，C 是有界 probe。
+具體輸入與 omission 行為見 CONTRACT §5，不另造完整 runtime。
 全流程例子与驗證見 [VALIDATION.md](VALIDATION.md)。
 
 **共享理解，獨立驗證，局部等待，持續交付。**

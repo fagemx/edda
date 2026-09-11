@@ -1,6 +1,7 @@
 # A3 — U3 exact Issue line becomes a nonblocking convention
 
-> Owner: A workflow implementer. Depends on: A2 candidate (same source owner).
+> Owner: A workflow implementer or a disjoint policy worker. Depends on: none.
+> Same-owner capacity may serialize work; it is not an artifact dependency.
 > Contract: DF-01/05/07. Delivery: narrow REVIEW + runner/fixture change.
 
 ## Read first

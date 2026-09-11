@@ -31,19 +31,17 @@
 ## Tracks and rolling DAG
 
 ```text
-A1 cohesive / rolling workflow -> A2 shared facts / resume -> A3 U3 convention
-                                      |
-                                      +-> C1 bounded Flash pilot
-
+A1 cohesive / rolling workflow -> A2 optional context / resume -> C1 Flash pilot
+A3 U3 convention (independent)
 B1 owner-adopted usable release cut -> B2 continuity slice delivery
 
-A、B 各自推進；C1 不等 A3/B2/node/control/S10。
-A2 後 A3 與 C1 可並行；同時編譯仍服從既有 build lane 容量。
+A3、B1 與 A1 可各自推進；C1 不等 A3/B2/node/control/S10。
+同一 owner 的容量影響排程，不虛構 artifact dependency。
 ```
 
 | Track | Tasks | First outcome | Dependencies | Status |
 |---|---|---|---|---|
-| A Flow | A1, A2, A3 | 現有流程不再全批等齊，review 延續脈絡 | none | planned |
+| A Flow | A1, A2, A3 | 滾動流程、review 可選 context/resume、U3 提示 | A2 consumes A1；A3 independent | planned |
 | B Continuity | B1, B2 | 已有本機保存／恢復與原生 skills 可被交付 | B1 需 existing owner 採納 release amendment | owner handoff pending |
 | C Flash | C1 | 一件真實歷史 bug 的有限範圍執行證據 | A2；runtime/model/budget 現場綁定 | planned |
 
@@ -55,6 +53,7 @@ A2 後 A3 與 C1 可並行；同時編譯仍服從既有 build lane 容量。
 Edda 保留既有執行與證據能力；本計畫先改「如何使用它們」。
 `edda review` 仍擁有自己的 guarded worktree，直接 read-only review 可以讀 immutable ref。
 不把兩條路誤寫成同一種生命週期，也不在產品外再包一個 review worktree。
+A2 唯一新增產品介面是可選的 `--context-file`；共享 facts 不靠 reviewer 自行跑 gh。
 完整 control/node 能力仍由 GH1141 繼續交付，不作為本輪全部功能的前置条件。
 
 ## Promotion memo: spec to executable work
@@ -63,7 +62,7 @@ Edda 保留既有執行與證據能力；本計畫先改「如何使用它們」
   usable slice 不等於 whole-program completion。
 - Canonical cycle: [SPEC.md](SPEC.md)；單一定義：[CONTRACT.md](CONTRACT.md)。
 - Concrete closure: A/B/C 三個 bundle 與兩輪 review 的案例見 SPEC、VALIDATION。
-- Promoted now: A1–A3 的既有 guidance/fixture 修正。
+- Promoted now: A1 guidance/fixture、A2 optional review context/resume、A3 U3-only policy。
 - Conditional execution: B1/B2 的跨 owner release 協調；C1 的有界 runtime trial。
 - Not promoted: 任意 REVIEW 規則投影、通用控制平面、跨機接管、全面降級 P0/P1。
 - 這是可執行的 spec scenario，不是已跑成功的 runtime demo。

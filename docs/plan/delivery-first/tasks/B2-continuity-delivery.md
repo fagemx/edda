@@ -78,7 +78,9 @@ can regenerate outputs, so it is not a reviewer read-only check.
 ## Acceptance
 
 V4 cases: exact local save/readback; new session restores goal/next action; bundle imports
-once to a fresh isolated store; duplicate import visible; corrupt/conflicting content
+once to a fresh isolated store in a second clone deriving the same portable repository
+identity (same canonical remote or explicit approved mapping); duplicate import visible;
+unrelated repository import correctly refuses. Corrupt/conflicting content
 refuses; dirty/missing SHA are warnings; old binary feature detection; imported commands
 remain data. Live sync unavailable is truthful, not silently successful.
 

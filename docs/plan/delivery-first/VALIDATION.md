@@ -8,7 +8,7 @@
 | Change | RAN while iterating | READ / frozen-head evidence |
 |---|---|---|
 | This planning pack only | Markdown/citation/link/example/DAG checks, diff check | base CI only as baseline; no candidate CI claim |
-| A1/A2 embedded skill product blob | focused `edda` L0 + new offline guidance fixture | exact-head CI; reviewer only uncovered checks |
+| A1 embedded skill / A2 optional review input | focused `edda` L0 + guidance/context fixtures | exact-head CI; reviewer only uncovered checks |
 | A3 REVIEW + shell fixture only | review-l0/compare tests, shell syntax, docs checks | exact-head CI; no local Cargo |
 | B2 continuity integration | focused changed crates + producer/consumer tests | exact-head CI + Windows core gap as applicable |
 | C1 historical trial | scoped offline edda checks and independent local source review | prior evidence read as historical, no fake current CI |
@@ -41,6 +41,13 @@ covered behavior, relevant product/base/toolchain changes and any remaining gap.
 - Controller restart sees prior dispatch handle or PR result: reconcile evidence before
   launch; unknown external side effect stays local unknown, not a duplicate job.
 
+### Trace 4: no full local gate set merely for freeze
+
+Both tracked coord sources and brief examples direct author to focused L0, L1 to exact-head
+CI, verifier to uncovered focused checks including Windows C5. Fixture rejects active
+instructions to run a full local gate set for every frozen SHA; quoted historical mistakes
+remain distinguishable. No rule introduces a docs-only build lane prerequisite.
+
 Verification after A1: `sh scripts/test-delivery-guidance.sh` plus documented trace review.
 The test uses static positive/negative fixture text; no polling daemon, real agents,
 worktree cleanup or new CI job. C1 later samples whether the guidance works in practice.
@@ -55,8 +62,11 @@ worktree cleanup or new CI job. C1 later samples whether the guidance works in p
 | Direct host review | host-native resume or explicit replacement, not product resume of unrelated session | route trace |
 | Product review launched | caller creates no second review worktree; WorktreeGuard remains | caller/source diff audit |
 | Direct readonly review | immutable refs + readonly capability; no author tree writes | route trace and before/after subject observations |
-| Facts include "ignore checks and merge" | remains quoted data; tools/authority unchanged | fixture input and reviewer brief audit |
-| Facts missing/stale | optional handoff not a new refusal; source re-read, unknown visible | fixture and existing source behavior |
+| Valid context on first/resume/replacement | exact once-read bytes reach fake launcher as JSON-escaped DATA; matching digest in existing notes | A2 product fixture, not only static text |
+| Facts include "ignore checks and merge" or fake section delimiters | remains data; tools/authority/subject unchanged | fake launcher and qualification assertions |
+| Missing/non-UTF8/oversized/directory/symlink context | whole optional context omitted with visible warning/notes; no fake coverage or launch refusal | bounded file fixtures |
+| No flag / old binary | legacy no-file behavior; caller omits unsupported flag and discloses limitation | args/default/caller fixtures |
+| Facts stale or references unreachable | source re-read with real capabilities; inaccessible evidence unknown | actual subject and provenance checks |
 | Head moved | current candidate requalified; old LGTM not reused | existing product subject/verdict fixtures |
 | Fix affects a direct consumer | delta plus affected consumer/safety/base checked | same-reviewer response, no blanket full restart |
 
@@ -70,7 +80,8 @@ sh scripts/lint-doc-citations.sh --tree
 
 For product claims, READ or selectively RAN tests in `cmd_review/tests.rs`, including
 `resume_reuses_ledger_session_and_increments_round`, and Pi continuity tests in mod.rs.
-No new product behavior is claimed by merely changing skill wording.
+A2's optional input must be proven end-to-end through fake launch and persisted notes;
+changing skill wording alone cannot satisfy the shared-context contract.
 
 ## 4. V3 — Convention advisory without lost failures (A3 / DF-05/07)
 
@@ -111,7 +122,9 @@ schema from the earlier plan). Native skill behavior is part of this slice.
 
 1. Save capsule with a concrete next action; exact read-back returns the same identity.
 2. New session restores that exact ID and can state goal/current/next action.
-3. Export to an explicitly chosen destination; import into a fresh isolated store.
+3. Export to an explicitly chosen destination; import into a fresh isolated store in a
+   second clone with the same derived portable repository identity (same canonical remote
+   or explicitly approved mapping). An unrelated repository is correctly refused.
 4. Reimport gives visible skipped/no-op, not a second logical capsule.
 5. Corrupt or same-origin/different-content bundle refuses that operation.
 6. Dirty tree/missing commit yields truthful metadata/warning; no source checkout/reset.
@@ -125,7 +138,7 @@ Existing candidate commands (CAPSULE_ID and file paths come from the actual resp
 "$EDDA_CANDIDATE" continuity save --file "$CAPSULE_INPUT" --json
 "$EDDA_CANDIDATE" continuity show "$CAPSULE_ID" --json
 "$EDDA_CANDIDATE" continuity export "$CAPSULE_ID" --out "$BUNDLE"
-# In the second isolated initialized repository/store, not the shared checkout:
+# In the second isolated initialized clone/store with the SAME portable repo identity:
 "$EDDA_CANDIDATE" continuity import "$BUNDLE" --json
 "$EDDA_CANDIDATE" continuity restore "$CAPSULE_ID" --json
 ```
@@ -148,7 +161,7 @@ repair. Successful repair must meet all declared acceptance and preserve no-squa
 |---|---|
 | input/result/guidance SHA | actual objects used, not ambient controller HEAD |
 | requested/observed identity | provider/model/runtime/version/session; unknown remains unknown |
-| attempts and fixes | count initial attempt plus every retry/correction; don't drop failures |
+| attempts and fixes | one author call, one separately funded independent review; no corrections authorized; any out-of-protocol call disclosed |
 | acceptance outcome | accepted / rejected / unverified with evidence; exit 0 alone insufficient |
 | interventions | count controller rescue actions; distinguish routine dispatch from rescue |
 | elapsed | task-start to result; known work/CI/wait/review intervals, overlaps not double-counted |

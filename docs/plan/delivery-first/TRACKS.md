@@ -5,19 +5,21 @@
 
 ## Layers and dependency DAG
 
-- L0: existing caller/procedure simplification and owner release agreement.
-- L1: apply the agreed integration cut; preserve review memory and narrow policy delta.
-- L2: observe one bounded Flash delivery attempt. This is not a release gate.
+- Foundation work: caller/procedure simplification and owner release agreement.
+- Integration work: optional review context, review memory and usable release cut.
+- Observation work: one bounded Flash attempt; not a release gate.
+
+These are planning groups, not the repository L0/L1/L2 verification ladder.
 
 ```text
-A1 -> A2 -> A3
-       |
-       +-> C1
+A1 -> A2 -> C1
+A3 (independent)
 B1 -> B2
 ```
 
-Only these arrows are required. B1 may start with A1; B2 need not wait for A3 or C1.
-C1 need not wait for B2, S5, node or control. A3 and C1 can start after A2.
+Only these arrows are required. A3 and B1 may start with A1; B2 need not wait for A3 or C1.
+C1 need not wait for B2, S5, node or control. Shared owner capacity may schedule independent
+cards serially; do not encode that as an artifact dependency.
 Two compile-needed sessions use different allowed lanes; do not inherit one shared target.
 
 ## Task cards / inputs / outputs
@@ -25,8 +27,8 @@ Two compile-needed sessions use different allowed lanes; do not inherit one shar
 | Card | Owner profile | Input | Output | Depends on | Can begin |
 |---|---|---|---|---|---|
 | [A1](tasks/A1-rolling-bundles.md) | strong workflow implementer | current source + DF-01/02/09 | cohesive rolling skill path + offline fixture | none | immediately |
-| [A2](tasks/A2-review-continuity.md) | same A owner | A1 source + actual review resume behavior | two author lenses + same-session reviewer handoff | A1 | A1 candidate available |
-| [A3](tasks/A3-convention-policy.md) | same A owner | A2 candidate + base REVIEW semantics | U3-only advisory rule + runner regression tests | A2 | A2 candidate available |
+| [A2](tasks/A2-review-continuity.md) | same A owner | A1 source + actual review carrier/resume behavior | optional context-file + two author lenses + native handoff | A1 | A1 candidate available |
+| [A3](tasks/A3-convention-policy.md) | A owner or disjoint policy worker | base REVIEW semantics | U3-only advisory rule + runner regression tests | none | immediately, capacity permitting |
 | [B1](tasks/B1-release-cut.md) | existing continuity controller | task113 / GH1141 / current stack | owner-adopted usable-slice amendment | none | read-only now; edit after permission |
 | [B2](tasks/B2-continuity-delivery.md) | existing continuity owner + integrator | B1 amendment + accepted local candidates | current-base usable continuity PR(s) | B1 | adoption and source ownership settled |
 | [C1](tasks/C1-flash-pilot.md) | strong planner + one Flash author + independent reviewer | A2 guidance + frozen historical bug + selected runtime | result/evidence/cost report, no duplicate product PR | A2 | runtime/timeout/spend bound |
@@ -46,7 +48,9 @@ record that guidance SHA as experimental, not current repository policy.
 | `docs/guides/operator-runbook.md` | A owner / A1 then A2 | route table, not another duplicated procedure |
 | `.claude/skills/issue-action/SKILL.md` / `pr-review-loop/SKILL.md` | A owner / A2 | update only conflicting author/fixer self-check guidance |
 | `scripts/test-delivery-guidance.sh` (new test only) | A owner / A1 then A2 | static positive/negative guidance regression checks |
-| `REVIEW.md` / `scripts/review-l0.sh` | A owner / A3 | U3 convention semantics only |
+| `crates/edda-cli/src/cmd_review/{args,prepare,brief,mod,tests}.rs` and direct struct fixtures | A owner / A2 | optional bounded context input/notes, no authority/schema change |
+| `docs/reference/cli.md` | A owner / A2, then agreed B2 consumer-doc handoff | review input reference; coordinate if B2 also needs edits |
+| `REVIEW.md` / `scripts/review-l0.sh` | A3 owner | U3 convention semantics only |
 | `scripts/test-review-l0.sh` | A owner / A3 | preserve failures, add U3 nonblocking case |
 | GH1141 plan + `docs/superpowers/continuity/program.md` | existing continuity owner / B1 | release amendment, no acceptance erasure |
 | existing continuity source/skills/spec/consumer scope | existing owner/integrator / B2 | adopt and integrate candidate; card lists exact surfaces |
@@ -55,7 +59,9 @@ record that guidance SHA as experimental, not current repository policy.
 | disposable historical repair checkout | C author / C1 | bounded code experiment; never current shared checkout |
 
 No automatic edits to `.agents/`; use installed projection mechanisms only.
-No new Rust module, endpoint or event is planned by A or C. B reuses existing modules.
+A2 extends existing review modules with one optional CLI flag. No new endpoint/event is
+planned by A/C. B reuses existing modules. Shared CLI documentation changes require a
+narrow section handoff, not competing writes or a whole-track barrier.
 
 ## Responsibility graph (not a second runtime architecture)
 
@@ -71,7 +77,8 @@ issue/acceptance -> controller's bundle plan -> author session
                                       existing canonical R6 merge
 ```
 
-A changes the callers, not task/dispatch/control internals. B owns feature integration.
+A changes callers plus optional review context, not task/dispatch/control internals.
+B owns feature integration.
 C consumes those existing interfaces and reports gaps; it must not grow a new harness.
 
 ## Common execution instructions

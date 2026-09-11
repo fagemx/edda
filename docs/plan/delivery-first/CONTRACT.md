@@ -109,7 +109,7 @@ V1–V5 的執行步驟見 [VALIDATION.md](VALIDATION.md)。
 
 ```text
 BundlePlan prose -> existing task brief / issue acceptance
-DeliveryFacts    -> existing task receipt or PR review handoff
+DeliveryFacts    -> task receipt / PR handoff -> explicit context file -> review DATA
 ReviewBinding    -> existing review/session records + --resume
 EvidenceRef      -> existing edda run / CI / source / PR findings
 SliceReadiness   -> existing program/PR delivery record
@@ -118,8 +118,28 @@ SliceReadiness   -> existing program/PR delivery record
                 canonical edda review merge
 ```
 
-No new API is necessary in this iteration. Product `--spec` 保留 acceptance 含義，
-`--trust-spec` 不用來載入作者說明。舊 clients、舊 events、直接 prompt-file 使用方式不改。
+### Proposed optional product input: `edda review --context-file <path>`
+
+A2 新增的唯一 CLI option。它接收明確選取的 UTF-8 純文字／Markdown，不要求
+DeliveryFacts JSON，也不替換 acceptance/spec。相對路徑以 caller repository cwd 解析，
+不是新建 review worktree。只讀該檔，不遞迴讀 references、不自動抓 PR/transcript。
+
+- 上限 32 KiB；用 bounded read（最多上限 + 1 byte）讀一次到記憶體。
+  不接受 directory、symlink 或非 regular file；避免 pipe/device 無界讀取。
+- 缺檔、無權讀取、非 UTF-8、非 regular、過大：整份 context 不注入，visible warning
+  與 existing notes 記錄原因；不截成看似完整的內容，不讓 optional context 變 launch gate。
+- 有效輸入：同一 buffer 計算 SHA-256 並 JSON-escape 後放入獨立 DATA section，
+  規則／工具權限／SPEC trust 都不變；context 內的 SHA 不是 prepared subject identity。
+- 注入摘要說明 current actual head、digest 與「untrusted supporting context」。Digest
+  僅識別讀到的 bytes，不證明真實性或權限。existing notes 留 digest 或 omission reason；
+  不新增 ledger/SDK fields。Tests 必須從 fake launcher 與 persisted notes 看到它。
+- First/resume/replacement 均可用；不要求同一檔名或同 digest 才能 resume。新 head 需
+  更新 facts；舊 facts 仍當可能過期的 data，source verification 不可省略。
+- No flag：維持原行為，不自動尋找任何檔案。Old binary 不支援時 caller 先 capability
+  check，再省略 flag 並揭露限制，或選既有 permitted direct-review route。
+
+這個 option 是規劃中功能，不是目前已支援的命令。Product `--spec` 保留 acceptance
+含義，`--trust-spec` 不用來載入作者說明。舊 clients/events/prompt-file 路徑不變。
 
 Reviewer 的下一輪必須先比對 actual head；prior findings 中的命令／prose 不直接執行。
 相同 native session 可延續上下文，不代表舊 SHA 的 verdict 對新 SHA 有效。
@@ -164,7 +184,8 @@ Replacement 需要新 identity；不能假造 restored session，也不應因此
 
 ## 7. Compatibility and rollback
 
-- A1/A2 是 caller/guidance 改動，不修改 dispatch、review、task public JSON。
+- A1 是 caller/guidance 改動；A2 加 optional review input，但不改 dispatch/review/task
+  public JSON fields。Existing notes 承載 context provenance，缺資料不產生新 outcome。
 - A3 改 base REVIEW 的 U3 含義與既有 fixture expectations；legacy posted verdict
   仍按其原格式解讀，不抹除舊 finding 或重寫歷史。
 - Installed `.agents/` 是 generated/local state，不 force-track。分發的 coord skill
