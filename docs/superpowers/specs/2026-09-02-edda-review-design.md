@@ -86,7 +86,7 @@ edda review [--base <ref>] [--head <ref>] [--pr <n>] [--spec <path|#n>] [--trust
 | `--timeout-sec` | 900 | 引擎回合上限 |
 | `--budget-usd` | 無 | pi 生效；codex 無法生效（沿用 dispatch 的警告） |
 | `--run-gates` | 關 | **RAN 唯一的開關**：跑全部宣告的閘門（§6.4）。不開就只 READ |
-| `--max-ran-sec` | 300 | RAN 總時長上限；超過即停，未跑完的閘門 RAN 對它沉默（回報 `None`），狀態依 §8 的格合成——既有的 `verified` 不會被降級 |
+| `--max-ran-sec` | 300 | RAN 總時長上限；超過即停，未跑完或 timeout 的 gate 不取得 RAN coverage；最終狀態依 §8 的 per-gate union 計算 |
 | `--keep-worktree` | 關 | 保留臨時 detached worktree 供除錯 |
 | `--json` | 關 | 印 `review_verdict` payload ＋ `event_id`（unstable；見 §7） |
 
@@ -174,6 +174,9 @@ edda_review: 1
 gates:                      # 宣告的閘門指令，逐字；READ 與 RAN 都以此為準
   - "cargo fmt --all --check"
   - "cargo test --workspace"
+ci_gates:                   # 宣告 gate → exact-head CI check-run 名單
+  "cargo fmt --all --check": ["Format"]
+  "cargo test --workspace": ["Test (ubuntu-latest)", "Test (macos-latest)"]
 ran_allowlist:              # edda 可額外執行的指令前綴（只用於 --help 探測與 --run-gates）
   - "edda "
 independence: session       # session（預設）：session 隔離即獨立；model：要求不同模型且可驗證
@@ -335,12 +338,12 @@ maintainer}` 時）spec 的 `verify` 段逐行。在臨時 worktree **逐字**�
 duration_ms / stdout 尾段 blob`。總時長 `--max-ran-sec` 是**硬期限**：每條閘門以剩餘時間
 spawn、輪詢 `try_wait`，到期就砍**整棵程序樹**——Unix 用 `CommandExt::process_group(0)` 開
 新 process group 並 `kill -9 -- -<pgid>`；Windows 用 `taskkill /PID <pid> /T /F`；只殺 `sh`
-本身不算兌現期限。被殺的閘門記 exit `-1` 與 `timed_out`，剩下的閘門記「未跑」；RAN 對
-未跑完的閘門沉默（回報 `None`）、對實際失敗回報 `red`，狀態依 §8 的格合成——既有的
-`verified` 不會被降級——`notes` 說明。stdout 尾段寫 blob 失敗是**大聲的**：該 RAN 條目
-`stdout_blob = null`、`notes` 記一行，而且這條 RAN 條目不作為 `verified` 的證據——
-`ReviewGateRan` 沒有 per-gate 的結果欄位，任一條目的 blob 存不進去，整個 RAN 就沉默
-（回報 `None`）——最終狀態仍由格合成。
+本身不算兌現期限。被殺的閘門記 exit `-1` 與 `timed_out`，剩下的閘門記「未跑」；未跑完
+或 timeout 的 gate 不取得 RAN coverage，非 timeout 的實際失敗使整個 gate set 為 `red`，
+`notes` 說明。stdout 尾段寫 blob 失敗是**大聲的**：該 RAN 條目
+`stdout_blob = null`、`notes` 記一行，而且這條 RAN 條目不取得 coverage。只有 exit 0、
+`timed_out = false` 且 stdout blob 已成功儲存的 RAN 才覆蓋同 command 的 declared gate；
+最終狀態由 §8 的 per-gate union 計算。
 
 - 白名單裡**沒有** `git *`；edda 自己需要的 git 都是程序內固定子命令。
 - cargo 類閘門（指令以 `cargo ` 開頭）只在環境有 `CARGO_TARGET_DIR` 時執行；沒有就跳過並記
@@ -405,7 +408,7 @@ codex 不回報 usage，預算閘永遠不會觸發——這件事要說出來�
   "independence_policy": "session | model",
   "gates": {"status": "verified | unverified | red | undeclared",
             "declared_by": ["REVIEW.md", "--gate"],
-            "read": [{"kind": "cmd-event | ci", "ref": "evt_… | check-name", "cmd": "cargo test --workspace",
+            "read": [{"kind": "cmd-event | ci | ci-job-map", "ref": "evt_… | check-name | exact-name=status, …", "cmd": "cargo test --workspace",
                       "result": "green | red | pending"}],
             "ran": [{"cmd": "cargo test -p edda-core", "exit": 0, "duration_ms": 41200, "stdout_blob": "… | null", "timed_out": false}]},
   "probes": [{"cmd": "edda wave --help", "exit": 2}],
@@ -424,10 +427,12 @@ codex 不回報 usage，預算閘永遠不會觸發——這件事要說出來�
 ```
 
 - `qualified` 由 edda 計算：`verdict ≠ unreviewed` ∧ `spec.mode = spec-backed` ∧
-  `gates.status = verified` ∧ `model_observed ≠ unknown` ∧ `parse = ok` ∧ `coverage = full` ∧
-  `tool_policy = hard` ∧ 無 `model-mismatch` ∧（僅當 `independence_policy = model` 時）
-  `independence = verified`。不成立的條件逐一列在 `disqualifiers`（`spec-convention-only`、
-  `gates-undeclared`、`gates-unverified`、`gates-red`、`model-unknown`、`model-mismatch`、
+  `gates.status ∉ {undeclared, red}` ∧ `model_observed ≠ unknown` ∧ `parse = ok` ∧
+  `coverage = full` ∧ `tool_policy = hard` ∧ 無 `model-mismatch` ∧（僅當
+  `independence_policy = model` 時）`independence = verified`。`unverified` 保留在
+  `gates.status`、rows、uncovered 與 notes，屬 advisory，不再自動產生 disqualifier。
+  其他不成立條件逐一列在 `disqualifiers`（`spec-convention-only`、
+  `gates-undeclared`、`gates-red`、`model-unknown`、`model-mismatch`、
   `coverage-partial`、`tool-policy-none`；`model` 政策下另有 `independence-unverified`、
   `independence-same-model`）。
 - finding 在 payload 裡的 `id` 是事件內的 `fN`（事件 id 在寫入前不存在，無法內嵌）；
@@ -455,31 +460,41 @@ vacuous verified——不然沒寫 `REVIEW.md` 的 repo 免費拿到 verified。
 exit 0 → `green`；非 0 → `red`；沒有 → 該 gate 未涵蓋。全部 green → `verified`；
 任一 red → `red`；有未涵蓋（且 `--run-gates` 沒補上）→ `unverified`，輸出印
 「run `edda run -- <gate>` at <head12> on a clean tree, or pass --run-gates」。
-`--pr` 時另讀 exact-head CI，**釘在 `head_sha`**：`gh api repos/{o}/{r}/commits/<head_sha>/check-runs`
-取該 SHA 的 check-runs（name / status / conclusion），再用 `gh pr checks <n> --required --json name`
-取 required 名單做交集；PR 在解析後被 push 也不會把新 head 的綠記到受審 SHA 上。required
-全部 `completed` + `success`（或 `skipped`）→ verified；任一 `failure` / `cancelled` / `timed_out`
-→ red；有 `in_progress` / `queued` → `pending`（`read[].result` 的合法值：`green | red | pending`），
-CI 對這件事的回報是 `unverified`——它在格上是中性的，不改變其他來源已建立的結論。`neutral` **不算綠**——它的語意是「這個 check 放棄判定」。required 名單為空時
-CI 對本 head 沒有任何主張，直接不貢獻（**不可**退回「所有 optional check 都算」，否則沒設分支
-保護的 repo 用任何一個碰巧綠的 job 就買到 verified）。
+`--pr` 時另讀 exact-head CI，**釘在 `head_sha`**：先用
+`gh pr checks <n> --required --json name` 取 required 名單；名單非空才以
+`gh api repos/{o}/{r}/commits/<head_sha>/check-runs` 取該 SHA 的 check-runs
+（name / status / conclusion），同名重跑取最大 id。PR 在解析後被 push 也不會把新
+head 的綠記到受審 SHA 上。required rows 保留為 set-level evidence：全部
+`completed` + `success`（或既有 path-filter 語意接受的 `skipped`）→ verified；任一
+`failure` / `cancelled` / `timed_out` → red；其他 → pending/unverified。
 
-**三個證據來源，一條格（lattice）**：閘門集合非空時，本地收據、exact-head required CI、
-`--run-gates` 的 RAN 是對同一件事的三個獨立來源，合成規則只有一條，三者共用：
+front matter 的 `ci_gates` 是 gate command → exact check-run name list。只為已宣告且
+有 mapping 的 gate 產一筆 `kind = ci-job-map` row；所有列名在 exact head 都是
+`success` 才 green，任一 failure 就 red，missing / pending / neutral / skipped 都是
+pending/unverified。`ref` 逐一列出 exact name 與 bucket，不能用 glob 或推斷配對。
+有 mapped row 的 gate 不再同時列作 uncovered；沒有 mapping 的 gate 仍 uncovered。
+required 名單為空時不 fetch、不使用 mapped jobs，CI 完全不貢獻（**不可**退回「所有
+optional check 都算」，否則沒設分支保護的 repo 用任何一個碰巧綠的 job 就買到
+verified）。API、JSON、bounded capture、pagination 或 SHA 驗證失敗都 fail closed。
+`neutral` 不算綠；`skipped` 可被 required set-level 規則接受，但永不成為綠色 per-gate row。
+`ran_allowlist` 不變：reviewer 的執行能力不是 CI 證據不可用時的 fallback。
+
+**最終狀態採 per-declared-gate union**，不是把四個來源各自先壓成 set-level status 再做
+coarse lattice。規則依序為：
 
 | 規則 | 說明 |
 |---|---|
-| `undeclared` 吸收一切 | 沒宣告 gate 就沒有東西可證；CI 再綠、RAN 再乾淨都蓋不過去 |
-| 任一 `red` 即 `red` | 任何一處失敗就是失敗 |
-| 否則任一 `verified` 即 `verified` | 獨立來源指向同一事實，擇一即可 |
-| 否則 `unverified` | |
-| **沉默的來源不改變狀態** | 某來源「沒話說」（RAN 因無 build lane 或期限而跳過、`--pr` 之外沒有 CI）時，狀態原封不動——**任何來源都不得把別的來源已建立的結論降級** |
+| 空 gate set → `undeclared` | 沒宣告 gate 就沒有東西可證；CI 再綠、RAN 再乾淨都不能變成 verified |
+| 任一 red → `red` | 任一 local receipt、required-CI row、mapped row，或非 timeout 的 RAN 失敗都 globally dominate |
+| 每個 declared gate 都有 eligible green → `verified` | 同 command 的 green `cmd-event`、green `ci-job-map`，或 exit 0 + stored stdout + non-timeout RAN 可覆蓋該 gate；不同來源可各自覆蓋一部分 gate |
+| 其餘 → `unverified` | missing/pending/skipped、無 mapping、timeout、未執行或 RAN blob 未儲存都不提供 coverage |
 
-要求兩者同時 verified 會讓「CI 全綠但作者沒在本機留收據」的 PR 讀成 unverified，那是把
-證據當儀式（Round 5 P1）；而讓跳過的 RAN 把 verified 降成 unverified 是同一個錯誤的另一面
-（Round 6 P1）。實作上這條規則寫成**單一函式** `combine_gate_status(current, incoming)`——
-本地 READ 是 accumulator 的**初值**（`read_gates` 直接回傳起始 status），CI 與 RAN 各呼叫
-它一次——這條規則被分別重述兩次，就被破壞了兩次。
+required-CI row 是 set-level 可見證據：red 仍 globally dominate，但 green **永遠不覆蓋任何
+單一 declared gate**，即使 required check name 恰好等於 gate command。mapped row 的既有
+聚合不變：所有 exact names pass 才 green，任一 fail 為 red，其餘 pending。這使 partial
+receipt green 加 partial mapped green 可以合起來驗證整個集合，也使成功且有 blob 的 RAN
+只補上仍缺 coverage 的同名 gate，而不替其他 gate 背書。實作上由單一 `gate_status(gates,
+read, ran)` 在 READ 與 RAN 都收集後計算，避免 set-level green 偽造整組 coverage。
 
 PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda run -- <gate>` 產收據。
 
@@ -497,11 +512,13 @@ PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda
 | provider 過載 | 不換模型（`fleet.review-provider-overload`），`outcome = overload`，exit 2 |
 | diff 超預算 | 按類別優先截，`coverage = partial`，不合格；`code-risk` 本身超預算 → exit 2 |
 | 閘門集合為空 | `gates.status = undeclared`，不合格，印宣告方式 |
+| gate 證據 missing / pending / neutral / skipped | `gates.status = unverified` 並保留 rows/uncovered；advisory，單獨不使 LGTM 不合格；skipped 不是綠色 per-gate claim |
+| mapped 或 required CI 任一 red | `gates.status = red`，不合格；其他來源的綠不能蓋過 |
 | `model_observed` 拿不到 | 照審，`unknown`，不合格 |
 | 同模型不同 session | 照審，`same-model`；預設政策合格，`model` 政策不合格 |
 | 模型寫法對照表不認得 | 該來源 `unverified`；絕不記 `verified`；只在 `model` 政策下不合格 |
-| `--run-gates` 但 cargo 閘門而無 `CARGO_TARGET_DIR` | 該閘門跳過並說明（RAN 對它沉默，回報 `None`），狀態依 §8 的格合成 |
-| RAN 超時 | RAN 對未跑完的閘門沉默（回報 `None`），狀態依 §8 的格合成，既有的 `verified` 不會被降級；說明哪些沒跑 |
+| `--run-gates` 但 cargo 閘門而無 `CARGO_TARGET_DIR` | 該閘門跳過並說明；RAN 不提供該 gate 的 coverage，狀態依 §8 的 per-gate union 計算 |
+| RAN 超時 | timeout 與未跑完的 gate 不取得 RAN coverage；其他 eligible green 仍可覆蓋它，否則 `unverified`；說明哪些沒跑 |
 | spec 來自 `untrusted` issue | 照審；`verify` 欄不執行 |
 | 臨時 worktree 移除失敗 | 警告＋`notes`，判決不受影響 |
 
@@ -515,7 +532,9 @@ PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda
   history_rewritten（tempfile git repo 造分支、rebase；**main 上有 verdict 的 commit 不得
   成為新分支的 supersedes**）；`qualified` 真值表（每個 disqualifier 各一列）；輸出區塊解析
   （合法、缺區塊、壞 JSON、非法 verdict、`subject_seen` 不符）；`cmd` 事件收據比對
-  （sha 不符、tree dirty、argv 正規化、exit 非 0）；front matter 解析（缺、版本不認得、壞 YAML）；
+  （sha 不符、tree dirty、argv 正規化、exit 非 0）；per-gate evidence union（required green
+  不提供 coverage、receipt/mapped/RAN 可分別補齊、任一 red globally dominate、RAN 必須
+  exit 0 + stored stdout + non-timeout）；front matter 解析（缺、版本不認得、壞 YAML）；
   **`canonical_model_id()` 每對來源一個測試**（trailer × modelUsage × pi session × 收據），
   以及不認得的寫法回 `unverified`；exit code 四值；`spec.trust` 三級與 `verify` 欄是否進白名單；
   diff 截斷保留 `code-risk`；base 解析鏈。

@@ -1,5 +1,16 @@
 use super::*;
 use edda_core::event::{new_cmd_event_with_git_context, CmdEventParams};
+use std::collections::BTreeMap;
+
+fn ci(required: &[&str], runs: &[(&str, &str)]) -> GitHubChecks {
+    GitHubChecks {
+        required_names: required.iter().map(|name| (*name).into()).collect(),
+        latest_runs: runs
+            .iter()
+            .map(|(name, bucket)| ((*name).into(), (*bucket).into()))
+            .collect(),
+    }
+}
 
 fn receipt(ledger: &Ledger, command: &[&str], sha: &str, dirty: bool, exit: i32) {
     let args = command.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -48,14 +59,14 @@ fn unreadable_ledger_is_an_error_not_uncovered_evidence() {
 }
 
 #[test]
-fn gate_lattice_is_exhaustive_and_silence_is_neutral() {
-    let states = ["undeclared", "red", "verified", "unverified"];
-    for (i, a) in states.iter().enumerate() {
-        for (j, b) in states.iter().enumerate() {
-            assert_eq!(combine_gate_status(a, Some(b)), states[i.min(j)]);
-        }
-        assert_eq!(combine_gate_status(a, None), *a);
-    }
+fn empty_gate_set_is_undeclared_even_when_evidence_exists() {
+    let read = vec![ReviewGateRead {
+        kind: "ci".into(),
+        r#ref: "CI Gate".into(),
+        cmd: "CI Gate".into(),
+        result: "red".into(),
+    }];
+    assert_eq!(gate_status(&[], &read, &[]), "undeclared");
 }
 
 #[test]
@@ -127,38 +138,191 @@ fn verify_section_preserves_quotes_and_stops_at_sibling_yaml_key() {
 }
 
 #[test]
-fn required_ci_is_independent_and_pending_is_neutral() {
-    assert_eq!(read_ci(&[]).0, None);
-    let green = read_ci(&[("Test".into(), "pass".into())]).0;
-    assert_eq!(
-        combine_gate_status("unverified", green.as_deref()),
-        "verified"
-    );
-    let pending = read_ci(&[("Test".into(), "pending".into())]).0;
-    assert_eq!(
-        combine_gate_status("verified", pending.as_deref()),
-        "verified"
-    );
+fn required_ci_rows_preserve_status_but_green_never_covers_a_gate() {
+    assert_eq!(read_ci(&GitHubChecks::default()).0, None);
+    let (green, rows) = read_ci(&ci(&["CI Gate"], &[("CI Gate", "pass")]));
+    assert_eq!(green.as_deref(), Some("verified"));
+    assert_eq!(rows[0].result, "green");
+    assert_eq!(gate_status(&["CI Gate".into()], &rows, &[]), "unverified");
+    let (pending, _) = read_ci(&ci(&["CI Gate"], &[("CI Gate", "pending")]));
+    assert_eq!(pending.as_deref(), Some("unverified"));
 }
 
 #[test]
-fn ran_requires_all_commands_and_blobs_and_timeout_is_silent() {
-    let gates: Vec<String> = vec!["echo hi".into()];
-    let mut ran = vec![ReviewGateRan {
+fn empty_required_names_never_use_a_successful_mapped_job() {
+    let gates = gate_set(&FrontMatter::default(), &["cargo test".into()], &[]);
+    let checks = ci(&[], &[("Test (ubuntu-latest)", "pass")]);
+    let mappings = BTreeMap::from([("cargo test".into(), vec!["Test (ubuntu-latest)".into()])]);
+    let (status, rows, mapped) = read_ci_job_map(&checks, &gates, &mappings);
+    assert!(status.is_none());
+    assert!(rows.is_empty());
+    assert!(mapped.is_empty());
+}
+
+#[test]
+fn mapped_gate_requires_all_exact_jobs_and_ref_lists_each_status() {
+    let gate = "cargo clippy --workspace";
+    let gates = gate_set(&FrontMatter::default(), &[gate.into()], &[]);
+    let mappings = BTreeMap::from([(
+        gate.into(),
+        vec!["Clippy (ubuntu)".into(), "Clippy (macos)".into()],
+    )]);
+    let checks = ci(
+        &["CI Gate"],
+        &[
+            ("CI Gate", "pass"),
+            ("Clippy (ubuntu)", "pass"),
+            ("Clippy (macos)", "pass"),
+        ],
+    );
+    let (status, rows, mapped) = read_ci_job_map(&checks, &gates, &mappings);
+    assert_eq!(status.as_deref(), Some("verified"));
+    assert_eq!(mapped, [gate]);
+    assert_eq!(rows[0].kind, "ci-job-map");
+    assert_eq!(rows[0].result, "green");
+    assert!(rows[0].r#ref.contains("Clippy (ubuntu)=pass"));
+    assert!(rows[0].r#ref.contains("Clippy (macos)=pass"));
+}
+
+#[test]
+fn mapped_failure_dominates_other_green_evidence() {
+    let gate = "cargo test";
+    let gates = gate_set(&FrontMatter::default(), &[gate.into()], &[]);
+    let mappings = BTreeMap::from([(gate.into(), vec!["Linux".into(), "macOS".into()])]);
+    let checks = ci(
+        &["CI Gate"],
+        &[("CI Gate", "pass"), ("Linux", "pass"), ("macOS", "fail")],
+    );
+    let (_, mut rows, _) = read_ci_job_map(&checks, &gates, &mappings);
+    assert_eq!(rows[0].result, "red");
+    rows.push(ReviewGateRead {
+        kind: "cmd-event".into(),
+        r#ref: "receipt".into(),
+        cmd: gate.into(),
+        result: "green".into(),
+    });
+    assert_eq!(gate_status(&gates.cmds, &rows, &[]), "red");
+}
+
+#[test]
+fn receipt_required_and_mapped_red_each_globally_dominate() {
+    let gates: Vec<String> = vec!["fmt".into(), "test".into()];
+    let green = vec![
+        ReviewGateRead {
+            kind: "cmd-event".into(),
+            r#ref: "receipt".into(),
+            cmd: gates[0].clone(),
+            result: "green".into(),
+        },
+        ReviewGateRead {
+            kind: "ci-job-map".into(),
+            r#ref: "Test=pass".into(),
+            cmd: gates[1].clone(),
+            result: "green".into(),
+        },
+    ];
+    for (kind, cmd) in [
+        ("cmd-event", gates[0].as_str()),
+        ("ci", "CI Gate"),
+        ("ci-job-map", gates[1].as_str()),
+    ] {
+        let mut read = green.clone();
+        read.push(ReviewGateRead {
+            kind: kind.into(),
+            r#ref: "failed evidence".into(),
+            cmd: cmd.into(),
+            result: "red".into(),
+        });
+        assert_eq!(gate_status(&gates, &read, &[]), "red", "{kind}");
+    }
+}
+
+#[test]
+fn partial_receipt_and_partial_mapped_green_collectively_verify() {
+    let gates = gate_set(&FrontMatter::default(), &["fmt".into(), "test".into()], &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open_or_init(dir.path()).unwrap();
+    receipt(&ledger, &["fmt"], "head", false, 0);
+    let (_, mut read, _) = read_gates(&ledger, "head", &gates).unwrap();
+
+    let checks = ci(&["CI Gate"], &[("CI Gate", "pass"), ("Test", "pass")]);
+    read.extend(read_ci(&checks).1);
+    let mappings = BTreeMap::from([("test".into(), vec!["Test".into()])]);
+    read.extend(read_ci_job_map(&checks, &gates, &mappings).1);
+
+    assert_eq!(gate_status(&gates.cmds, &read, &[]), "verified");
+}
+
+#[test]
+fn missing_pending_and_skipped_mapped_jobs_are_unverified() {
+    let gate = "cargo test";
+    let gates = gate_set(&FrontMatter::default(), &[gate.into()], &[]);
+    for (label, runs) in [
+        ("missing", vec![]),
+        ("pending", vec![("Linux", "pending")]),
+        ("skipped", vec![("Linux", "skipped")]),
+    ] {
+        let mappings = BTreeMap::from([(gate.into(), vec!["Linux".into()])]);
+        let checks = ci(&["CI Gate"], &runs);
+        let (status, rows, _) = read_ci_job_map(&checks, &gates, &mappings);
+        assert_eq!(status.as_deref(), Some("unverified"), "{label}");
+        assert_eq!(rows[0].result, "pending", "{label}");
+        assert!(rows[0].r#ref.contains(label), "{label}: {}", rows[0].r#ref);
+    }
+}
+
+#[test]
+fn mapped_gate_is_not_also_uncovered_but_unmapped_gate_stays_visible() {
+    let mapped_gate = "cargo fmt";
+    let unmapped_gate = "custom lint";
+    let gates = gate_set(
+        &FrontMatter::default(),
+        &[mapped_gate.into(), unmapped_gate.into()],
+        &[],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open_or_init(dir.path()).unwrap();
+    let (_, mut read, mut uncovered) = read_gates(&ledger, "head", &gates).unwrap();
+    let mappings = BTreeMap::from([(mapped_gate.into(), vec!["Format".into()])]);
+    let checks = ci(&["CI Gate"], &[("Format", "pass")]);
+    let (_, mapped_rows, mapped) = read_ci_job_map(&checks, &gates, &mappings);
+    read.extend(mapped_rows);
+    remove_mapped_uncovered(&mut uncovered, &mapped);
+    assert_eq!(uncovered, [unmapped_gate]);
+    let text = evidence_text(&read, &uncovered, &[], &[], None);
+    assert!(text.contains("\"cargo fmt\": green (ci-job-map \"Format=pass\")"));
+    assert!(!text.contains("\"cargo fmt\": not covered"));
+    assert!(text.contains("\"custom lint\": not covered"));
+}
+
+#[test]
+fn ran_fills_only_a_remaining_gate_with_stored_success_before_timeout() {
+    let gates: Vec<String> = vec!["fmt".into(), "test".into()];
+    let read = vec![ReviewGateRead {
+        kind: "ci-job-map".into(),
+        r#ref: "Format=pass".into(),
         cmd: gates[0].clone(),
+        result: "green".into(),
+    }];
+    let mut ran = vec![ReviewGateRan {
+        cmd: gates[1].clone(),
         exit: 0,
         duration_ms: 1,
         stdout_blob: Some("blob".into()),
         timed_out: false,
     }];
-    assert_eq!(ran_status(&gates, &ran).as_deref(), Some("verified"));
+    assert_eq!(gate_status(&gates, &read, &ran), "verified");
+    ran[0].cmd = "other".into();
+    assert_eq!(gate_status(&gates, &read, &ran), "unverified");
+    ran[0].cmd = gates[1].clone();
     ran[0].stdout_blob = None;
-    assert_eq!(ran_status(&gates, &ran), None);
-    ran[0].exit = -1;
+    assert_eq!(gate_status(&gates, &read, &ran), "unverified");
+    ran[0].stdout_blob = Some("blob".into());
     ran[0].timed_out = true;
-    assert_eq!(ran_status(&gates, &ran), None);
+    assert_eq!(gate_status(&gates, &read, &ran), "unverified");
     ran[0].timed_out = false;
-    assert_eq!(ran_status(&gates, &ran).as_deref(), Some("red"));
+    ran[0].exit = 1;
+    assert_eq!(gate_status(&gates, &read, &ran), "red");
 }
 
 #[test]
@@ -214,7 +378,7 @@ fn failed_blob_write_is_loud_and_cannot_verify_ran() {
     assert_eq!(ran[0].exit, 0);
     assert!(ran[0].stdout_blob.is_none());
     assert!(notes.iter().any(|note| note.contains("not stored")));
-    assert_eq!(ran_status(&gates, &ran), None);
+    assert_eq!(gate_status(&gates, &[], &ran), "unverified");
 }
 
 #[test]

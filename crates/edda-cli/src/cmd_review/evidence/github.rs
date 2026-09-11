@@ -6,13 +6,15 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Default)]
+pub(crate) struct GitHubChecks {
+    pub required_names: Vec<String>,
+    pub latest_runs: BTreeMap<String, String>,
+}
+
 /// gh pr checks legitimately exits 1 or 8 when its valid JSON describes red
 /// or pending checks. Required names come from it; results come ONLY from SHA.
-pub(crate) fn gh_required_checks(
-    repo: &Path,
-    pr: u64,
-    head_sha: &str,
-) -> Result<Vec<(String, String)>> {
+pub(crate) fn gh_required_checks(repo: &Path, pr: u64, head_sha: &str) -> Result<GitHubChecks> {
     anyhow::ensure!(
         head_sha.len() == 40 && head_sha.bytes().all(|b| b.is_ascii_hexdigit()),
         "CI requires a full head SHA"
@@ -51,7 +53,9 @@ pub(crate) fn gh_required_checks(
         })
         .collect::<Result<Vec<_>>>()?;
     if names.is_empty() {
-        return Ok(vec![]);
+        // No required set means no trustworthy boundary for optional jobs.
+        // Do not fetch them and never let one opportunistic success turn green.
+        return Ok(GitHubChecks::default());
     }
     let endpoint = format!("repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs?per_page=100");
     let pages = query(&["api", &endpoint, "--paginate", "--slurp"], false)?;
@@ -68,7 +72,10 @@ pub(crate) fn gh_required_checks(
                 .cloned(),
         );
     }
-    Ok(required_at_sha(&names, &checks, head_sha))
+    Ok(GitHubChecks {
+        required_names: names,
+        latest_runs: latest_at_sha(&checks, head_sha),
+    })
 }
 
 fn decode(output: &process::Output, allow_nonzero: bool) -> Result<Value> {
@@ -89,7 +96,7 @@ fn decode(output: &process::Output, allow_nonzero: bool) -> Result<Value> {
     Ok(value)
 }
 
-fn required_at_sha(names: &[String], runs: &[Value], sha: &str) -> Vec<(String, String)> {
+fn latest_at_sha(runs: &[Value], sha: &str) -> BTreeMap<String, String> {
     let mut latest: BTreeMap<&str, &Value> = BTreeMap::new();
     for run in runs {
         if run["head_sha"].as_str() != Some(sha) {
@@ -104,12 +111,13 @@ fn required_at_sha(names: &[String], runs: &[Value], sha: &str) -> Vec<(String, 
             }
         }
     }
-    names
-        .iter()
-        .map(|name| {
-            let bucket = match latest.get(name.as_str()) {
-                Some(run) if run["status"] == "completed" => match run["conclusion"].as_str() {
-                    Some("success" | "skipped") => "pass",
+    latest
+        .into_iter()
+        .map(|(name, run)| {
+            let bucket = match run["status"].as_str() {
+                Some("completed") => match run["conclusion"].as_str() {
+                    Some("success") => "pass",
+                    Some("skipped") => "skipped",
                     Some(
                         "failure" | "cancelled" | "timed_out" | "action_required"
                         | "startup_failure",
@@ -118,7 +126,7 @@ fn required_at_sha(names: &[String], runs: &[Value], sha: &str) -> Vec<(String, 
                 },
                 _ => "pending",
             };
-            (name.clone(), bucket.into())
+            (name.to_owned(), bucket.to_owned())
         })
         .collect()
 }
@@ -187,31 +195,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_and_wrong_sha_cannot_disappear() {
-        let names = vec!["A".into(), "B".into(), "C".into()];
+    fn latest_attempt_wins_and_wrong_sha_is_excluded() {
         let runs = vec![
             json!({"name":"A","id":1,"head_sha":"head","status":"completed","conclusion":"success"}),
-            json!({"name":"B","id":2,"head_sha":"other","status":"completed","conclusion":"success"}),
+            json!({"name":"A","id":99,"head_sha":"other","status":"completed","conclusion":"success"}),
+            json!({"name":"A","id":2,"head_sha":"head","status":"completed","conclusion":"failure"}),
+            json!({"name":"OnlyOther","id":3,"head_sha":"other","status":"completed","conclusion":"success"}),
         ];
-        assert_eq!(
-            required_at_sha(&names, &runs, "head"),
-            vec![
-                ("A".into(), "pass".into()),
-                ("B".into(), "pending".into()),
-                ("C".into(), "pending".into())
-            ]
-        );
+        let latest = latest_at_sha(&runs, "head");
+        assert_eq!(latest.get("A").map(String::as_str), Some("fail"));
+        assert!(!latest.contains_key("OnlyOther"));
     }
 
     #[test]
-    fn latest_attempt_and_neutral_are_not_green() {
+    fn skipped_is_separate_and_neutral_is_pending() {
         let runs = vec![
             json!({"name":"A","id":2,"head_sha":"head","status":"completed","conclusion":"neutral"}),
             json!({"name":"A","id":1,"head_sha":"head","status":"completed","conclusion":"success"}),
+            json!({"name":"B","id":1,"head_sha":"head","status":"completed","conclusion":"skipped"}),
         ];
-        assert_eq!(
-            required_at_sha(&["A".into()], &runs, "head")[0].1,
-            "pending"
-        );
+        let latest = latest_at_sha(&runs, "head");
+        assert_eq!(latest.get("A").map(String::as_str), Some("pending"));
+        assert_eq!(latest.get("B").map(String::as_str), Some("skipped"));
     }
 }

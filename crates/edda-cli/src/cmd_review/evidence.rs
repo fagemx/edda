@@ -4,13 +4,14 @@ mod probes;
 mod process;
 mod trust;
 
-pub(crate) use github::gh_required_checks;
+pub(crate) use github::{gh_required_checks, GitHubChecks};
 pub(crate) use probes::{extract_probe_verbs, run_probes, run_wiring_scan};
 pub(crate) use trust::{extract_verify, spec_trust, SpecOrigin};
 
 use super::brief::FrontMatter;
 use edda_core::types::{ReviewGateRan, ReviewGateRead, ReviewProbe};
 use edda_ledger::{paths::EddaPaths, Ledger};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -91,14 +92,115 @@ pub(crate) fn read_gates(ledger: &Ledger, head: &str, gates: &GateSet) -> anyhow
     Ok((status.into(), read, uncovered))
 }
 
-/// One lattice for every independent evidence source; silence is neutral.
-pub(crate) fn combine_gate_status(current: &str, incoming: Option<&str>) -> String {
-    let incoming = incoming.unwrap_or("unverified");
-    if current == "undeclared" || incoming == "undeclared" {
-        "undeclared"
-    } else if current == "red" || incoming == "red" {
+pub(crate) fn read_ci(checks: &GitHubChecks) -> (Option<String>, Vec<ReviewGateRead>) {
+    if checks.required_names.is_empty() {
+        return (None, vec![]);
+    }
+    let read: Vec<_> = checks
+        .required_names
+        .iter()
+        .map(|name| {
+            let bucket = checks
+                .latest_runs
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or("missing");
+            ReviewGateRead {
+                kind: "ci".into(),
+                r#ref: name.clone(),
+                cmd: name.clone(),
+                // Preserve the required-set path-filter rule: a skipped
+                // required check can still be accepted by its aggregate.
+                result: match bucket {
+                    "pass" | "skipped" => "green",
+                    "fail" => "red",
+                    _ => "pending",
+                }
+                .into(),
+            }
+        })
+        .collect();
+    let status = rows_status(&read);
+    (Some(status), read)
+}
+
+pub(crate) type MappedCiRead = (Option<String>, Vec<ReviewGateRead>, Vec<String>);
+
+/// Aggregate exact-name check runs into one row per mapped declared gate.
+/// The required-check set is the trust boundary: without it optional jobs
+/// are not fetched and this source remains silent.
+pub(crate) fn read_ci_job_map(
+    checks: &GitHubChecks,
+    gates: &GateSet,
+    mappings: &BTreeMap<String, Vec<String>>,
+) -> MappedCiRead {
+    if checks.required_names.is_empty() {
+        return (None, vec![], vec![]);
+    }
+    let mut rows = Vec::new();
+    let mut mapped = Vec::new();
+    for gate in &gates.cmds {
+        let Some(names) = mappings.get(gate) else {
+            continue;
+        };
+        mapped.push(gate.clone());
+        let statuses = names
+            .iter()
+            .map(|name| {
+                let bucket = checks
+                    .latest_runs
+                    .get(name)
+                    .map(String::as_str)
+                    .unwrap_or("missing");
+                (name, bucket)
+            })
+            .collect::<Vec<_>>();
+        let result = if statuses.iter().any(|(_, bucket)| *bucket == "fail") {
+            "red"
+        } else if !statuses.is_empty() && statuses.iter().all(|(_, bucket)| *bucket == "pass") {
+            "green"
+        } else {
+            // Missing, queued/in-progress/neutral, and skipped are not a
+            // per-gate success claim.
+            "pending"
+        };
+        let reference = if statuses.is_empty() {
+            "no mapped check names".into()
+        } else {
+            statuses
+                .iter()
+                .map(|(name, bucket)| format!("{name}={bucket}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        rows.push(ReviewGateRead {
+            kind: "ci-job-map".into(),
+            r#ref: reference,
+            cmd: gate.clone(),
+            result: result.into(),
+        });
+    }
+    if rows.is_empty() {
+        return (None, rows, mapped);
+    }
+    let status = if rows.iter().any(|row| row.result == "red") {
         "red"
-    } else if current == "verified" || incoming == "verified" {
+    } else if mapped.len() == gates.cmds.len() && rows.iter().all(|row| row.result == "green") {
+        "verified"
+    } else {
+        "unverified"
+    };
+    (Some(status.into()), rows, mapped)
+}
+
+pub(crate) fn remove_mapped_uncovered(uncovered: &mut Vec<String>, mapped: &[String]) {
+    uncovered.retain(|gate| !mapped.contains(gate));
+}
+
+fn rows_status(read: &[ReviewGateRead]) -> String {
+    if read.iter().any(|row| row.result == "red") {
+        "red"
+    } else if read.iter().all(|row| row.result == "green") {
         "verified"
     } else {
         "unverified"
@@ -106,49 +208,37 @@ pub(crate) fn combine_gate_status(current: &str, incoming: Option<&str>) -> Stri
     .into()
 }
 
-pub(crate) fn read_ci(checks: &[(String, String)]) -> (Option<String>, Vec<ReviewGateRead>) {
-    if checks.is_empty() {
-        return (None, vec![]);
+/// Derive the final set status from exact-head evidence after READ and RAN
+/// collection. Required CI is set-level evidence: its red is authoritative,
+/// but its green never covers an individual declared gate.
+pub(crate) fn gate_status(
+    gates: &[String],
+    read: &[ReviewGateRead],
+    ran: &[ReviewGateRan],
+) -> String {
+    if gates.is_empty() {
+        return "undeclared".into();
     }
-    let read: Vec<_> = checks
-        .iter()
-        .map(|(name, bucket)| ReviewGateRead {
-            kind: "ci".into(),
-            r#ref: name.clone(),
-            cmd: name.clone(),
-            result: match bucket.as_str() {
-                "pass" => "green",
-                "fail" | "cancel" => "red",
-                _ => "pending",
-            }
-            .into(),
+    if read.iter().any(|row| row.result == "red")
+        || ran.iter().any(|row| !row.timed_out && row.exit != 0)
+    {
+        return "red".into();
+    }
+    let all_covered = gates.iter().all(|gate| {
+        read.iter().any(|row| {
+            row.cmd == *gate
+                && row.result == "green"
+                && matches!(row.kind.as_str(), "cmd-event" | "ci-job-map")
+        }) || ran.iter().any(|row| {
+            row.cmd == *gate && row.exit == 0 && !row.timed_out && row.stdout_blob.is_some()
         })
-        .collect();
-    let status = if read.iter().any(|r| r.result == "red") {
-        "red"
-    } else if read.iter().all(|r| r.result == "green") {
+    });
+    if all_covered {
         "verified"
     } else {
         "unverified"
-    };
-    (Some(status.into()), read)
-}
-
-pub(crate) fn ran_status(gates: &[String], ran: &[ReviewGateRan]) -> Option<String> {
-    // A real failure remains red even if another command exceeded the budget.
-    if ran.iter().any(|r| !r.timed_out && r.exit != 0) {
-        return Some("red".into());
     }
-    if !gates.is_empty()
-        && gates.iter().all(|gate| {
-            ran.iter()
-                .any(|r| &r.cmd == gate && r.exit == 0 && !r.timed_out && r.stdout_blob.is_some())
-        })
-    {
-        Some("verified".into())
-    } else {
-        None
-    }
+    .into()
 }
 
 pub(crate) fn ran_gates(
