@@ -9,6 +9,15 @@ const MAX_LIST_ITEM_CHARS: usize = 1_000;
 const MAX_DIRTY_PATHS: usize = 64;
 const MAX_PATH_CHARS: usize = 512;
 
+pub fn validate_raw_secrets(bytes: &[u8], label: &str) -> anyhow::Result<()> {
+    let text = String::from_utf8_lossy(bytes);
+    let (_, hits) = redact(&text);
+    if let Some(hit) = hits.first() {
+        anyhow::bail!("secret content refused in {label} (kind: {})", hit.kind);
+    }
+    Ok(())
+}
+
 pub fn validate_input_secrets(input: &ContextCapsuleInputV1) -> anyhow::Result<()> {
     let value = serde_json::to_value(input)?;
     scan_value(&value, "input")

@@ -54,6 +54,12 @@
     "source": "crates/edda-core/src/event.rs"
   },
   {
+    "type": "continuity_capsule",
+    "schema": "continuity_capsule.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/continuity/mod.rs"
+  },
+  {
     "type": "cycle_telemetry",
     "schema": "cycle_telemetry.schema.json",
     "stability": "unstable",

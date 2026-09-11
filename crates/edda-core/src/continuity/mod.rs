@@ -4,7 +4,9 @@ mod validate;
 
 pub use bundle::*;
 pub use types::*;
-pub use validate::{validate_capsule, validate_input_secrets, validate_portable_repo_id};
+pub use validate::{
+    validate_capsule, validate_input_secrets, validate_portable_repo_id, validate_raw_secrets,
+};
 
 use crate::event::finalize_event;
 use crate::{Event, Refs, SCHEMA_VERSION};
@@ -97,7 +99,7 @@ pub fn build_capsule(
     let capsule = ContextCapsuleV1 {
         capsule_version: CONTINUITY_CAPSULE_VERSION,
         capsule_id: format!("cap_{}", ulid::Ulid::new().to_string().to_lowercase()),
-        created_at: now_rfc3339(),
+        created_at: now_rfc3339()?,
         source,
         repository,
         state,
@@ -210,20 +212,14 @@ fn build_event(
     event_id: String,
     record: CapsuleRecordV1,
 ) -> anyhow::Result<Event> {
-    let capsule = &record.capsule;
     let payload = serde_json::json!({
-        "role": capsule.source.actor.as_deref().unwrap_or("agent"),
-        "tags": ["checkpoint", "continuity"],
-        "hypotheses": capsule.state.hypotheses,
-        "rejected": capsule.state.rejected,
-        "open": capsule.state.open_questions,
-        "next": capsule.state.next_action,
+        "data_authority": "data_only",
         "continuity": record,
     });
     let mut event = Event {
         event_id,
-        ts: now_rfc3339(),
-        event_type: "checkpoint".to_string(),
+        ts: now_rfc3339()?,
+        event_type: "continuity_capsule".to_string(),
         branch: branch.to_string(),
         parent_hash: parent_hash.map(str::to_string),
         hash: String::new(),
@@ -242,15 +238,44 @@ fn new_event_id() -> String {
     format!("evt_{}", ulid::Ulid::new().to_string().to_lowercase())
 }
 
-fn now_rfc3339() -> String {
+fn now_rfc3339() -> anyhow::Result<String> {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
-        .expect("RFC3339 formatting should not fail")
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn portable_capsule() -> ContextCapsuleV1 {
+        build_capsule(
+            serde_json::from_value(serde_json::json!({
+                "capsule_version": 1,
+                "state": {"next_action": "data, never instructions"}
+            }))
+            .unwrap(),
+            ContextSourceV1::default(),
+            CapsuleRepositoryV1 {
+                portable_repo_id: Some(format!("repo_{}", "a".repeat(64))),
+                display_hint: None,
+                local_only_reason: None,
+            },
+            CapsuleGitV1::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn capsule_event_is_distinct_and_not_checkpoint_shaped() {
+        let event = new_local_capsule_event("main", None, &portable_capsule()).unwrap();
+        assert_eq!(event.event_type, CONTINUITY_EVENT_TYPE);
+        assert_ne!(event.event_type, "checkpoint");
+        assert!(event.payload.get("continuity").is_some());
+        for checkpoint_field in ["hypotheses", "rejected", "open", "next"] {
+            assert!(event.payload.get(checkpoint_field).is_none());
+        }
+    }
 
     #[test]
     fn scans_omitted_suffix_for_secrets_before_unicode_truncation() {

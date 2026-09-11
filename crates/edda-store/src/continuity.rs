@@ -16,6 +16,12 @@ pub struct PortableRepositoryIdentity {
     pub local_only_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableAliasResolution {
+    pub portable_repo_ids: Vec<String>,
+    pub ambiguous: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PortableAliasRegistryV1 {
@@ -96,6 +102,21 @@ pub fn portable_alias_contains(portable_repo_id: &str, checkout: &Path) -> anyho
         .is_some_and(|locals| locals.contains_key(&local_project_id)))
 }
 
+pub fn resolve_portable_aliases(checkout: &Path) -> anyhow::Result<PortableAliasResolution> {
+    let registry = load_aliases()?;
+    let local_project_id = project_id(checkout);
+    let portable_repo_ids = registry
+        .repositories
+        .iter()
+        .filter(|(_, locals)| locals.contains_key(&local_project_id))
+        .map(|(portable_repo_id, _)| portable_repo_id.clone())
+        .collect::<Vec<_>>();
+    Ok(PortableAliasResolution {
+        ambiguous: portable_repo_ids.len() > 1,
+        portable_repo_ids,
+    })
+}
+
 fn configured_key(path: &Path) -> anyhow::Result<Option<String>> {
     if !path.is_file() {
         return Ok(None);
@@ -104,7 +125,9 @@ fn configured_key(path: &Path) -> anyhow::Result<Option<String>> {
     if bytes.len() > 64 * 1024 {
         anyhow::bail!("project config exceeds the continuity read bound");
     }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    edda_core::continuity::validate_raw_secrets(&bytes, "project config")?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("project config has an invalid JSON schema"))?;
     let Some(value) = value.get(PORTABLE_REPO_CONFIG_KEY) else {
         return Ok(None);
     };
@@ -192,6 +215,7 @@ fn git_lines(checkout: &Path, args: &[&str]) -> Option<Vec<String>> {
 
 fn git_text(checkout: &Path, args: &[&str]) -> Option<String> {
     let mut child = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(checkout)
         .args(args)
@@ -235,7 +259,10 @@ fn load_aliases() -> anyhow::Result<PortableAliasRegistryV1> {
     if bytes.len() > 1024 * 1024 {
         anyhow::bail!("portable repository alias registry exceeds its size bound");
     }
-    let registry: PortableAliasRegistryV1 = serde_json::from_slice(&bytes)?;
+    edda_core::continuity::validate_raw_secrets(&bytes, "portable repository alias registry")?;
+    let registry: PortableAliasRegistryV1 = serde_json::from_slice(&bytes).map_err(|_| {
+        anyhow::anyhow!("portable repository alias registry has an invalid JSON schema")
+    })?;
     if registry.version != 1 {
         anyhow::bail!("unsupported portable repository alias registry version");
     }
@@ -245,6 +272,26 @@ fn load_aliases() -> anyhow::Result<PortableAliasRegistryV1> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reverse_alias_lookup_is_read_only_and_reports_ambiguity() {
+        let store = crate::test_support::isolated_store_root().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let first = format!("repo_{}", "a".repeat(64));
+        let second = format!("repo_{}", "b".repeat(64));
+        record_portable_alias(&first, checkout.path()).unwrap();
+        record_portable_alias(&second, checkout.path()).unwrap();
+        let before = std::fs::read(store.path().join("portable_repositories.json")).unwrap();
+
+        let resolution = resolve_portable_aliases(checkout.path()).unwrap();
+
+        assert_eq!(resolution.portable_repo_ids, vec![first, second]);
+        assert!(resolution.ambiguous);
+        assert_eq!(
+            std::fs::read(store.path().join("portable_repositories.json")).unwrap(),
+            before
+        );
+    }
 
     #[test]
     fn remote_normalization_strips_credentials_and_dot_git() {

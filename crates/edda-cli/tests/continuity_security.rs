@@ -143,7 +143,7 @@ fn secret_in_truncated_suffix_is_refused_without_leak_or_write() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let failure: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(failure["status"], "SAVE_FAILED");
-    assert!(stderr.contains("input.state.summary"));
+    assert!(stderr.contains("secret content refused in continuity input"));
     assert!(!stderr.contains(secret));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
     assert_eq!(
@@ -217,7 +217,7 @@ fn unknown_trusted_metadata_field_is_refused_without_leaking_value() {
     );
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unknown field"));
+    assert!(stderr.contains("secret content refused in continuity input"));
     assert!(!stderr.contains(secret));
     assert_eq!(
         Ledger::open(repo.path()).unwrap().count_events().unwrap(),

@@ -9,6 +9,7 @@ use edda_core::continuity::{
 };
 use edda_ledger::{CapsuleEntryV1, ImportDisposition, Ledger};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Subcommand)]
@@ -144,8 +145,9 @@ fn report_import_refusal(error: &anyhow::Error, json: bool) {
 
 fn save(workspace_root: &Path, checkout: &Path, file: &Path, json: bool) -> anyhow::Result<()> {
     let bytes = io::read_bounded(file, MAX_CONTINUITY_INPUT_BYTES, "continuity input")?;
+    edda_core::continuity::validate_raw_secrets(&bytes, "continuity input")?;
     let input: ContextCapsuleInputV1 = serde_json::from_slice(&bytes)
-        .map_err(|error| anyhow::anyhow!("invalid ContextCapsuleV1 input: {error}"))?;
+        .map_err(|_| anyhow::anyhow!("invalid ContextCapsuleV1 input schema"))?;
     let paths = edda_ledger::EddaPaths::discover(workspace_root);
     let identity =
         edda_store::continuity::derive_portable_repository_identity(checkout, &paths.config_json)?;
@@ -232,8 +234,9 @@ fn list(
     let current_id =
         edda_store::continuity::derive_portable_repository_identity(checkout, &paths.config_json)?
             .portable_repo_id;
-    let entries = matching_entries(ledger.continuity_capsules()?, current_id.as_deref(), branch);
-    render::print_list(&entries, json)
+    let selection = repository_selection(checkout, current_id)?;
+    let entries = matching_entries(ledger.continuity_capsules()?, &selection.ids, branch);
+    render::print_list(&entries, &selection.warnings, json)
 }
 
 fn export(workspace_root: &Path, capsule_id: &str, out: &Path) -> anyhow::Result<()> {
@@ -253,8 +256,9 @@ fn export(workspace_root: &Path, capsule_id: &str, out: &Path) -> anyhow::Result
 
 fn import(workspace_root: &Path, checkout: &Path, path: &Path, json: bool) -> anyhow::Result<()> {
     let bytes = io::read_bounded(path, MAX_CONTINUITY_BUNDLE_BYTES, "portable bundle")?;
+    edda_core::continuity::validate_raw_secrets(&bytes, "portable bundle")?;
     let bundle: PortableCapsuleBundleV1 = serde_json::from_slice(&bytes)
-        .map_err(|error| anyhow::anyhow!("invalid portable bundle schema: {error}"))?;
+        .map_err(|_| anyhow::anyhow!("invalid portable bundle schema"))?;
     edda_core::continuity::validate_bundle(&bundle)?;
     let paths = edda_ledger::EddaPaths::discover(workspace_root);
     let current =
@@ -301,8 +305,9 @@ fn restore(
 ) -> anyhow::Result<()> {
     let ledger = Ledger::open_existing(workspace_root)?;
     let current_git = git::gather_git_metadata(checkout);
-    let entry = if let Some(capsule_id) = capsule_id {
-        ledger.continuity_capsule(capsule_id)?
+    let (entry, warnings) = if let Some(capsule_id) = capsule_id {
+        let selection = repository_selection(checkout, None)?;
+        (ledger.continuity_capsule(capsule_id)?, selection.warnings)
     } else {
         let paths = edda_ledger::EddaPaths::discover(workspace_root);
         let current_id = edda_store::continuity::derive_portable_repository_identity(
@@ -310,31 +315,70 @@ fn restore(
             &paths.config_json,
         )?
         .portable_repo_id;
-        matching_entries(
-            ledger.continuity_capsules()?,
-            current_id.as_deref(),
-            current_git.branch.as_deref(),
+        let selection = repository_selection(checkout, current_id)?;
+        if selection.ids.len() > 1 {
+            anyhow::bail!(
+                "ambiguous portable repository aliases for this checkout; select a capsule_id"
+            );
+        }
+        (
+            matching_entries(
+                ledger.continuity_capsules()?,
+                &selection.ids,
+                current_git.branch.as_deref(),
+            )
+            .into_iter()
+            .next(),
+            selection.warnings,
         )
+    };
+    let entry = entry.ok_or_else(|| anyhow::anyhow!("no matching continuity capsule found"))?;
+    let mut output = render::capsule_output(&entry, checkout, &current_git);
+    output.warnings.extend(warnings);
+    render::print_capsule(&output, json)
+}
+
+struct RepositorySelection {
+    ids: BTreeSet<String>,
+    warnings: Vec<String>,
+}
+
+fn repository_selection(
+    checkout: &Path,
+    derived_id: Option<String>,
+) -> anyhow::Result<RepositorySelection> {
+    let aliases = edda_store::continuity::resolve_portable_aliases(checkout)?;
+    let mut ids = aliases
+        .portable_repo_ids
         .into_iter()
-        .next()
+        .collect::<BTreeSet<_>>();
+    if let Some(derived_id) = derived_id {
+        ids.insert(derived_id);
     }
-    .ok_or_else(|| anyhow::anyhow!("no matching continuity capsule found"))?;
-    render::print_capsule(
-        &render::capsule_output(&entry, checkout, &current_git),
-        json,
-    )
+    let warnings = if aliases.ambiguous || ids.len() > 1 {
+        vec![format!(
+            "ambiguous portable repository aliases for this checkout ({} identities)",
+            ids.len()
+        )]
+    } else {
+        Vec::new()
+    };
+    Ok(RepositorySelection { ids, warnings })
 }
 
 fn matching_entries(
     entries: Vec<CapsuleEntryV1>,
-    portable_repo_id: Option<&str>,
+    portable_repo_ids: &BTreeSet<String>,
     branch: Option<&str>,
 ) -> Vec<CapsuleEntryV1> {
     entries
         .into_iter()
         .filter(|entry| {
             entry.legacy_partial
-                || entry.capsule.repository.portable_repo_id.as_deref() == portable_repo_id
+                || match entry.capsule.repository.portable_repo_id.as_ref() {
+                    Some(id) => portable_repo_ids.contains(id),
+                    None => portable_repo_ids.is_empty(),
+                }
         })
         .filter(|entry| {
             branch.is_none()

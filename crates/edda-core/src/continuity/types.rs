@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 pub const CONTINUITY_CAPSULE_VERSION: u8 = 1;
 pub const CONTINUITY_BUNDLE_VERSION: u8 = 1;
 pub const CONTINUITY_RECORD_VERSION: u8 = 1;
-pub const CONTINUITY_EVENT_TYPE: &str = "checkpoint";
+pub const CONTINUITY_EVENT_TYPE: &str = "continuity_capsule";
 pub const MAX_CONTINUITY_INPUT_BYTES: usize = 256 * 1024;
-pub const MAX_CONTINUITY_BUNDLE_BYTES: usize = 512 * 1024;
+// A bundle carries the canonical capsule as hex (2x expansion) plus bounded
+// identity, digest, authority, and JSON framing fields.
+pub const MAX_CONTINUITY_BUNDLE_BYTES: usize = MAX_CONTINUITY_INPUT_BYTES * 2 + 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

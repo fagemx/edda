@@ -20,7 +20,7 @@ validation. Payload schemas are not runtime validators in `append_event`.
 ## Envelope
 
 The Rust read/write type is `Event` in
-[`crates/edda-core/src/types.rs:358`](../../crates/edda-core/src/types.rs#L358).
+[`crates/edda-core/src/types.rs:368`](../../crates/edda-core/src/types.rs#L368).
 One complete event is a JSON object with these fields:
 
 | Field | JSON type | Meaning / read default |
@@ -52,7 +52,7 @@ Current finalization replaces the whole digest array with exactly one such
 record. `digests` is algorithm metadata, not an independent signature.
 
 Taxonomy is deterministically assigned by `classify_event_type` in
-[`types.rs:94`](../../crates/edda-core/src/types.rs#L94): signal, milestone,
+[`types.rs:96`](../../crates/edda-core/src/types.rs#L96): signal, milestone,
 admin or governance family; trace, info, milestone or governance level.
 `execution_event` and `ingestion` currently have no taxonomy. An unknown type
 also has none. Finalization overwrites caller taxonomy before hashing;
@@ -68,6 +68,7 @@ and registry must change in the same patch when a new producer is added.
 |---|---|---|
 | `note` | Layer 1 v1 | [Readable text, role and tags; optional structured decision or session digest](../../spec/events/note.schema.json) |
 | `checkpoint` | Layer 1 v1 | [Hypotheses, rejected hypotheses with reasons, open questions and next action](../../spec/events/checkpoint.schema.json) |
+| `continuity_capsule` | Layer 1 v1 | [Versioned data-only continuation capsule with immutable canonical bytes and origin identity](../../spec/events/continuity_capsule.schema.json) |
 | `decision_ratify` | Layer 1 v1 | [Operator ratification of a decision key](../../spec/events/decision_ratify.schema.json) |
 | `decision_import` | Layer 1 v1 | [Decision plus source project and source event provenance](../../spec/events/decision_import.schema.json) |
 | `cmd` | Layer 1 v1 | [argv, cwd, exit code, duration and stdout/stderr blob references](../../spec/events/cmd.schema.json) |

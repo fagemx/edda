@@ -48,6 +48,9 @@ impl Ledger {
         capsule: &ContextCapsuleV1,
     ) -> anyhow::Result<CapsuleEntryV1> {
         let _lock = acquire_lock_with_retry(&self.paths)?;
+        if let Some(entry) = existing_local_capsule(self, capsule)? {
+            return Ok(entry);
+        }
         let branch = self.head_branch()?;
         let parent_hash = self.last_event_hash()?;
         let event = if capsule.repository.portable_repo_id.is_some() {
@@ -65,28 +68,34 @@ impl Ledger {
     ) -> anyhow::Result<ImportResultV1> {
         validate_bundle(bundle)?;
         let _lock = acquire_lock_with_retry(&self.paths)?;
-        for event in self.iter_events_by_type(CONTINUITY_EVENT_TYPE)? {
-            if event.payload.get("continuity").is_none() {
-                continue;
+        for event in self.iter_events()? {
+            if event.event_type == CONTINUITY_EVENT_TYPE {
+                let record = parse_capsule_record(&event)?;
+                let same_capsule = record.origin.capsule_id == bundle.origin_capsule_id;
+                let same_event = record.origin.event_id == bundle.origin_event_id;
+                if !same_capsule && !same_event {
+                    continue;
+                }
+                let exact = same_capsule
+                    && same_event
+                    && record.origin.portable_repo_id.as_deref() == Some(&bundle.portable_repo_id)
+                    && record.capsule_sha256 == bundle.capsule_sha256
+                    && record.capsule_bytes_hex == bundle.capsule_bytes_hex;
+                if exact {
+                    return Ok(ImportResultV1 {
+                        disposition: ImportDisposition::Skipped,
+                        entry: entry_from_record(&event, record),
+                    });
+                }
+                anyhow::bail!("continuity integrity conflict for origin capsule or event identity");
             }
-            let record = parse_capsule_record(&event)?;
-            let same_capsule = record.origin.capsule_id == bundle.origin_capsule_id;
-            let same_event = record.origin.event_id == bundle.origin_event_id;
-            if !same_capsule && !same_event {
-                continue;
+            if event.event_type == "checkpoint"
+                && (project_legacy_checkpoint(&event).capsule.capsule_id
+                    == bundle.origin_capsule_id
+                    || event.event_id == bundle.origin_event_id)
+            {
+                anyhow::bail!("continuity integrity conflict with a legacy checkpoint identity");
             }
-            let exact = same_capsule
-                && same_event
-                && record.origin.portable_repo_id.as_deref() == Some(&bundle.portable_repo_id)
-                && record.capsule_sha256 == bundle.capsule_sha256
-                && record.capsule_bytes_hex == bundle.capsule_bytes_hex;
-            if exact {
-                return Ok(ImportResultV1 {
-                    disposition: ImportDisposition::Skipped,
-                    entry: entry_from_record(&event, record),
-                });
-            }
-            anyhow::bail!("continuity integrity conflict for origin capsule or event identity");
         }
 
         let branch = self.head_branch()?;
@@ -102,13 +111,10 @@ impl Ledger {
     pub fn continuity_capsules(&self) -> anyhow::Result<Vec<CapsuleEntryV1>> {
         let mut entries = Vec::new();
         for event in self.iter_events()? {
-            if event.event_type != CONTINUITY_EVENT_TYPE {
-                continue;
-            }
-            if event.payload.get("continuity").is_some() {
+            if event.event_type == CONTINUITY_EVENT_TYPE {
                 let record = parse_capsule_record(&event)?;
                 entries.push(entry_from_record(&event, record));
-            } else {
+            } else if event.event_type == "checkpoint" {
                 entries.push(project_legacy_checkpoint(&event));
             }
         }
@@ -127,17 +133,46 @@ impl Ledger {
         &self,
         capsule_id: &str,
     ) -> anyhow::Result<PortableCapsuleBundleV1> {
-        for event in self.iter_events_by_type(CONTINUITY_EVENT_TYPE)? {
-            if event.payload.get("continuity").is_none() {
+        let entry = self
+            .continuity_capsule(capsule_id)?
+            .ok_or_else(|| anyhow::anyhow!("continuity capsule not found: {capsule_id}"))?;
+        if entry.legacy_partial {
+            anyhow::bail!("legacy checkpoint capsules cannot be exported");
+        }
+        let event = self
+            .get_event(&entry.local_event_id)?
+            .ok_or_else(|| anyhow::anyhow!("continuity capsule event disappeared during export"))?;
+        make_bundle(&parse_capsule_record(&event)?)
+    }
+}
+
+fn existing_local_capsule(
+    ledger: &Ledger,
+    capsule: &ContextCapsuleV1,
+) -> anyhow::Result<Option<CapsuleEntryV1>> {
+    let mut exact = None;
+    for event in ledger.iter_events()? {
+        let entry = if event.event_type == CONTINUITY_EVENT_TYPE {
+            let record = parse_capsule_record(&event)?;
+            if record.origin.capsule_id != capsule.capsule_id {
                 continue;
             }
-            let record = parse_capsule_record(&event)?;
-            if record.origin.capsule_id == capsule_id {
-                return make_bundle(&record);
+            entry_from_record(&event, record)
+        } else if event.event_type == "checkpoint" {
+            let entry = project_legacy_checkpoint(&event);
+            if entry.capsule.capsule_id != capsule.capsule_id {
+                continue;
             }
+            entry
+        } else {
+            continue;
+        };
+        if entry.legacy_partial || entry.capsule != *capsule {
+            anyhow::bail!("continuity integrity conflict for local capsule identity");
         }
-        anyhow::bail!("continuity capsule not found: {capsule_id}")
+        exact = Some(entry);
     }
+    Ok(exact)
 }
 
 fn verified_readback(
@@ -255,15 +290,9 @@ fn project_legacy_checkpoint(event: &Event) -> CapsuleEntryV1 {
                 &mut truncation,
             ),
         },
-        git: CapsuleGitV1 {
-            branch: Some(legacy_text(
-                &event.branch,
-                512,
-                "git.branch",
-                &mut truncation,
-            )),
-            ..CapsuleGitV1::default()
-        },
+        // The event branch is an Edda ledger branch, not evidence of the Git
+        // branch that existed when this legacy checkpoint was written.
+        git: CapsuleGitV1::default(),
         references: ContextReferencesV1 {
             event_ids: if event.event_id.starts_with("evt_") {
                 vec![event.event_id.clone()]
@@ -340,6 +369,52 @@ fn acquire_lock_with_retry(paths: &crate::EddaPaths) -> anyhow::Result<Workspace
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn portable_capsule() -> ContextCapsuleV1 {
+        use edda_core::continuity::{build_capsule, ContextCapsuleInputV1};
+        build_capsule(
+            serde_json::from_value::<ContextCapsuleInputV1>(serde_json::json!({
+                "capsule_version": 1,
+                "state": {"next_action": "continue"}
+            }))
+            .unwrap(),
+            ContextSourceV1::default(),
+            CapsuleRepositoryV1 {
+                portable_repo_id: Some(format!("repo_{}", "a".repeat(64))),
+                display_hint: None,
+                local_only_reason: None,
+            },
+            CapsuleGitV1::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn local_capsule_identity_is_deduped_or_rejected_under_append_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open_or_init(tmp.path()).unwrap();
+        let capsule = portable_capsule();
+        let first = ledger.append_continuity_capsule(&capsule).unwrap();
+        let duplicate = ledger.append_continuity_capsule(&capsule).unwrap();
+        assert_eq!(duplicate.local_event_id, first.local_event_id);
+        assert_eq!(ledger.count_events().unwrap(), 1);
+
+        let shown = ledger
+            .continuity_capsule(&capsule.capsule_id)
+            .unwrap()
+            .unwrap();
+        let exported = ledger
+            .export_continuity_bundle(&capsule.capsule_id)
+            .unwrap();
+        assert_eq!(shown.local_event_id, first.local_event_id);
+        assert_eq!(exported.origin_event_id, first.local_event_id);
+
+        let mut conflicting = capsule;
+        conflicting.state.next_action = "different".into();
+        assert!(ledger.append_continuity_capsule(&conflicting).is_err());
+        assert_eq!(ledger.count_events().unwrap(), 1);
+    }
+
     #[test]
     fn conflicting_capsule_identity_is_refused_without_append() {
         use edda_core::continuity::{

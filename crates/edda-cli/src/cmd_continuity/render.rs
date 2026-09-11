@@ -59,18 +59,26 @@ pub fn print_capsule(output: &CapsuleOutput<'_>, json: bool) -> anyhow::Result<(
     Ok(())
 }
 
-pub fn print_list(entries: &[CapsuleEntryV1], json: bool) -> anyhow::Result<()> {
+pub fn print_list(
+    entries: &[CapsuleEntryV1],
+    warnings: &[String],
+    json: bool,
+) -> anyhow::Result<()> {
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "data_authority": "data_only",
                 "capsules": entries,
+                "warnings": warnings,
             }))?
         );
         return Ok(());
     }
     println!("{DATA_ONLY_BANNER}");
+    for warning in warnings {
+        println!("WARNING: {warning}");
+    }
     for entry in entries {
         println!(
             "{} {} {}",

@@ -1,5 +1,7 @@
 use super::types::*;
-use super::validate::{validate_capsule, validate_event_id, validate_portable_repo_id};
+use super::validate::{
+    validate_capsule, validate_event_id, validate_portable_repo_id, validate_raw_secrets,
+};
 use crate::canon::canonical_json_bytes;
 use crate::hash::sha256_hex;
 
@@ -28,6 +30,7 @@ pub fn decode_capsule_bytes(
     if capsule_digest(&bytes) != expected_digest {
         anyhow::bail!("capsule_sha256 does not match capsule bytes");
     }
+    validate_raw_secrets(&bytes, "capsule bytes")?;
     let capsule: ContextCapsuleV1 = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("capsule bytes are not a supported ContextCapsuleV1"))?;
     validate_capsule(&capsule)?;
@@ -98,7 +101,7 @@ fn compute_bundle_digest(bundle: &PortableCapsuleBundleV1) -> anyhow::Result<Str
     let mut value = serde_json::to_value(bundle)?;
     value
         .as_object_mut()
-        .expect("bundle serializes as an object")
+        .ok_or_else(|| anyhow::anyhow!("portable bundle must serialize as an object"))?
         .remove("bundle_sha256");
     Ok(sha256_hex(&canonical_json_bytes(&value)?))
 }
@@ -116,6 +119,100 @@ mod tests {
         .unwrap()
     }
 
+    fn portable_record(capsule: ContextCapsuleV1) -> CapsuleRecordV1 {
+        let bytes = canonical_capsule_bytes(&capsule).unwrap();
+        CapsuleRecordV1 {
+            record_version: 1,
+            data_authority: DataAuthority::DataOnly,
+            origin: CapsuleOriginV1 {
+                capsule_id: capsule.capsule_id.clone(),
+                event_id: format!("evt_{}", "1".repeat(26)),
+                portable_repo_id: capsule.repository.portable_repo_id.clone(),
+            },
+            capsule_sha256: capsule_digest(&bytes),
+            capsule_bytes_hex: hex::encode(bytes),
+            capsule,
+            imported: false,
+        }
+    }
+
+    #[test]
+    fn every_accepted_max_capsule_fits_the_bundle_bound() {
+        let emoji = "🦀";
+        let input = ContextCapsuleInputV1 {
+            capsule_version: 1,
+            state: ContextStateInputV1 {
+                title: Some(emoji.repeat(160)),
+                summary: Some(emoji.repeat(4_000)),
+                goal: Some(emoji.repeat(4_000)),
+                current: Some(emoji.repeat(4_000)),
+                hypotheses: vec![emoji.repeat(1_000); 32],
+                rejected: Vec::new(),
+                open_questions: Vec::new(),
+                next_action: emoji.repeat(4_000),
+            },
+            references: ContextReferencesV1::default(),
+        };
+        let mut capsule = build_capsule(
+            input,
+            ContextSourceV1::default(),
+            CapsuleRepositoryV1 {
+                portable_repo_id: Some(format!("repo_{}", "a".repeat(64))),
+                display_hint: Some("example.com/org/repo".into()),
+                local_only_reason: None,
+            },
+            CapsuleGitV1::default(),
+        )
+        .unwrap();
+        while capsule.state.open_questions.len() < 32 {
+            let mut candidate = capsule.clone();
+            candidate.state.open_questions.push(emoji.repeat(1_000));
+            if raw_capsule_len(&candidate) > MAX_CONTINUITY_INPUT_BYTES {
+                break;
+            }
+            capsule = candidate;
+        }
+        let mut with_empty = capsule.clone();
+        with_empty.state.open_questions.push(String::new());
+        if raw_capsule_len(&with_empty) > MAX_CONTINUITY_INPUT_BYTES {
+            let last = capsule.state.open_questions.last_mut().unwrap();
+            last.pop();
+            with_empty = capsule.clone();
+            with_empty.state.open_questions.push(String::new());
+        }
+        let framing_bytes = raw_capsule_len(&with_empty) - raw_capsule_len(&capsule);
+        let payload_bytes = MAX_CONTINUITY_INPUT_BYTES - raw_capsule_len(&capsule) - framing_bytes;
+        capsule
+            .state
+            .open_questions
+            .push(exact_utf8_bytes(payload_bytes));
+
+        let capsule_bytes = canonical_capsule_bytes(&capsule).unwrap();
+        assert_eq!(capsule_bytes.len(), MAX_CONTINUITY_INPUT_BYTES);
+        let bundle = make_bundle(&portable_record(capsule)).unwrap();
+        assert!(serde_json::to_vec_pretty(&bundle).unwrap().len() <= MAX_CONTINUITY_BUNDLE_BYTES);
+    }
+
+    fn raw_capsule_len(capsule: &ContextCapsuleV1) -> usize {
+        canonical_json_bytes(&serde_json::to_value(capsule).unwrap())
+            .unwrap()
+            .len()
+    }
+
+    fn exact_utf8_bytes(bytes: usize) -> String {
+        let mut value = "🦀".repeat(bytes / 4);
+        value.push_str(match bytes % 4 {
+            0 => "",
+            1 => "x",
+            2 => "¢",
+            3 => "界",
+            _ => unreachable!(),
+        });
+        assert_eq!(value.len(), bytes);
+        assert!(value.chars().count() <= 1_000);
+        value
+    }
+
     #[test]
     fn bundle_detects_identity_tampering() {
         let capsule = build_capsule(
@@ -129,21 +226,7 @@ mod tests {
             CapsuleGitV1::default(),
         )
         .unwrap();
-        let bytes = canonical_capsule_bytes(&capsule).unwrap();
-        let record = CapsuleRecordV1 {
-            record_version: 1,
-            data_authority: DataAuthority::DataOnly,
-            origin: CapsuleOriginV1 {
-                capsule_id: capsule.capsule_id.clone(),
-                event_id: format!("evt_{}", "1".repeat(26)),
-                portable_repo_id: capsule.repository.portable_repo_id.clone(),
-            },
-            capsule_sha256: capsule_digest(&bytes),
-            capsule_bytes_hex: hex::encode(bytes),
-            capsule,
-            imported: false,
-        };
-        let mut bundle = make_bundle(&record).unwrap();
+        let mut bundle = make_bundle(&portable_record(capsule)).unwrap();
         bundle.origin_event_id = format!("evt_{}", "2".repeat(26));
         assert!(validate_bundle(&bundle).is_err());
     }
