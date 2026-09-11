@@ -5,7 +5,7 @@ use edda_ledger::paths::EddaPaths;
 use edda_ledger::{ledger, Ledger};
 use std::path::Path;
 
-/// Embedded coordination skill templates — canonical versions that ship with the binary.
+/// Embedded project skill templates — canonical versions that ship with the binary.
 const SKILLS: &[(&str, &str)] = &[
     ("coord-sync", include_str!("skills/coord-sync.md")),
     ("coord-handoff", include_str!("skills/coord-handoff.md")),
@@ -122,7 +122,7 @@ actors: {}
         auto_install_bridges(repo_root);
     }
 
-    // Scaffold coordination skills for detected agent hosts.
+    // Scaffold project skills for detected agent hosts.
     if repo_root.join(".claude").is_dir() {
         scaffold_skills(&repo_root.join(".claude").join("skills"), force_skills);
     }
@@ -157,7 +157,7 @@ fn auto_install_bridges(repo_root: &Path) {
     }
 }
 
-/// Write embedded coord skill templates to `<host>/skills/coord-*/SKILL.md`.
+/// Write embedded skill templates to `<host>/skills/<name>/SKILL.md`.
 /// Skips files that already exist unless `force` is true.
 fn scaffold_skills(skills_dir: &Path, force: bool) {
     for &(name, content) in SKILLS {
@@ -289,14 +289,14 @@ mod tests {
     }
 
     #[test]
-    fn init_scaffolds_coord_skills() {
+    fn init_scaffolds_canonical_project_skills_for_claude() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
 
         execute(&tmp, true, false).unwrap();
 
-        for &(name, expected) in SKILLS {
+        for &(name, canonical) in SKILLS {
             let path = tmp
                 .join(".claude")
                 .join("skills")
@@ -304,28 +304,36 @@ mod tests {
                 .join("SKILL.md");
             assert!(path.exists(), "{name}/SKILL.md should be scaffolded");
             let content = std::fs::read_to_string(&path).unwrap();
-            assert_eq!(content, expected, "{name} must use the embedded bytes");
-
-            // GH-1063: these files are scaffolded into every new project, so
-            // whatever they say about binding authority is what every future
-            // session in that project learns. Assert against the scaffolded
-            // file on disk, not the source constant — the scaffold is the
-            // carrier, and a fixture that drifted from it would prove nothing.
-            //
-            // The superseded phrase is spelled in two pieces on purpose: the
-            // acceptance sweep greps `crates/` for it, and a guard that spelled
-            // it out would itself be the hit it exists to prevent.
-            let operator_only = concat!("until an operator ", "ratifies");
-            assert!(
-                !content.contains(operator_only),
-                "{name} still teaches operator-only binding authority"
+            assert_eq!(
+                content, canonical,
+                "{name}/SKILL.md must equal its embedded canonical source"
             );
-            if matches!(name, "coord-sync" | "coord-review") {
+            assert!(
+                content.lines().any(|line| line == format!("name: {name}")),
+                "{name} should have exact matching frontmatter"
+            );
+
+            if name.starts_with("coord-") {
+                // GH-1063: these files are scaffolded into every new project,
+                // so whatever they say about binding authority is what every
+                // future session in that project learns. Assert against the
+                // scaffolded file on disk, not only the source constant.
+                //
+                // The superseded phrase is spelled in two pieces on purpose:
+                // the acceptance sweep greps `crates/` for it, and a guard
+                // that spelled it out would itself be the hit it prevents.
+                let operator_only = concat!("until an operator ", "ratifies");
                 assert!(
-                    content.contains("edda ratify --by-rule cited-authority"),
-                    "{name} must name the cited-authority rule sweep — the second \
-                     binding path (decision.auto-ratify; PR #1016)"
+                    !content.contains(operator_only),
+                    "{name} still teaches operator-only binding authority"
                 );
+                if matches!(name, "coord-sync" | "coord-review") {
+                    assert!(
+                        content.contains("edda ratify --by-rule cited-authority"),
+                        "{name} must name the cited-authority rule sweep — the second \
+                         binding path (decision.auto-ratify; PR #1016)"
+                    );
+                }
             }
         }
 
@@ -333,14 +341,14 @@ mod tests {
     }
 
     #[test]
-    fn init_scaffolds_codex_coord_skills() {
+    fn init_scaffolds_canonical_project_skills_for_codex() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         std::fs::write(tmp.join("AGENTS.md"), "# Project instructions\n").unwrap();
 
         execute(&tmp, true, false).unwrap();
 
-        for &(name, expected) in SKILLS {
+        for &(name, canonical) in SKILLS {
             let path = tmp
                 .join(".agents")
                 .join("skills")
@@ -351,9 +359,9 @@ mod tests {
                 "{name}/SKILL.md should be scaffolded for Codex"
             );
             assert_eq!(
-                std::fs::read_to_string(path).unwrap(),
-                expected,
-                "{name} must use the embedded bytes for Codex"
+                std::fs::read_to_string(&path).unwrap(),
+                canonical,
+                "{name}/SKILL.md must equal its embedded canonical source"
             );
         }
 
@@ -361,35 +369,31 @@ mod tests {
     }
 
     #[test]
-    fn init_preserves_existing_orchestration_customizations_for_both_hosts() {
+    fn init_preserves_every_embedded_customization_for_both_hosts() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         std::fs::write(tmp.join("AGENTS.md"), "# Project instructions\n").unwrap();
-        let claude_skill = tmp
-            .join(".claude")
-            .join("skills")
-            .join("coord-orchestrate")
-            .join("SKILL.md");
-        let agents_skill = tmp
-            .join(".agents")
-            .join("skills")
-            .join("coord-orchestrate")
-            .join("SKILL.md");
-        std::fs::create_dir_all(claude_skill.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(agents_skill.parent().unwrap()).unwrap();
-        std::fs::write(&claude_skill, "custom claude content").unwrap();
-        std::fs::write(&agents_skill, "custom agents content").unwrap();
+
+        for host in [".claude", ".agents"] {
+            for &(name, _) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+                std::fs::write(&skill, format!("custom {host} {name}")).unwrap();
+            }
+        }
 
         execute(&tmp, true, false).unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(claude_skill).unwrap(),
-            "custom claude content"
-        );
-        assert_eq!(
-            std::fs::read_to_string(agents_skill).unwrap(),
-            "custom agents content"
-        );
+        for host in [".claude", ".agents"] {
+            for &(name, _) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                assert_eq!(
+                    std::fs::read_to_string(skill).unwrap(),
+                    format!("custom {host} {name}"),
+                    "default init must preserve {host} {name}"
+                );
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -403,21 +407,31 @@ mod tests {
     }
 
     #[test]
-    fn init_force_skills_overwrites() {
+    fn init_force_skills_overwrites_every_embedded_skill_for_both_hosts() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
-        let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "custom content").unwrap();
+        std::fs::write(tmp.join("AGENTS.md"), "# Project instructions\n").unwrap();
+
+        for host in [".claude", ".agents"] {
+            for &(name, _) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+                std::fs::write(skill, format!("custom {host} {name}")).unwrap();
+            }
+        }
 
         execute(&tmp, true, true).unwrap();
 
-        // Should be overwritten with embedded version
-        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-        assert!(
-            content.contains("name: coord-sync"),
-            "should overwrite with embedded version"
-        );
+        for host in [".claude", ".agents"] {
+            for &(name, expected) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                assert_eq!(
+                    std::fs::read_to_string(skill).unwrap(),
+                    expected,
+                    "force must overwrite every embedded entry: {host} {name}"
+                );
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

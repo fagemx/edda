@@ -19,15 +19,17 @@ Generic 流程唯一 authored source 是
 `crates/edda-cli/src/skills/coord-orchestrate.md`；本 repo tracked
 `.claude/skills/coord-orchestrate/SKILL.md` 是 byte-identical projection。
 `edda init` 只把 embedded bytes 寫給偵測到的新 host，既有 custom skill 預設保留；
-不要為更新單一 copy 對未知 checkout 使用會覆寫五份 coord skills 的
-`--force-skills`。`.agents/` 是 local/generated state，不 force-track。
+不要為更新單一 copy 對未知 checkout 使用 `--force-skills`，因為它會覆寫**每一份**
+embedded project skill（包含未來或非 coordination 新增項）。`.agents/` 是
+local/generated state，不 force-track。
 
 | 進來的情況 | 路由 |
 |---|---|
 | 已 assigned／resume | `edda task show <id>`，讀 reachable brief、舊 result 與 source，做原角色；不重開 planning／formation |
 | controller resume 已有 plan | 先讀 rail owner、active map、task JSON、dispatch/session 與 PR/source evidence，再選 next action |
 | `issue-pipeline --skip-plan` | 重用已有 acceptance，不是略過 acceptance；`--no-merge` 只停止，不給 merge authority |
-| `issue-action` | 保留 issue acceptance／owner／fix context，再進 generic flow |
+| `issue-action` | 保留 issue acceptance／owner／fix context，再進 generic flow；若 caller 是 active `edda pipeline`，implementation 必須先建立／更新 PR 並回傳 URL 才能進 review |
+| `edda pipeline` | product template 透過 `issue-action` 實作；依本 repo focused L0 驗證，implementation 回傳 PR URL 後才進 review；pipeline／worker／reviewer 都不合併 |
 | `pr-review-loop` | 只有 author self-check/fix；不是 independent verdict 或 merge loop |
 | 小型或一條 cohesive writer chain | 原 session 普通實作，不為儀式建 rail／fleet |
 | 兩個以上真正可並行 writers | 一個 controller 才啟用 `coord-orchestrate` formation；只有實際 artifact dependency 等待 |
@@ -35,8 +37,12 @@ Generic 流程唯一 authored source 是
 同一 repository task rail 先選**一個** owner。Manual 模式使用 exact key
 `delivery.rail-owner=manual:<controller-session>`，建立／啟動前掃所有 plan/task/peer，
 並證明 scheduler、one-off reconcile process 與舊 reconcile attempt 都不在執行；不明就
-拒絕。Reconcile 模式由現有 runner 全權負責 Codex start/retry/settlement，不混入 manual
-start、Pi／ACP／host 或 no-retry task。因為目前 reconcile 不按 `plan_id` filter，絕不能用
+拒絕。對 **legacy/uncontrolled task**，Reconcile 模式由現有 runner 全權負責 Codex
+start/retry/settlement，不混入 manual start、Pi／ACP／host 或 no-retry task。受 accepted
+`ExecutionBriefV1` 綁定的 **controlled task** 不走這條 legacy lifecycle：目前 accepted product
+只能驗證／綁定後回傳 descriptor，不會 launch；在 authorized S6 capability 出現前，直接執行
+truthfully `CONTROL_UNAVAILABLE`。Descriptor、caller-authored event 或 ordinary task command
+都不是 launch authority。因為目前 reconcile 不按 `plan_id` filter，絕不能用
 `delivery.rail-owner.<plan>` 讓不同 plan 各選一種模式。Decision 只是 caller coordination
 evidence，不是 runtime lock、身份授權或 exactly-once 保證；切模式要操作者授權並先處理
 scheduler/process/lease/side effects。
@@ -46,7 +52,11 @@ Manual controller 用 `delivery.active.<plan>` 的 exact decision 加 exact `pla
 不更新 brief／owner／scope／deps。Failed 且 assignment 不變時 `task start` 同一 ID 是 retry；
 owner／brief／dependency 改變則開下一 revision，重接 pending successor 後才 supersede map，
 舊 task 留歷史、不 fake done。Controller launch 前 start 一次；worker 只讀 Running 後正常
-done/fail。Dispatch 的 `outcome=done` 不等於 task done、review 或 merge。
+done/fail。這個 ordinary `task done --receipt ... --evidence ...` 與 Done 後 metadata correction
+只適用 legacy/uncontrolled task。Controlled completion 必須由 authorized product path 驗證
+`WorkReceiptV1`，精確綁定 brief/session/attempt/lease/outcome 並帶所需 S6 authority seal；不接受
+ordinary `--evidence` 或 legacy post-Done correction，且 capability 尚不可用時 fail closed。
+Dispatch 的 `outcome=done` 不等於 task done、review 或 merge。
 
 | Backend | 本 repo 的 caller contract |
 |---|---|
@@ -352,7 +362,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 通知 | 背景任務完成會叫醒控制者；`edda notify` 存在 | 事件驅動（#545） |
 | 成本 | `--budget-usd`；plan 級 measured-ness（#533 已合） | 讀端報表（#582）；digest 成本 0.0 哨兵（#585）；conductor 散文成本（#584） |
 
-**存在但本頁未驗證是否符合現行流程的動詞**：`edda pipeline`（skill chain with approval gates）、`edda intake`（外部任務進帳）、`edda prs`（掃 GitHub PR 事件）、`edda bundle`（審查 bundle）、`edda scan`（能力掃描）、`edda brief`（任務 brief 檢視）。用之前先 `--help` 並確認有讀者。
+**存在但本頁未驗證是否符合現行流程的動詞**：`edda intake`（外部任務進帳）、`edda prs`（掃 GitHub PR 事件）、`edda bundle`（審查 bundle）、`edda scan`（能力掃描）、`edda brief`（任務 brief 檢視）。用之前先 `--help` 並確認有讀者。
 
 ---
 

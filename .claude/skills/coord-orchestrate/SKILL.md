@@ -78,11 +78,20 @@ mechanical enforcement.
 
 ### Reconcile rail
 
-The configured reconciler owns the whole rail and its actual Codex
-start/resume/requeue/retry/settlement lifecycle, including global attempt
-limits. Do not manually start, dispatch or settle those attempts, and do not
-enqueue Pi, ACP, host-subagent or per-card no-retry tasks for reconcile to pick.
-The per-plan active map below does not filter the current reconciler.
+For **legacy/uncontrolled tasks**, the configured reconciler owns the whole rail
+and its actual Codex start/resume/requeue/retry/settlement lifecycle, including
+global attempt limits. Do not manually start, dispatch or settle those attempts,
+and do not enqueue Pi, ACP, host-subagent or per-card no-retry tasks for
+reconcile to pick. The per-plan active map below does not filter the current
+reconciler.
+
+A task bound to an accepted `ExecutionBriefV1` is instead **controlled**. At the
+current accepted product boundary, controlled reconcile validates and binds an
+attempt but returns a descriptor only: it does not launch or enter the legacy
+Codex runner. Direct controlled execution remains unavailable until an
+authorized S6 capability exists. Treat `CONTROL_UNAVAILABLE` as the truthful
+current result; a descriptor, caller-authored event or ordinary task command is
+not launch authority and must not be described as a promised launch.
 
 Changing modes requires operator authorization, exact scheduler lifecycle when
 installed, process/lease/attempt reconciliation, and no unresolved task side
@@ -195,12 +204,14 @@ Worker and controller must not race to settle a live task.
 |---|---|
 | Ready with inputs bound | controller starts once and dispatches; worker reads Running |
 | Running/Blocked/Done start refusal | inspect task, dependencies, attempt and result; no unconditional retry |
-| Worker met the task's stated output | worker records `task done --receipt ... --evidence ...`; a candidate need not be a PR or merge |
+| Legacy/uncontrolled worker met the task's stated output | worker records ordinary `task done --receipt ... --evidence ...`; a candidate need not be a PR or merge |
+| Controlled attempt is bound to an accepted `ExecutionBriefV1` | completion must come from the authorized product path with a validated `WorkReceiptV1`, the exact brief/session/attempt/lease/outcome correlation and the required S6 authority seal; ordinary `task done --evidence` is refused, and the current product fails closed while that authorized capability is unavailable |
 | Definite stopped/prelaunch failure | worker fails, or controller fails only after observing the stop |
 | Failed with the same assignment/brief/scope and authorized retry | controller starts the SAME ID; its attempt increments and existing successor edges remain |
 | Running but silent, expired-looking lease or missing handle | inspect process, handle, source, task history and side effects; elapsed time alone never authorizes fail/relaunch |
 | Dispatch done but task still Running or receipt inadequate | recover a truthful receipt or leave unverified; never infer acceptance/merge |
-| Done receipt metadata correction | `task done` may correct the receipt without another execution or successor unlock |
+| Legacy/uncontrolled Done receipt metadata correction | ordinary `task done` may correct metadata without another execution or successor unlock |
+| Controlled Done receipt correction | never use the legacy post-Done metadata correction path; preserve the seal-bound `WorkReceiptV1` history and use the authorized controlled lifecycle |
 | Done but substantive repair required | create a linked fix task; preserve the old execution receipt |
 
 There is no `task retry` subcommand. `task start` accepts Failed for same-ID
@@ -278,7 +289,8 @@ receives `.claude/skills/...`; an existing `AGENTS.md` or `.agents` receives
 `.agents/skills/...`; an undetected host receives neither. Existing skill files
 are preserved unless the owner explicitly requests the existing all-skill
 force option. Do not recommend `--force-skills` for an unknown customized
-checkout because it overwrites all five coordination skills.
+checkout because it overwrites every embedded project skill, including any
+future or non-coordination additions.
 
 For an existing installation, the owner compares against a pinned template and
 updates only the selected copy explicitly, preserving custom files. A

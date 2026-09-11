@@ -58,24 +58,27 @@ phases:
       Run /issue-action {issue_id} to implement the approved plan.
       Issue: {escaped_title}
       URL: {url}
+      Validate with the repository's current focused author/L0 policy.
+      Before this phase completes, create or update the PR through existing
+      authorization and return its exact URL. If that is unavailable, report
+      the blocker; do not claim that a local candidate is a PR. Do not merge.
     depends_on: [plan-approval]
-    check:
-      - type: cmd_succeeds
-        cmd: "cargo test --workspace"
     on_fail: ask
 
   - id: pr-review
     prompt: |
-      Run /pr-review to review the PR created by the implementation phase.
+      Run /pr-review to review the exact PR URL returned by the implementation phase.
       Verify code quality, test coverage, and adherence to the plan.
+      This review phase does not merge.
     depends_on: [implement]
     on_fail: ask
 
   - id: pr-approval
     prompt: |
       The PR for issue #{issue_id} has been reviewed.
-      Write an approval_request event for the PR merge.
-      Then wait for human approval to merge.
+      Write an approval_request event for the repository's merge authority.
+      Then wait for its decision. This pipeline, its worker, and its reviewer
+      never gain merge authority and never merge the PR.
     depends_on: [pr-review]
     check:
       - type: wait_until
@@ -106,23 +109,25 @@ phases:
       Run /issue-action {issue_id} to implement the fix.
       Issue: {escaped_title}
       URL: {url}
-    check:
-      - type: cmd_succeeds
-        cmd: "cargo test --workspace"
+      Validate with the repository's current focused author/L0 policy.
+      Before this phase completes, create or update the PR through existing
+      authorization and return its exact URL. If that is unavailable, report
+      the blocker; do not claim that a local candidate is a PR. Do not merge.
     on_fail: ask
 
   - id: pr-review
     prompt: |
-      Run /pr-review to review the PR created by the implementation phase.
-      Verify the fix is correct and tests pass.
+      Run /pr-review to review the exact PR URL returned by the implementation phase.
+      Verify the fix is correct and tests pass. This review phase does not merge.
     depends_on: [implement]
     on_fail: ask
 
   - id: pr-approval
     prompt: |
       The PR for issue #{issue_id} has been reviewed.
-      Write an approval_request event for the PR merge.
-      Then wait for human approval to merge.
+      Write an approval_request event for the repository's merge authority.
+      Then wait for its decision. This pipeline, its worker, and its reviewer
+      never gain merge authority and never merge the PR.
     depends_on: [pr-review]
     check:
       - type: wait_until
@@ -192,6 +197,41 @@ mod tests {
                 "pr-approval"
             ]
         );
+    }
+
+    fn phase<'a>(plan: &'a serde_yaml::Value, id: &str) -> &'a serde_yaml::Value {
+        plan["phases"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["id"].as_str() == Some(id))
+            .unwrap()
+    }
+
+    #[test]
+    fn implementation_hands_an_exact_pr_url_to_review_without_duplicate_gate() {
+        for yaml in [
+            render_standard_plan(7, "standard", "https://example.com/7"),
+            render_quickfix_plan(8, "quick", "https://example.com/8"),
+        ] {
+            let plan: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+            let implement = phase(&plan, "implement");
+            let implement_prompt = implement["prompt"].as_str().unwrap();
+            assert!(implement_prompt.contains("create or update the PR"));
+            assert!(implement_prompt.contains("return its exact URL"));
+            assert!(implement_prompt.contains("focused author/L0 policy"));
+            assert!(implement_prompt.contains("Do not merge"));
+            assert!(implement.get("check").is_none());
+            assert!(!yaml.contains("cargo test --workspace"));
+
+            let review_prompt = phase(&plan, "pr-review")["prompt"].as_str().unwrap();
+            assert!(review_prompt.contains("exact PR URL returned"));
+            assert!(review_prompt.contains("does not merge"));
+
+            let approval_prompt = phase(&plan, "pr-approval")["prompt"].as_str().unwrap();
+            assert!(approval_prompt.contains("never gain merge authority"));
+            assert!(approval_prompt.contains("never merge the PR"));
+        }
     }
 
     #[test]
