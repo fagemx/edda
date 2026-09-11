@@ -19,7 +19,7 @@ pub(crate) fn render(p: &ReviewVerdictPayload, event: &str) -> String {
             "spec-convention-only" => "pass --spec <path|#issue>",
             "gates-undeclared" => "declare gates in REVIEW.md or pass --gate",
             "gates-unverified" => {
-                "record edda run -- <gate> at this SHA on a clean tree, or pass --run-gates"
+                "record edda run -- <gate> at this SHA with an eligible relevant/scoped tree, or pass --run-gates"
             }
             "gates-red" => "fix the failing gate and review the new SHA",
             "model-unknown" | "tool-policy-none" => {
@@ -139,8 +139,12 @@ mod tests {
 
     #[test]
     fn render_includes_the_actual_escalation() {
-        let text = render(&payload(), "evt_01");
+        let mut payload = payload();
+        payload.disqualifiers.push("gates-unverified".into());
+        let text = render(&payload, "evt_01");
         assert!(text.contains("escalation: missing exact-head CI receipt"));
         assert!(text.contains("escalation-pending → resolve the listed review escalations"));
+        assert!(text.contains("eligible relevant/scoped tree"));
+        assert!(!text.contains("on a clean tree"));
     }
 }

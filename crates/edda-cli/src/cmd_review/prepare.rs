@@ -128,8 +128,12 @@ pub(crate) fn collect_evidence(
         vec![]
     };
     let set = evidence::gate_set(&prepared.fm, &args.gates, &verify);
-    let (_, mut read, mut uncovered) =
-        evidence::read_gates(&prepared.ledger, &prepared.subject.head_sha, &set)?;
+    let (_, mut read, mut uncovered) = evidence::read_gates(
+        &prepared.ledger,
+        &prepared.subject.head_sha,
+        &set,
+        &prepared.subject.files,
+    )?;
     if let Some(pr) = args.pr {
         let checks = evidence::gh_required_checks(&prepared.repo, pr, &prepared.subject.head_sha)?;
         let (_, required_rows) = evidence::read_ci(&checks);
@@ -265,4 +269,48 @@ pub(crate) fn assemble(
         classes,
         qualified,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd_review::git::testrepo;
+    use edda_core::event::{new_cmd_event_with_git_context_and_dirty_paths, CmdEventParams};
+
+    #[test]
+    fn evidence_selection_receives_the_reviewed_subject_files() {
+        let (_temp, root) = testrepo::init();
+        testrepo::run(&root, &["checkout", "-qb", "feature"]);
+        std::fs::create_dir_all(root.join("docs/archive")).expect("archive dir");
+        let subject_path = "docs/archive/probe.txt";
+        let head = testrepo::commit_file(&root, subject_path, "subject\n", "feature change");
+        let ledger = Ledger::open_or_init(&root).expect("ledger");
+        let argv = vec!["gate".to_owned()];
+        let untracked = vec![subject_path.to_owned()];
+        let event = new_cmd_event_with_git_context_and_dirty_paths(
+            &CmdEventParams {
+                branch: "main",
+                parent_hash: ledger.last_event_hash().expect("parent").as_deref(),
+                argv: &argv,
+                cwd: root.to_str().expect("utf8 root"),
+                exit_code: 0,
+                duration_ms: 1,
+                stdout_blob: "",
+                stderr_blob: "",
+            },
+            Some(&head),
+            Some(true),
+            Some((&[], &untracked)),
+        )
+        .expect("receipt");
+        ledger.append_event(&event).expect("append receipt");
+        let args = ReviewArgs {
+            gates: vec!["gate".into()],
+            ..Default::default()
+        };
+        let mut prepared = prepare(&args, &root).expect("prepare");
+        let (gates, _, _) = collect_evidence(&mut prepared, &args, &root).expect("evidence");
+        assert_eq!(gates.status, "unverified");
+        assert!(gates.read.is_empty());
+    }
 }

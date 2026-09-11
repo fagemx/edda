@@ -408,7 +408,7 @@ codex 不回報 usage，預算閘永遠不會觸發——這件事要說出來�
   "independence_policy": "session | model",
   "gates": {"status": "verified | unverified | red | undeclared",
             "declared_by": ["REVIEW.md", "--gate"],
-            "read": [{"kind": "cmd-event | ci | ci-job-map", "ref": "evt_… | check-name | exact-name=status, …", "cmd": "cargo test --workspace",
+            "read": [{"kind": "cmd-event | cmd-event-scoped | ci | ci-job-map", "ref": "evt_… | check-name | exact-name=status, …", "cmd": "cargo test --workspace",
                       "result": "green | red | pending"}],
             "ran": [{"cmd": "cargo test -p edda-core", "exit": 0, "duration_ms": 41200, "stdout_blob": "… | null", "timed_out": false}]},
   "probes": [{"cmd": "edda wave --help", "exit": 2}],
@@ -447,19 +447,32 @@ codex 不回報 usage，預算閘永遠不會觸發——這件事要說出來�
 
 ## 8. 本地收據：`cmd` 事件擴充（`review.local-receipt`）
 
-`edda run` 在 `cmd` payload 加兩個 additive 欄位：`git_sha`（執行時的 HEAD；非 git repo
-為 null）與 `tree_dirty`（`git status --porcelain` 非空）。
+`edda run` 在 `cmd` payload 保留 additive 欄位 `git_sha`（執行前的 HEAD；非 git repo
+為 null）與 `tree_dirty`，並新增 `tree_dirty_paths`：已知時為
+`{"tracked":[…],"untracked":[…]}`，未知時為 null。它在 command 前後固定執行
+`git status --porcelain=v1 -z --untracked-files=all --ignore-submodules=none`；嚴格解析 NUL
+framing、rename/copy 的第二路徑與 UTF-8，路徑皆為 repo-root-relative Git `/` 路徑，前後集合
+排序、去重後聯集。status 失敗、malformed 或 non-UTF-8 是 unknown。前後 HEAD 若確定不同，
+`tree_dirty=true` 且 path state 為 null；任何一邊曾 staged/modified 的路徑都在 `tracked`。
+舊 constructor 與舊 payload 保持不變；path-aware constructor 在完整 payload 組好後才 hash。
 
 閘門集合＝`REVIEW.md` front matter 的 `gates` ∪ `--gate`。**集合為空 →
 `gates.status = undeclared`**，disqualifier `gates-undeclared`，人讀輸出印
 「to qualify: declare gates in REVIEW.md front matter or pass --gate」。空集合不是
 vacuous verified——不然沒寫 `REVIEW.md` 的 repo 免費拿到 verified。
 
-集合非空時的 READ 規則：對每條 gate，找 `git_sha == head_sha` ∧ `tree_dirty == false`
-∧ `argv.join(" ")` 經空白正規化後**與 gate 字串完全相等**的 `cmd` 事件，取最新一筆：
-exit 0 → `green`；非 0 → `red`；沒有 → 該 gate 未涵蓋。全部 green → `verified`；
-任一 red → `red`；有未涵蓋（且 `--run-gates` 沒補上）→ `unverified`，輸出印
-「run `edda run -- <gate>` at <head12> on a clean tree, or pass --run-gates」。
+集合非空時的 READ 規則：對每條 gate，先限定 `git_sha == head_sha` 且
+`argv.join(" ")` 經空白正規化後**與 gate 字串完全相等**，再取最新 eligible receipt。
+舊事件只有 `tree_dirty == false` 且沒有 `tree_dirty_paths` 才 eligible；舊 dirty 仍拒絕。
+新事件的 clean state 必須是 `tree_dirty == false` 加兩個空陣列。新 dirty state 只有在 tracked
+陣列為空，且每個 untracked path 都不與明示傳入的 `subject.files` 相交、又命中封閉的量測
+inert positive allowlist 時才 eligible：`docs/archive/**`、`.tmp-fleet/**`、`codereviews/**`、
+root `edda_tmp_*.txt`。這種 row 顯示為 `kind = cmd-event-scoped`，不是把 dirty 改稱 clean。
+任何 tracked path 即使在 subject 外也拒絕；null、malformed、排序/去重不一致、
+`tree_dirty` 與集合不一致、empty/absolute/parent-traversal/control-character 路徑，以及
+`.cargo`、toolchain、manifest、`build.rs`、`crates`、`scripts`、test/spec fixture、workflow
+等 source/control 或未知 untracked path 都拒絕。只由上述四個 pattern 正面接受，不從 PR
+paths 推論其他位置安全。exit 0 → `green`；非 0 → `red`；沒有 eligible event → 未涵蓋。
 `--pr` 時另讀 exact-head CI，**釘在 `head_sha`**：先用
 `gh pr checks <n> --required --json name` 取 required 名單；名單非空才以
 `gh api repos/{o}/{r}/commits/<head_sha>/check-runs` 取該 SHA 的 check-runs
@@ -486,7 +499,7 @@ coarse lattice。規則依序為：
 |---|---|
 | 空 gate set → `undeclared` | 沒宣告 gate 就沒有東西可證；CI 再綠、RAN 再乾淨都不能變成 verified |
 | 任一 red → `red` | 任一 local receipt、required-CI row、mapped row，或非 timeout 的 RAN 失敗都 globally dominate |
-| 每個 declared gate 都有 eligible green → `verified` | 同 command 的 green `cmd-event`、green `ci-job-map`，或 exit 0 + stored stdout + non-timeout RAN 可覆蓋該 gate；不同來源可各自覆蓋一部分 gate |
+| 每個 declared gate 都有 eligible green → `verified` | 同 command 的 green `cmd-event` / `cmd-event-scoped`、green `ci-job-map`，或 exit 0 + stored stdout + non-timeout RAN 可覆蓋該 gate；不同來源可各自覆蓋一部分 gate |
 | 其餘 → `unverified` | missing/pending/skipped、無 mapping、timeout、未執行或 RAN blob 未儲存都不提供 coverage |
 
 required-CI row 是 set-level 可見證據：red 仍 globally dominate，但 green **永遠不覆蓋任何
@@ -561,7 +574,7 @@ PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda
 |---|---|---|---|---|
 | `edda review` 動詞 | CLI；stdout 人讀 ＋ `--json` | 人、CI（`if edda review`）、fleet-review skill（切片 2 前用 `--json` 貼回） | exit 0/1/2/3；`unreviewed` 帶 `outcome`；不合格 LGTM 回 3，絕不假 approve | CLI → conductor launcher → ledger |
 | `review_verdict` 事件 | `edda review` 唯一寫端；`refs.events` 放 supersedes；寫進作者 repo 的帳本 | `edda log --type review_verdict`、#580、#582、#632 | `model_observed` 缺 → 不合格；寫入失敗 → exit 2 且 stderr | ledger（unstable） |
-| `cmd` 事件 `git_sha` / `tree_dirty` | `edda run` | §8 的 READ；#647 將新增的 verify 動詞（今日不存在）之後可用它檢視 receipt | 非 git repo → null；不影響既有讀者（additive） | CLI → ledger |
+| `cmd` 事件 `git_sha` / `tree_dirty` / `tree_dirty_paths` | `edda run` | §8 的 READ；#647 將新增的 verify 動詞（今日不存在）之後可用它檢視 receipt | status/HEAD/path unknown → null；tracked/control/source/unknown dirt never evidences；舊 clean receipt 仍相容（additive） | CLI → ledger |
 | `REVIEW.md` front matter reader | `edda review` 讀 `base_sha` 版 | brief 組裝、閘門集合、探測前綴 | 缺／版本不認得／壞 YAML → 機器欄位空 ＋ `notes` 一行，不擋 | CLI |
 | `canonical_model_id()` | edda-core 純函式 ＋ 對照表 | §6.3 獨立性比對、#580 | 不認得 → `unverified`（永不 `verified`）；每對來源有測試 | library |
 | `probes[]` 與 `.edda-review-subject` | edda 執行探測、寫標記檔 | 證據段 ⑥、引擎 checklist、`subject_seen` 檢查 | 探測非 0 是 finding 素材；標記不符 → `subject-mismatch` | CLI → worktree → ledger |

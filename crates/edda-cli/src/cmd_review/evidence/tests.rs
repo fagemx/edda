@@ -1,5 +1,8 @@
 use super::*;
-use edda_core::event::{new_cmd_event_with_git_context, CmdEventParams};
+use edda_core::event::{
+    finalize_event, new_cmd_event_with_git_context, new_cmd_event_with_git_context_and_dirty_paths,
+    CmdEventParams,
+};
 use std::collections::BTreeMap;
 
 fn ci(required: &[&str], runs: &[(&str, &str)]) -> GitHubChecks {
@@ -32,18 +35,252 @@ fn receipt(ledger: &Ledger, command: &[&str], sha: &str, dirty: bool, exit: i32)
     ledger.append_event(&event).unwrap();
 }
 
+fn path_receipt(
+    ledger: &Ledger,
+    command: &[&str],
+    sha: &str,
+    dirty: Option<bool>,
+    tracked: &[&str],
+    untracked: &[&str],
+    exit: i32,
+) {
+    let args = command.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let tracked = tracked.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let untracked = untracked
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect::<Vec<_>>();
+    let event = new_cmd_event_with_git_context_and_dirty_paths(
+        &CmdEventParams {
+            branch: "main",
+            parent_hash: ledger.last_event_hash().unwrap().as_deref(),
+            argv: &args,
+            cwd: "/repo",
+            exit_code: exit,
+            duration_ms: 1,
+            stdout_blob: "",
+            stderr_blob: "",
+        },
+        Some(sha),
+        dirty,
+        Some((&tracked, &untracked)),
+    )
+    .unwrap();
+    ledger.append_event(&event).unwrap();
+}
+
+fn malformed_path_receipt(ledger: &Ledger, dirty: Option<bool>, paths: serde_json::Value) {
+    let args = vec!["gate".to_owned()];
+    let mut event = new_cmd_event_with_git_context(
+        &CmdEventParams {
+            branch: "main",
+            parent_hash: ledger.last_event_hash().unwrap().as_deref(),
+            argv: &args,
+            cwd: "/repo",
+            exit_code: 0,
+            duration_ms: 1,
+            stdout_blob: "",
+            stderr_blob: "",
+        },
+        Some("head"),
+        dirty,
+    )
+    .unwrap();
+    event.payload["tree_dirty_paths"] = paths;
+    finalize_event(&mut event).unwrap();
+    ledger.append_event(&event).unwrap();
+}
+
 #[test]
-fn receipt_matching_requires_exact_clean_head_and_latest_event() {
+fn legacy_receipts_require_exact_clean_head_and_use_latest_eligible_event() {
     let dir = tempfile::tempdir().unwrap();
     let ledger = Ledger::open_or_init(dir.path()).unwrap();
     let gates = gate_set(&FrontMatter::default(), &["cargo  test -p x".into()], &[]);
     receipt(&ledger, &["cargo", "test", "-p", "x"], "other", false, 0);
     receipt(&ledger, &["cargo", "test", "-p", "x"], "head", true, 0);
-    assert_eq!(read_gates(&ledger, "head", &gates).unwrap().0, "unverified");
+    assert_eq!(
+        read_gates(&ledger, "head", &gates, &[]).unwrap().0,
+        "unverified"
+    );
     receipt(&ledger, &["cargo", "test", "-p", "x"], "head", false, 0);
-    assert_eq!(read_gates(&ledger, "head", &gates).unwrap().0, "verified");
+    receipt(&ledger, &["cargo", "test", "-p", "x"], "head", true, 1);
+    assert_eq!(
+        read_gates(&ledger, "head", &gates, &[]).unwrap().0,
+        "verified"
+    );
     receipt(&ledger, &["cargo", "test", "-p", "x"], "head", false, 1);
-    assert_eq!(read_gates(&ledger, "head", &gates).unwrap().0, "red");
+    assert_eq!(read_gates(&ledger, "head", &gates, &[]).unwrap().0, "red");
+}
+
+#[test]
+fn scoped_untracked_receipt_is_visible_and_subject_sensitive() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open_or_init(dir.path()).unwrap();
+    let gates = gate_set(&FrontMatter::default(), &["gate".into()], &[]);
+    path_receipt(
+        &ledger,
+        &["gate"],
+        "head",
+        Some(true),
+        &[],
+        &[".tmp-fleet/probe.txt"],
+        0,
+    );
+    let (_, rows, _) = read_gates(&ledger, "head", &gates, &["crates/x.rs".into()]).unwrap();
+    assert_eq!(rows[0].kind, "cmd-event-scoped");
+    assert_eq!(rows[0].result, "green");
+    assert_eq!(
+        read_gates(&ledger, "head", &gates, &[".tmp-fleet/probe.txt".into()])
+            .unwrap()
+            .0,
+        "unverified"
+    );
+}
+
+#[test]
+fn only_measured_inert_untracked_patterns_are_eligible() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open_or_init(dir.path()).unwrap();
+    let gates = gate_set(&FrontMatter::default(), &["gate".into()], &[]);
+    path_receipt(
+        &ledger,
+        &["gate"],
+        "head",
+        Some(true),
+        &[],
+        &[
+            ".tmp-fleet/a",
+            "codereviews/a.txt",
+            "docs/archive/a.md",
+            "edda_tmp_a.txt",
+        ],
+        0,
+    );
+    assert_eq!(
+        read_gates(&ledger, "head", &gates, &["src/lib.rs".into()])
+            .unwrap()
+            .0,
+        "verified"
+    );
+}
+
+#[test]
+fn tracked_and_control_source_or_unknown_untracked_paths_are_rejected() {
+    let gates = gate_set(&FrontMatter::default(), &["gate".into()], &[]);
+    for (label, tracked, untracked) in [
+        ("tracked", vec!["README.md"], vec![]),
+        ("control", vec![], vec![".cargo/config.toml"]),
+        ("source", vec![], vec!["crates/edda/src/main.rs"]),
+        ("unknown", vec![], vec!["notes/probe.txt"]),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open_or_init(dir.path()).unwrap();
+        path_receipt(
+            &ledger,
+            &["gate"],
+            "head",
+            Some(true),
+            &tracked,
+            &untracked,
+            0,
+        );
+        assert_eq!(
+            read_gates(&ledger, "head", &gates, &["subject.rs".into()])
+                .unwrap()
+                .0,
+            "unverified",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn malformed_and_inconsistent_path_payloads_are_rejected() {
+    let gates = gate_set(&FrontMatter::default(), &["gate".into()], &[]);
+    let cases = [
+        (Some(true), serde_json::Value::Null),
+        (Some(false), serde_json::Value::Null),
+        (
+            Some(true),
+            serde_json::json!({"tracked": [], "untracked": []}),
+        ),
+        (
+            Some(false),
+            serde_json::json!({"tracked": [], "untracked": [".tmp-fleet/x"]}),
+        ),
+        (None, serde_json::json!({"tracked": [], "untracked": []})),
+        (Some(true), serde_json::json!({"tracked": []})),
+        (
+            Some(true),
+            serde_json::json!({"tracked": [], "untracked": ".tmp-fleet/x"}),
+        ),
+        (
+            Some(true),
+            serde_json::json!({"tracked": [], "untracked": [".tmp-fleet/x"], "extra": []}),
+        ),
+        (
+            Some(true),
+            serde_json::json!({"tracked": [], "untracked": [".tmp-fleet/z", ".tmp-fleet/a"]}),
+        ),
+        (
+            Some(true),
+            serde_json::json!({"tracked": [], "untracked": [".tmp-fleet/a", ".tmp-fleet/a"]}),
+        ),
+    ];
+    for (dirty, paths) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open_or_init(dir.path()).unwrap();
+        malformed_path_receipt(&ledger, dirty, paths);
+        assert_eq!(
+            read_gates(&ledger, "head", &gates, &[]).unwrap().0,
+            "unverified"
+        );
+    }
+}
+
+#[test]
+fn unsafe_path_shapes_never_become_scoped_evidence() {
+    let gates = gate_set(&FrontMatter::default(), &["gate".into()], &[]);
+    for path in [
+        "",
+        "/docs/archive/x",
+        "docs/archive/../x",
+        "docs/archive/control\n.txt",
+        "docs\\archive\\x",
+        "C:/docs/archive/x",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open_or_init(dir.path()).unwrap();
+        path_receipt(&ledger, &["gate"], "head", Some(true), &[], &[path], 0);
+        assert_eq!(
+            read_gates(&ledger, "head", &gates, &[]).unwrap().0,
+            "unverified",
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn known_clean_path_receipt_is_normal_and_scoped_failure_is_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open_or_init(dir.path()).unwrap();
+    let gates = gate_set(&FrontMatter::default(), &["gate".into()], &[]);
+    path_receipt(&ledger, &["gate"], "head", Some(false), &[], &[], 0);
+    let (_, rows, _) = read_gates(&ledger, "head", &gates, &[]).unwrap();
+    assert_eq!(rows[0].kind, "cmd-event");
+    path_receipt(
+        &ledger,
+        &["gate"],
+        "head",
+        Some(true),
+        &[],
+        &["codereviews/failure.txt"],
+        7,
+    );
+    let (status, rows, _) = read_gates(&ledger, "head", &gates, &[]).unwrap();
+    assert_eq!(status, "red");
+    assert_eq!(rows[0].kind, "cmd-event-scoped");
+    assert_eq!(rows[0].result, "red");
 }
 
 #[test]
@@ -55,7 +292,7 @@ fn unreadable_ledger_is_an_error_not_uncovered_evidence() {
         .execute("ALTER TABLE events RENAME TO unavailable_events", [])
         .unwrap();
     let gates = gate_set(&FrontMatter::default(), &["echo hi".into()], &[]);
-    assert!(read_gates(&ledger, "head", &gates).is_err());
+    assert!(read_gates(&ledger, "head", &gates, &[]).is_err());
 }
 
 #[test]
@@ -81,7 +318,8 @@ fn gate_commands_preserve_semantic_whitespace() {
         read_gates(
             &ledger,
             "head",
-            &gate_set(&FrontMatter::default(), &[], &[])
+            &gate_set(&FrontMatter::default(), &[], &[]),
+            &[],
         )
         .unwrap()
         .0,
@@ -238,12 +476,21 @@ fn receipt_required_and_mapped_red_each_globally_dominate() {
 }
 
 #[test]
-fn partial_receipt_and_partial_mapped_green_collectively_verify() {
+fn scoped_receipt_and_partial_mapped_green_collectively_verify() {
     let gates = gate_set(&FrontMatter::default(), &["fmt".into(), "test".into()], &[]);
     let dir = tempfile::tempdir().unwrap();
     let ledger = Ledger::open_or_init(dir.path()).unwrap();
-    receipt(&ledger, &["fmt"], "head", false, 0);
-    let (_, mut read, _) = read_gates(&ledger, "head", &gates).unwrap();
+    path_receipt(
+        &ledger,
+        &["fmt"],
+        "head",
+        Some(true),
+        &[],
+        &["docs/archive/receipt.txt"],
+        0,
+    );
+    let (_, mut read, _) = read_gates(&ledger, "head", &gates, &["crates/x.rs".into()]).unwrap();
+    assert_eq!(read[0].kind, "cmd-event-scoped");
 
     let checks = ci(&["CI Gate"], &[("CI Gate", "pass"), ("Test", "pass")]);
     read.extend(read_ci(&checks).1);
@@ -282,7 +529,7 @@ fn mapped_gate_is_not_also_uncovered_but_unmapped_gate_stays_visible() {
     );
     let dir = tempfile::tempdir().unwrap();
     let ledger = Ledger::open_or_init(dir.path()).unwrap();
-    let (_, mut read, mut uncovered) = read_gates(&ledger, "head", &gates).unwrap();
+    let (_, mut read, mut uncovered) = read_gates(&ledger, "head", &gates, &[]).unwrap();
     let mappings = BTreeMap::from([(mapped_gate.into(), vec!["Format".into()])]);
     let checks = ci(&["CI Gate"], &[("Format", "pass")]);
     let (_, mapped_rows, mapped) = read_ci_job_map(&checks, &gates, &mappings);

@@ -1,5 +1,6 @@
 use crate::event::{
-    new_cmd_event, new_cmd_event_with_git_context, new_review_verdict_event, CmdEventParams,
+    compute_event_hash, new_cmd_event, new_cmd_event_with_git_context,
+    new_cmd_event_with_git_context_and_dirty_paths, new_review_verdict_event, CmdEventParams,
 };
 use crate::ReviewVerdictPayload;
 
@@ -47,7 +48,7 @@ fn review_verdict_event_roundtrip_taxonomy_and_refs() {
 }
 
 #[test]
-fn cmd_receipt_writes_context_and_preserves_unknown_as_null() {
+fn cmd_receipt_constructors_preserve_legacy_payload_and_finalize_paths() {
     let argv = vec!["cargo".into(), "test".into()];
     let params = CmdEventParams {
         branch: "main",
@@ -62,12 +63,46 @@ fn cmd_receipt_writes_context_and_preserves_unknown_as_null() {
     let old = new_cmd_event(&params).expect("legacy constructor");
     assert!(old.payload.get("git_sha").expect("sha key").is_null());
     assert!(old.payload.get("tree_dirty").expect("dirty key").is_null());
-    for dirty in [false, true] {
-        let receipt = new_cmd_event_with_git_context(&params, Some(&"a".repeat(40)), Some(dirty))
-            .expect("receipt");
-        assert_eq!(receipt.payload["git_sha"], "a".repeat(40));
-        assert_eq!(receipt.payload["tree_dirty"], dirty);
-        assert_eq!(receipt.refs.blobs, ["out", "err"]);
-        assert_eq!(receipt.event_family.as_deref(), Some("signal"));
-    }
+    assert!(old.payload.get("tree_dirty_paths").is_none());
+
+    let legacy_context = new_cmd_event_with_git_context(&params, Some(&"a".repeat(40)), Some(true))
+        .expect("legacy context constructor");
+    assert!(legacy_context.payload.get("tree_dirty_paths").is_none());
+
+    let tracked = vec!["crates/a.rs".into()];
+    let untracked = vec!["docs/archive/probe.txt".into()];
+    let receipt = new_cmd_event_with_git_context_and_dirty_paths(
+        &params,
+        Some(&"a".repeat(40)),
+        Some(true),
+        Some((&tracked, &untracked)),
+    )
+    .expect("path-aware receipt");
+    assert_eq!(receipt.payload["git_sha"], "a".repeat(40));
+    assert_eq!(receipt.payload["tree_dirty"], true);
+    assert_eq!(
+        receipt.payload["tree_dirty_paths"]["tracked"][0],
+        tracked[0]
+    );
+    assert_eq!(
+        receipt.payload["tree_dirty_paths"]["untracked"][0],
+        untracked[0]
+    );
+    assert_eq!(receipt.refs.blobs, ["out", "err"]);
+    assert_eq!(receipt.event_family.as_deref(), Some("signal"));
+
+    let mut value = serde_json::to_value(&receipt).expect("serialize event");
+    let object = value.as_object_mut().expect("event object");
+    object.remove("hash");
+    object.remove("digests");
+    object.remove("schema_version");
+    assert_eq!(
+        compute_event_hash(&value).expect("recompute hash"),
+        receipt.hash
+    );
+
+    let unknown =
+        new_cmd_event_with_git_context_and_dirty_paths(&params, Some(&"a".repeat(40)), None, None)
+            .expect("unknown path receipt");
+    assert!(unknown.payload["tree_dirty_paths"].is_null());
 }

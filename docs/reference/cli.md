@@ -366,6 +366,12 @@ edda run -- cargo test
 edda run -- npm run build
 ```
 
+In a Git checkout the receipt records the before-command HEAD plus a strict
+before/after union of tracked and untracked root-relative paths. A moved HEAD
+or an unreadable/malformed status records unknown path state; it is never
+silently treated as clean. `edda review` applies its narrower scoped-evidence
+allowlist described below.
+
 ---
 
 ## Coordination (multi-agent)
@@ -1235,7 +1241,17 @@ author and reviewer on the same model are recorded in the receipt as
 round. With the flag the policy is `model` and any independence other than
 `verified` disqualifies it.
 
-Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
+Gates are READ from exact-SHA relevant/scoped command receipts and required
+exact-SHA CI. Legacy clean receipts (`tree_dirty=false` with no path field)
+remain compatible. A dirty receipt is visible as `cmd-event-scoped` and can
+cover its exact command only when it reports no tracked path and every
+untracked root-relative Git `/` path is outside the reviewed subject and in the
+explicit measured inert corpus: `docs/archive/**`, `.tmp-fleet/**`,
+`codereviews/**`, or root `edda_tmp_*.txt`. Tracked dirt always rejects, even
+outside the subject. Legacy dirty, unknown/null, malformed or inconsistent path
+state, and empty, absolute, parent-traversing, control-character,
+source/control, or any other untracked path never become evidence.
+
 `REVIEW.md` may map a declared gate command under `ci_gates` to a list of exact
 check-run names. One `ci-job-map` row then reports that gate: every named job at
 the reviewed SHA must succeed for green; any failure is red; missing, pending,

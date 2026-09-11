@@ -49,7 +49,12 @@ pub(crate) fn gate_set(fm: &FrontMatter, cli: &[String], verify: &[String]) -> G
 
 pub(crate) type GateRead = (String, Vec<ReviewGateRead>, Vec<String>);
 
-pub(crate) fn read_gates(ledger: &Ledger, head: &str, gates: &GateSet) -> anyhow::Result<GateRead> {
+pub(crate) fn read_gates(
+    ledger: &Ledger,
+    head: &str,
+    gates: &GateSet,
+    subject_files: &[String],
+) -> anyhow::Result<GateRead> {
     if gates.cmds.is_empty() {
         return Ok(("undeclared".into(), vec![], vec![]));
     }
@@ -57,18 +62,21 @@ pub(crate) fn read_gates(ledger: &Ledger, head: &str, gates: &GateSet) -> anyhow
     let mut read = Vec::new();
     let mut uncovered = Vec::new();
     for gate in &gates.cmds {
-        let best = events.iter().rev().find(|event| {
+        let best = events.iter().rev().find_map(|event| {
             let payload = &event.payload;
-            payload["git_sha"].as_str() == Some(head)
-                && payload["tree_dirty"].as_bool() == Some(false)
-                && payload["argv"]
-                    .as_array()
-                    .and_then(|args| args.iter().map(|a| a.as_str()).collect::<Option<Vec<_>>>())
-                    .is_some_and(|args| normalize_cmd(&args.join(" ")) == normalize_cmd(gate))
+            let command_matches = payload["argv"]
+                .as_array()
+                .and_then(|args| args.iter().map(|a| a.as_str()).collect::<Option<Vec<_>>>())
+                .is_some_and(|args| normalize_cmd(&args.join(" ")) == normalize_cmd(gate));
+            if payload["git_sha"].as_str() == Some(head) && command_matches {
+                eligible_receipt_kind(payload, subject_files).map(|kind| (event, kind))
+            } else {
+                None
+            }
         });
-        if let Some(event) = best {
+        if let Some((event, kind)) = best {
             read.push(ReviewGateRead {
-                kind: "cmd-event".into(),
+                kind: kind.into(),
                 r#ref: event.event_id.clone(),
                 cmd: gate.clone(),
                 result: if event.payload["exit_code"].as_i64() == Some(0) {
@@ -90,6 +98,87 @@ pub(crate) fn read_gates(ledger: &Ledger, head: &str, gates: &GateSet) -> anyhow
         "unverified"
     };
     Ok((status.into(), read, uncovered))
+}
+
+fn eligible_receipt_kind(
+    payload: &serde_json::Value,
+    subject_files: &[String],
+) -> Option<&'static str> {
+    let dirty = payload.get("tree_dirty")?.as_bool()?;
+    let Some(paths_value) = payload.get("tree_dirty_paths") else {
+        return (!dirty).then_some("cmd-event");
+    };
+    let object = paths_value.as_object()?;
+    if object.len() != 2 {
+        return None;
+    }
+    let tracked = strict_path_array(object.get("tracked")?)?;
+    let untracked = strict_path_array(object.get("untracked")?)?;
+    let has_paths = !tracked.is_empty() || !untracked.is_empty();
+    if dirty != has_paths || !tracked.is_empty() {
+        return None;
+    }
+    if !dirty {
+        return Some("cmd-event");
+    }
+    let subjects = subject_files
+        .iter()
+        .map(|path| path.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    untracked
+        .iter()
+        .all(|path| {
+            inert_untracked_path(path)
+                && !subjects
+                    .iter()
+                    .any(|subject| git_paths_intersect(path, subject))
+        })
+        .then_some("cmd-event-scoped")
+}
+
+fn strict_path_array(value: &serde_json::Value) -> Option<Vec<&str>> {
+    let paths = value
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<_>>>()?;
+    if paths.iter().any(|path| !valid_git_path(path))
+        || paths.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+    Some(paths)
+}
+
+fn valid_git_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && !matches!(path.as_bytes().get(1), Some(b':'))
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+fn inert_untracked_path(path: &str) -> bool {
+    ["docs/archive/", ".tmp-fleet/", "codereviews/"]
+        .iter()
+        .any(|prefix| {
+            path.strip_prefix(prefix)
+                .is_some_and(|tail| !tail.is_empty())
+        })
+        || (!path.contains('/') && path.starts_with("edda_tmp_") && path.ends_with(".txt"))
+}
+
+fn git_paths_intersect(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 pub(crate) fn read_ci(checks: &GitHubChecks) -> (Option<String>, Vec<ReviewGateRead>) {
@@ -228,7 +317,10 @@ pub(crate) fn gate_status(
         read.iter().any(|row| {
             row.cmd == *gate
                 && row.result == "green"
-                && matches!(row.kind.as_str(), "cmd-event" | "ci-job-map")
+                && matches!(
+                    row.kind.as_str(),
+                    "cmd-event" | "cmd-event-scoped" | "ci-job-map"
+                )
         }) || ran.iter().any(|row| {
             row.cmd == *gate && row.exit == 0 && !row.timed_out && row.stdout_blob.is_some()
         })
@@ -306,7 +398,8 @@ pub(crate) fn evidence_text(
     probes: &[ReviewProbe],
     wiring_scan: Option<&str>,
 ) -> String {
-    let mut text = String::from("### Gates READ (exact head, clean tree receipts / required CI)\n");
+    let mut text =
+        String::from("### Gates READ (exact-head relevant/scoped receipts and required CI)\n");
     for r in read {
         text.push_str(&format!(
             "- {:?}: {} ({} {:?})\n",
