@@ -21,9 +21,17 @@ pub fn select_pipeline(intent: &str, labels: &[String]) -> PipelineType {
     }
 }
 
+/// Render the issue-derived lookup shared by the implementation gate and review prompt.
+fn linked_open_pr_lookup(issue_id: u64) -> String {
+    format!(
+        r#"gh pr list --state open --limit 1000 --json url,closingIssuesReferences --jq '[.[] | select(any(.closingIssuesReferences[]?; .number == {issue_id}))] as $matches | if ($matches | length) != 1 then error("expected exactly one open PR linked to issue #{issue_id}") elif (($matches[0].url | type) != "string" or (($matches[0].url | test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$")) | not)) then error("linked PR has malformed GitHub URL") else $matches[0].url end'"#
+    )
+}
+
 /// Render a Standard pipeline plan as YAML.
 pub fn render_standard_plan(issue_id: u64, title: &str, url: &str) -> String {
     let escaped_title = escape_yaml(title);
+    let linked_pr_lookup = linked_open_pr_lookup(issue_id);
     format!(
         r#"name: pipeline-issue-{issue_id}
 purpose: "Automated pipeline for issue #{issue_id}: {escaped_title}"
@@ -59,17 +67,26 @@ phases:
       Issue: {escaped_title}
       URL: {url}
       Validate with the repository's current focused author/L0 policy.
-      Before this phase completes, create or update the PR through existing
-      authorization and return its exact URL. If that is unavailable, report
-      the blocker; do not claim that a local candidate is a PR. Do not merge.
+      Before this phase completes, create or update exactly one open PR through
+      existing authorization and link its closingIssuesReferences to issue
+      #{issue_id}. If that is unavailable, report the blocker; do not claim that
+      a local candidate is a PR. Do not merge.
     depends_on: [plan-approval]
+    check:
+      - type: cmd_succeeds
+        cmd: >-
+          {linked_pr_lookup}
     on_fail: ask
 
   - id: pr-review
     prompt: |
-      Run /pr-review to review the exact PR URL returned by the implementation phase.
-      Verify code quality, test coverage, and adherence to the plan.
-      This review phase does not merge.
+      Independently resolve the open PR linked to issue #{issue_id} by running:
+        {linked_pr_lookup}
+      Use its sole stdout URL for /pr-review, then verify code quality, test
+      coverage, and adherence to the plan. Refuse a gh error, zero linked open
+      PRs, multiple linked open PRs, or a malformed GitHub PR URL. Report the
+      blocker; do not run /pr-review. No implementation output is transferred to
+      this phase, and it does not merge.
     depends_on: [implement]
     on_fail: ask
 
@@ -99,6 +116,7 @@ phases:
 /// Render a QuickFix pipeline plan as YAML (skips plan phase).
 pub fn render_quickfix_plan(issue_id: u64, title: &str, url: &str) -> String {
     let escaped_title = escape_yaml(title);
+    let linked_pr_lookup = linked_open_pr_lookup(issue_id);
     format!(
         r#"name: pipeline-issue-{issue_id}
 purpose: "Quick fix pipeline for issue #{issue_id}: {escaped_title}"
@@ -110,15 +128,25 @@ phases:
       Issue: {escaped_title}
       URL: {url}
       Validate with the repository's current focused author/L0 policy.
-      Before this phase completes, create or update the PR through existing
-      authorization and return its exact URL. If that is unavailable, report
-      the blocker; do not claim that a local candidate is a PR. Do not merge.
+      Before this phase completes, create or update exactly one open PR through
+      existing authorization and link its closingIssuesReferences to issue
+      #{issue_id}. If that is unavailable, report the blocker; do not claim that
+      a local candidate is a PR. Do not merge.
+    check:
+      - type: cmd_succeeds
+        cmd: >-
+          {linked_pr_lookup}
     on_fail: ask
 
   - id: pr-review
     prompt: |
-      Run /pr-review to review the exact PR URL returned by the implementation phase.
-      Verify the fix is correct and tests pass. This review phase does not merge.
+      Independently resolve the open PR linked to issue #{issue_id} by running:
+        {linked_pr_lookup}
+      Use its sole stdout URL for /pr-review, then verify the fix is correct and
+      tests pass. Refuse a gh error, zero linked open PRs, multiple linked open
+      PRs, or a malformed GitHub PR URL. Report the blocker; do not run
+      /pr-review. No implementation output is transferred to this phase, and it
+      does not merge.
     depends_on: [implement]
     on_fail: ask
 
@@ -209,24 +237,48 @@ mod tests {
     }
 
     #[test]
-    fn implementation_hands_an_exact_pr_url_to_review_without_duplicate_gate() {
-        for yaml in [
-            render_standard_plan(7, "standard", "https://example.com/7"),
-            render_quickfix_plan(8, "quick", "https://example.com/8"),
+    fn implementation_and_review_independently_require_one_linked_open_pr() {
+        for (issue_id, yaml) in [
+            (
+                7,
+                render_standard_plan(7, "standard", "https://example.com/7"),
+            ),
+            (8, render_quickfix_plan(8, "quick", "https://example.com/8")),
         ] {
             let plan: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
             let implement = phase(&plan, "implement");
             let implement_prompt = implement["prompt"].as_str().unwrap();
-            assert!(implement_prompt.contains("create or update the PR"));
-            assert!(implement_prompt.contains("return its exact URL"));
+            assert!(implement_prompt.contains("create or update exactly one open PR"));
+            assert!(implement_prompt.contains("closingIssuesReferences"));
             assert!(implement_prompt.contains("focused author/L0 policy"));
             assert!(implement_prompt.contains("Do not merge"));
-            assert!(implement.get("check").is_none());
+
+            let checks = implement["check"].as_sequence().unwrap();
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0]["type"].as_str(), Some("cmd_succeeds"));
+            let check_cmd = checks[0]["cmd"].as_str().unwrap();
+            assert_eq!(check_cmd, linked_open_pr_lookup(issue_id));
+            assert!(check_cmd.starts_with("gh pr list --state open"));
+            assert!(check_cmd.contains("closingIssuesReferences"));
+            assert!(check_cmd.contains(&format!(".number == {issue_id}")));
+            assert!(check_cmd.contains("if ($matches | length) != 1 then error"));
+            assert!(check_cmd.contains("linked PR has malformed GitHub URL"));
+            assert!(check_cmd.contains("^https://github[.]com/"));
+            assert!(!check_cmd.contains(" || "));
+            assert_eq!(check_cmd.matches("gh pr list").count(), 1);
             assert!(!yaml.contains("cargo test --workspace"));
 
             let review_prompt = phase(&plan, "pr-review")["prompt"].as_str().unwrap();
-            assert!(review_prompt.contains("exact PR URL returned"));
-            assert!(review_prompt.contains("does not merge"));
+            assert!(review_prompt.contains("Independently resolve"));
+            assert!(review_prompt.contains(check_cmd));
+            assert!(review_prompt.contains("Refuse a gh error"));
+            assert!(review_prompt.contains("zero linked open"));
+            assert!(review_prompt.contains("multiple linked open"));
+            assert!(review_prompt.contains("malformed GitHub PR URL"));
+            assert!(review_prompt.contains("blocker"));
+            assert!(review_prompt.contains("do not run"));
+            assert!(review_prompt.contains("No implementation output is transferred"));
+            assert!(!review_prompt.contains("returned by the implementation phase"));
 
             let approval_prompt = phase(&plan, "pr-approval")["prompt"].as_str().unwrap();
             assert!(approval_prompt.contains("never gain merge authority"));

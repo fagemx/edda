@@ -87,11 +87,12 @@ reconciler.
 
 A task bound to an accepted `ExecutionBriefV1` is instead **controlled**. At the
 current accepted product boundary, controlled reconcile validates and binds an
-attempt but returns a descriptor only: it does not launch or enter the legacy
-Codex runner. Direct controlled execution remains unavailable until an
-authorized S6 capability exists. Treat `CONTROL_UNAVAILABLE` as the truthful
-current result; a descriptor, caller-authored event or ordinary task command is
-not launch authority and must not be described as a promised launch.
+attempt but returns a descriptor with `execution: "none"`: it does not launch or
+enter the legacy Codex runner. Direct controlled execution remains unavailable
+until an authorized S6 capability exists. A literal `CONTROL_UNAVAILABLE`
+result is only a future planned S6 contract, not current product evidence. A
+descriptor, caller-authored event or ordinary task command is not launch
+authority and must not be described as a promised launch.
 
 Changing modes requires operator authorization, exact scheduler lifecycle when
 installed, process/lease/attempt reconciliation, and no unresolved task side

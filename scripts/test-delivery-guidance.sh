@@ -68,9 +68,10 @@ audit_coord() {
     require_text "$active" '| ACP target | separately created task with matching `--agent acp:<target>`; `--task-id`'
     require_text "$active" 'It does not prove the brief was readable.'
     require_text "$active" 'controlled reconcile validates and binds an'
-    require_text "$active" 'returns a descriptor only'
+    require_text "$active" 'descriptor with `execution: "none"`'
     require_text "$active" 'Direct controlled execution remains unavailable'
-    require_text "$active" '`CONTROL_UNAVAILABLE`'
+    require_text "$active" 'literal `CONTROL_UNAVAILABLE`'
+    require_text "$active" 'future planned S6 contract, not current product evidence'
     require_text "$active" 'validated `WorkReceiptV1`'
     require_text "$active" 'ordinary `task done --evidence` is refused'
     require_text "$active" 'never use the legacy post-Done metadata correction path'
@@ -83,6 +84,7 @@ audit_coord() {
     require_text "$active" 'future or non-coordination additions'
 
     reject_text "$active" 'delivery.rail-owner.$PLAN_KEY'
+    reject_text "$active" 'Treat `CONTROL_UNAVAILABLE` as the truthful current result'
     reject_regex "$active" 'retry[^.]*create(s|d)? (a )?new id'
     reject_regex "$active" 'preflight[^.]*prove(s|d)? (the )?(full )?brief'
     reject_regex "$active" 'caller discipline[^.]*runtime enforce'
@@ -113,7 +115,12 @@ audit_routes() {
     require_text "$action" 'If acceptance is materially unclear'
     require_text "$action" 'record its behavior and counterexample lenses together'
     require_text "$action" 'active `edda pipeline` caller is narrower'
-    require_text "$action" 'return the exact PR'
+    require_text "$action" 'create or update exactly one open PR'
+    require_text "$action" '`closingIssuesReferences` links this numeric issue'
+    require_text "$action" 'check independently resolves'
+    require_text "$action" 'review phase repeats the same issue-derived lookup'
+    require_text "$action" 'implementation output'
+    require_text "$action" 'malformed URL refuses review'
     require_text "$action" 'focused author/L0 policy'
     require_text "$action" 'grants no merge authority'
     reject_regex "$action" 'edda pipeline[^.\n]*local candidate[^.\n]*(sufficient|complete|instead)'
@@ -133,20 +140,35 @@ audit_direct_consumers() {
     require_text "$runbook" 'embedded project skill'
     require_text "$runbook" '未來或非 coordination 新增項'
     require_text "$runbook" '`ExecutionBriefV1`'
-    require_text "$runbook" 'descriptor'
-    require_text "$runbook" '`CONTROL_UNAVAILABLE`'
+    require_text "$runbook" '`execution: "none"`'
+    require_text "$runbook" 'direct controlled execution unavailable'
+    require_text "$runbook" 'Literal `CONTROL_UNAVAILABLE` 僅是'
+    require_text "$runbook" 'future planned S6 contract，不是 current evidence'
+    reject_text "$runbook" 'truthfully `CONTROL_UNAVAILABLE`'
     require_text "$runbook" '`WorkReceiptV1`'
     require_text "$runbook" 'legacy post-Done correction'
     require_text "$runbook" '| `edda pipeline` |'
-    require_text "$runbook" 'implementation 回傳 PR URL 後才進 review'
+    require_text "$runbook" '`cmd_succeeds` machine check'
+    require_text "$runbook" 'review phase 不接前一 phase output'
+    require_text "$runbook" '`gh` error／零筆／多筆／malformed URL 都拒絕'
     require_text "$runbook" 'pipeline／worker／reviewer 都不合併'
 
     template_product="$tmp/template-product.rs"
     awk '/^#\[cfg\(test\)\]/{exit} {print}' "$templates" >"$template_product"
-    require_text "$template_product" 'create or update the PR through existing'
-    require_text "$template_product" 'return its exact URL'
+    require_text "$template_product" 'fn linked_open_pr_lookup(issue_id: u64) -> String'
+    require_text "$template_product" 'gh pr list --state open --limit 1000'
+    require_text "$template_product" '--json url,closingIssuesReferences --jq'
+    require_text "$template_product" 'if ($matches | length) != 1 then error'
+    require_text "$template_product" 'linked PR has malformed GitHub URL'
+    require_text "$template_product" '^https://github[.]com/'
+    require_text "$template_product" 'create or update exactly one open PR through'
+    require_text "$template_product" 'Independently resolve the open PR linked to issue'
+    require_text "$template_product" 'Refuse a gh error, zero linked open'
+    require_text "$template_product" 'do not run /pr-review'
+    require_text "$template_product" 'No implementation output is transferred'
     require_text "$template_product" "repository's current focused author/L0 policy"
     require_text "$template_product" 'never gain merge authority and never merge the PR'
+    reject_text "$template_product" 'returned by the implementation phase'
     reject_text "$template_product" 'cargo test --workspace'
     reject_regex "$template_product" 'gh[[:space:]]+pr[[:space:]]+merge'
 
@@ -217,6 +239,10 @@ cp "$canonical" "$tmp/full-workspace.md"
 printf '%s\n' 'cargo test --workspace' >>"$tmp/full-workspace.md"
 expect_coord_failure 'full workspace on freeze' "$tmp/full-workspace.md"
 
+cp "$canonical" "$tmp/current-control-token.md"
+printf '%s\n' 'Treat `CONTROL_UNAVAILABLE` as the truthful current result.' >>"$tmp/current-control-token.md"
+expect_coord_failure 'future control token claimed as current product evidence' "$tmp/current-control-token.md"
+
 original_pipeline=$pipeline
 cp "$original_pipeline" "$tmp/pipeline-no-merge-bad.md"
 printf '%s\n' 'With --no-merge, still merge the PR after review.' >>"$tmp/pipeline-no-merge-bad.md"
@@ -253,6 +279,14 @@ templates="$tmp/templates-bad.rs"
 expect_consumer_failure 'pipeline template duplicate workspace gate despite focused prose'
 templates=$original_templates
 
+original_runbook=$runbook
+cp "$original_runbook" "$tmp/runbook-current-control.md"
+printf '%s\n' 'Direct controlled execution is truthfully `CONTROL_UNAVAILABLE` today.' \
+    >>"$tmp/runbook-current-control.md"
+runbook="$tmp/runbook-current-control.md"
+expect_consumer_failure 'runbook claimed the future control token as current evidence'
+runbook=$original_runbook
+
 # Source anchors keep guidance tied to current direct consumers and substrate.
 require_text "$root/crates/edda-ledger/src/task_actions.rs" 'Ready = normal start; Failed = retry.'
 require_text "$root/crates/edda-ledger/src/task_actions.rs" 'if let Some(existing) = tasks::find_by_idempotency_key'
@@ -287,6 +321,71 @@ if manual_allowed reconcile absent absent settled; then fail 'reconcile rail acc
 if [ -n "${EDDA_BIN:-}" ]; then
     command -v jq >/dev/null 2>&1 || fail 'jq is required for JSON recovery fixtures'
     "$EDDA_BIN" --version >/dev/null 2>&1 || fail "EDDA_BIN is not runnable: $EDDA_BIN"
+
+    linked_pr_gate() {
+        issue=$1
+        filter=$(printf \
+            '[.[] | select(any(.closingIssuesReferences[]?; .number == %s))] as $matches | if ($matches | length) != 1 then error("expected exactly one open PR linked to issue #%s") elif (($matches[0].url | type) != "string" or (($matches[0].url | test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$")) | not)) then error("linked PR has malformed GitHub URL") else $matches[0].url end' \
+            "$issue" "$issue")
+        gh pr list --state open --limit 1000 \
+            --json url,closingIssuesReferences --jq "$filter" >/dev/null
+    }
+
+    expect_linked_pr_gate_failure() {
+        name=$1
+        if linked_pr_gate 77 >/dev/null 2>&1; then
+            fail "linked-PR machine gate accepted invalid case: $name"
+        fi
+    }
+
+    mkdir -p "$tmp/fake-gh-bin"
+    cat >"$tmp/fake-gh-bin/gh" <<'SH'
+#!/bin/sh
+set -eu
+[ "$#" -eq 10 ] || exit 64
+[ "$1" = pr ] && [ "$2" = list ] && [ "$3" = --state ] && [ "$4" = open ] || exit 64
+[ "$5" = --limit ] && [ "$6" = 1000 ] || exit 64
+[ "$7" = --json ] && [ "$8" = url,closingIssuesReferences ] && [ "$9" = --jq ] || exit 64
+[ -n "${10}" ] || exit 64
+[ "${FAKE_GH_ERROR:-0}" = 0 ] || exit 23
+jq -r "${10}" "$FAKE_GH_FIXTURE"
+SH
+    chmod +x "$tmp/fake-gh-bin/gh"
+    original_path=$PATH
+    PATH="$tmp/fake-gh-bin:$PATH"
+    export PATH
+
+    printf '%s\n' '[]' >"$tmp/pr-zero.json"
+    FAKE_GH_FIXTURE="$tmp/pr-zero.json"
+    FAKE_GH_ERROR=0
+    export FAKE_GH_FIXTURE FAKE_GH_ERROR
+    expect_linked_pr_gate_failure zero
+
+    printf '%s\n' '[{"url":"https://github.com/acme/widget/pull/9","closingIssuesReferences":[{"number":77}]}]' \
+        >"$tmp/pr-one.json"
+    FAKE_GH_FIXTURE="$tmp/pr-one.json"
+    export FAKE_GH_FIXTURE
+    linked_pr_gate 77 || fail 'linked-PR machine gate refused exactly one valid match'
+
+    printf '%s\n' '[{"url":"https://github.com/acme/widget/pull/9","closingIssuesReferences":[{"number":77}]},{"url":"https://github.com/acme/widget/pull/10","closingIssuesReferences":[{"number":77}]}]' \
+        >"$tmp/pr-multiple.json"
+    FAKE_GH_FIXTURE="$tmp/pr-multiple.json"
+    export FAKE_GH_FIXTURE
+    expect_linked_pr_gate_failure multiple
+
+    printf '%s\n' '[{"url":"https://github.com/acme/widget/issues/77","closingIssuesReferences":[{"number":77}]}]' \
+        >"$tmp/pr-malformed.json"
+    FAKE_GH_FIXTURE="$tmp/pr-malformed.json"
+    export FAKE_GH_FIXTURE
+    expect_linked_pr_gate_failure malformed-url
+
+    FAKE_GH_ERROR=1
+    export FAKE_GH_ERROR
+    expect_linked_pr_gate_failure gh-error
+    FAKE_GH_ERROR=0
+    PATH=$original_path
+    export FAKE_GH_ERROR PATH
+    printf 'linked-PR machine gate zero/one/multiple/malformed/gh-error proof passed\n'
     repo="$tmp/repo"
     export EDDA_STORE_ROOT="$tmp/store"
     mkdir -p "$repo/work" "$repo/briefs" "$EDDA_STORE_ROOT"

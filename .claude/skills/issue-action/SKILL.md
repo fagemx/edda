@@ -36,10 +36,15 @@ author self-check and record its behavior and counterexample lenses together.
 
 Completion follows the assigned brief: it may be a local candidate, commit or
 PR. The active `edda pipeline` caller is narrower: its implementation phase must
-create or update the PR through existing authorization and return the exact PR
-URL before its PR-review phase may begin. If that forge write is unavailable,
-report the blocker instead of returning a local candidate as though a PR exists.
-This requirement grants no merge authority to the pipeline, worker or reviewer.
+create or update exactly one open PR through existing authorization and ensure
+its `closingIssuesReferences` links this numeric issue. The pipeline's machine
+check independently resolves and validates that exact GitHub PR URL; the later
+review phase repeats the same issue-derived lookup because implementation output
+is not transferred between phases. A `gh` error, no linked open PR, multiple
+linked open PRs, or a malformed URL refuses review. If the forge write is
+unavailable, report the blocker instead of returning a local candidate as though
+a PR exists. This requirement grants no merge authority to the pipeline, worker
+or reviewer.
 
 Record truthful receipt/evidence and blockers. Validate with the repository's
 current focused author/L0 policy; do not add an unconditional full-workspace

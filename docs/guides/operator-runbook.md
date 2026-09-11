@@ -28,8 +28,8 @@ local/generated state，不 force-track。
 | 已 assigned／resume | `edda task show <id>`，讀 reachable brief、舊 result 與 source，做原角色；不重開 planning／formation |
 | controller resume 已有 plan | 先讀 rail owner、active map、task JSON、dispatch/session 與 PR/source evidence，再選 next action |
 | `issue-pipeline --skip-plan` | 重用已有 acceptance，不是略過 acceptance；`--no-merge` 只停止，不給 merge authority |
-| `issue-action` | 保留 issue acceptance／owner／fix context，再進 generic flow；若 caller 是 active `edda pipeline`，implementation 必須先建立／更新 PR 並回傳 URL 才能進 review |
-| `edda pipeline` | product template 透過 `issue-action` 實作；依本 repo focused L0 驗證，implementation 回傳 PR URL 後才進 review；pipeline／worker／reviewer 都不合併 |
+| `issue-action` | 保留 issue acceptance／owner／fix context，再進 generic flow；若 caller 是 active `edda pipeline`，implementation 必須建立／更新唯一 open PR，並讓 `closingIssuesReferences` 連到 numeric issue |
+| `edda pipeline` | product template 透過 `issue-action` 實作；依本 repo focused L0 驗證；implementation 的 `cmd_succeeds` machine check 以 issue ID 要求唯一 linked open PR 與 exact GitHub PR URL，review phase 不接前一 phase output，而是獨立重跑相同 lookup；`gh` error／零筆／多筆／malformed URL 都拒絕進 `/pr-review`；pipeline／worker／reviewer 都不合併 |
 | `pr-review-loop` | 只有 author self-check/fix；不是 independent verdict 或 merge loop |
 | 小型或一條 cohesive writer chain | 原 session 普通實作，不為儀式建 rail／fleet |
 | 兩個以上真正可並行 writers | 一個 controller 才啟用 `coord-orchestrate` formation；只有實際 artifact dependency 等待 |
@@ -40,9 +40,10 @@ local/generated state，不 force-track。
 拒絕。對 **legacy/uncontrolled task**，Reconcile 模式由現有 runner 全權負責 Codex
 start/retry/settlement，不混入 manual start、Pi／ACP／host 或 no-retry task。受 accepted
 `ExecutionBriefV1` 綁定的 **controlled task** 不走這條 legacy lifecycle：目前 accepted product
-只能驗證／綁定後回傳 descriptor，不會 launch；在 authorized S6 capability 出現前，直接執行
-truthfully `CONTROL_UNAVAILABLE`。Descriptor、caller-authored event 或 ordinary task command
-都不是 launch authority。因為目前 reconcile 不按 `plan_id` filter，絕不能用
+只能驗證／綁定後回傳 `execution: "none"` 的 descriptor，不會 launch；在 authorized S6
+capability 出現前，direct controlled execution unavailable。Literal `CONTROL_UNAVAILABLE` 僅是
+future planned S6 contract，不是 current evidence。Descriptor、caller-authored event 或 ordinary
+task command 都不是 launch authority。因為目前 reconcile 不按 `plan_id` filter，絕不能用
 `delivery.rail-owner.<plan>` 讓不同 plan 各選一種模式。Decision 只是 caller coordination
 evidence，不是 runtime lock、身份授權或 exactly-once 保證；切模式要操作者授權並先處理
 scheduler/process/lease/side effects。
