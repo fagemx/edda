@@ -53,7 +53,7 @@ use super::deliver::{
 };
 use super::drift;
 use super::gate;
-use super::github::{gh, gh_write, gh_write_stdin};
+use super::github::{gh, gh_write_stdin, required_checks, RequiredChecks};
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -95,8 +95,8 @@ pub(crate) trait Reads {
     /// prints every line of it and refuses on none of it (#1124): the subject
     /// PR's own hold is read from the subject, further down the stages.
     fn drift(&self) -> Result<drift::Report>;
-    /// Do the ruleset's required checks pass? (`gh pr checks --required`)
-    fn checks_green(&self, pr: u64) -> Result<bool>;
+    /// Authoritative plain required-check result plus its refusal diagnostic.
+    fn required_checks(&self, pr: u64) -> RequiredChecks;
     /// The `CI Gate` check-run URL for the receipt body, if resolvable.
     fn ci_gate_url(&self, sha: &str) -> Option<String>;
     /// Execute the squash merge with subject and body pinned (GH-1100).
@@ -527,17 +527,10 @@ pub(crate) fn merge_inner(args: &MergeArgs, reads: &dyn Reads) -> Result<i32> {
         return Ok(1);
     }
 
-    // 6. The forge's own required checks.
-    match reads.checks_green(args.pr) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("required checks are not green");
-            return Ok(1);
-        }
-        Err(error) => {
-            eprintln!("cannot read required checks: {error:#}");
-            return Ok(2);
-        }
+    // 6. Only the original plain check's success is Green; JSON only diagnoses refusal.
+    if let Some((code, message)) = reads.required_checks(args.pr).refusal(args.pr) {
+        eprintln!("{message}");
+        return Ok(code);
     }
 
     // 7. The squash subject, derived from the PR title and validated
@@ -695,12 +688,8 @@ impl Reads for GhReads<'_> {
         )
     }
 
-    fn checks_green(&self, pr: u64) -> Result<bool> {
-        // `gh pr checks --required` exits nonzero both when a required check
-        // is red and when gh itself failed — the shell refused on either,
-        // without distinguishing, and this stays at that parity: nonzero
-        // reads as not green rather than as an unreadable answer.
-        Ok(gh_write(self.cwd, &["pr", "checks", &pr.to_string(), "--required"]).is_ok())
+    fn required_checks(&self, pr: u64) -> RequiredChecks {
+        required_checks(self.cwd, pr)
     }
 
     fn ci_gate_url(&self, sha: &str) -> Option<String> {
@@ -792,7 +781,7 @@ mod tests {
         comments: Vec<TimedComment>,
         drift: Result<drift::Report, String>,
         fail_comments: bool,
-        checks_green: bool,
+        required_checks: RequiredChecks,
         merged: RefCell<Vec<(u64, String, String, String)>>,
         /// Which PR each read was asked for — a `Fake` that shrugs at the
         /// argument is how the missing `--pr` selector stayed invisible to
@@ -812,7 +801,7 @@ mod tests {
                 comments,
                 drift: Ok(drift::Report::new(vec![], false)),
                 fail_comments: false,
-                checks_green: true,
+                required_checks: RequiredChecks::Green,
                 merged: RefCell::new(Vec::new()),
                 asked: RefCell::new(Vec::new()),
                 reached_comments: RefCell::new(false),
@@ -842,10 +831,10 @@ mod tests {
         fn drift(&self) -> Result<drift::Report> {
             self.drift.clone().map_err(anyhow::Error::msg)
         }
-        fn checks_green(&self, pr: u64) -> Result<bool> {
+        fn required_checks(&self, pr: u64) -> RequiredChecks {
             self.asked.borrow_mut().push(("checks", pr));
             *self.reached_checks.borrow_mut() = true;
-            Ok(self.checks_green)
+            self.required_checks.clone()
         }
         fn ci_gate_url(&self, _sha: &str) -> Option<String> {
             Some("https://github.com/fagemx/edda/runs/123".into())
@@ -1334,10 +1323,18 @@ Addressed in abc1234."
     }
 
     #[test]
-    fn required_checks_not_green_refuses() {
-        let mut fake = Fake::clean(lgtm());
-        fake.checks_green = false;
-        assert_eq!(merge_inner(&args(false), &fake).unwrap(), 1);
+    fn every_non_green_required_check_result_refuses_without_squashing() {
+        for (result, expected) in [
+            (RequiredChecks::Absent, 1),
+            (RequiredChecks::Blocked(vec![]), 1),
+            (RequiredChecks::RacedNowGreen(vec![]), 1),
+            (RequiredChecks::Indeterminate("unreadable".into()), 2),
+        ] {
+            let mut fake = Fake::clean(lgtm());
+            fake.required_checks = result;
+            assert_eq!(merge_inner(&args(true), &fake).unwrap(), expected);
+            assert!(fake.merged.borrow().is_empty(), "refusal reached squash");
+        }
     }
 
     // ---- GH-1100, folded in -------------------------------------------------
