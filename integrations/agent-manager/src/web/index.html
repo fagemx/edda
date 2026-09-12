@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Edda · 代理工作台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#conversation-title">跳至對話</a>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Edda 代理工作台"><span class="brand-mark" aria-hidden="true">e</span><span>Edda <span class="brand-caption">代理工作台</span></span></a>
+    <div class="connection"><span id="connection-status" role="status">正在連線</span><button id="refresh" class="quiet" type="button">重新整理</button></div>
+  </header>
+  <div id="global-notice" class="global-notice" role="status" hidden></div>
+  <section id="auth" class="auth" hidden aria-labelledby="auth-title">
+    <h1 id="auth-title">連接本機工作台</h1>
+    <p>從啟動器開啟連結，或貼上工作台存取權杖。</p>
+    <form id="auth-form"><label for="token">工作台存取權杖</label><input id="token" type="password" autocomplete="off" required><button class="primary" type="submit">連接工作台</button></form>
+  </section>
+  <div id="desk" class="desk">
+    <nav class="sidebar" aria-label="專案與代理">
+      <div class="sidebar-heading"><h1>專案</h1><span id="project-count" class="muted"></span></div>
+      <p class="sidebar-note">僅顯示已選入工作台的代理</p>
+      <div id="projects"><p class="empty">正在讀取專案…</p></div>
+      <p class="sidebar-footnote">執行狀態供協作參考。閒置或執行結束，不代表工作已驗收。</p>
+    </nav>
+    <main id="workspace" class="workspace">
+      <div id="welcome" class="welcome"><span class="welcome-symbol" aria-hidden="true">↗</span><h2>選擇一位代理，接續工作</h2><p>查看公開對話與最近進度，再向明確的收件人傳送新訊息。</p></div>
+      <section id="agent-panel" hidden aria-labelledby="agent-name">
+        <header class="agent-header"><div><p id="agent-project" class="muted"></p><h2 id="agent-name"></h2><p id="agent-identity" class="identity"></p></div><div id="agent-status"></div></header>
+        <div id="agent-freshness" class="freshness"></div>
+        <div id="agent-warning" class="notice" hidden></div>
+        <details class="latest"><summary>最近公開回覆</summary><p id="latest-response" class="public-text"></p></details>
+        <section class="conversation-section" aria-labelledby="conversation-title">
+          <div class="section-heading"><h3 id="conversation-title" tabindex="-1">對話</h3><span id="conversation-meta" class="muted"></span><button id="conversation-refresh" class="quiet" type="button">更新對話</button></div>
+          <p id="conversation-notice" class="notice" role="status" hidden></p>
+          <div id="conversation" class="conversation" aria-label="公開對話紀錄" tabindex="0"></div>
+          <button id="load-more" class="load-more" type="button" hidden>繼續載入對話</button>
+        </section>
+        <form id="compose" class="compose">
+          <div class="recipient"><label for="message">新訊息</label><span>收件人：<strong id="recipient"></strong></span></div>
+          <textarea id="message" rows="4" placeholder="補充方向、提出問題，或交付下一步工作…" aria-describedby="mode-help draft-status" required></textarea>
+          <div class="compose-controls"><label class="mode-label" for="mode">送出方式<select id="mode"><option value="followUp">接續目前工作</option><option value="steer">優先指示</option></select></label><button id="send" class="primary" type="submit">傳送新訊息</button></div>
+          <p id="mode-help" class="muted">目前工作結束後，再處理這則訊息。</p>
+          <div class="compose-footer"><span id="draft-status" class="muted"></span><span id="message-size" class="muted"></span></div>
+          <p id="send-notice" class="notice" role="status" hidden></p>
+        </form>
+        <section id="pending" class="pending" hidden aria-labelledby="pending-title"><h3 id="pending-title">正在確認送出結果</h3><p id="pending-notice"></p><p id="pending-id" class="identity"></p><details><summary>檢視原始訊息</summary><p id="pending-message" class="public-text"></p></details><div class="pending-actions"><button id="check-receipt" type="button">查詢收據</button><button id="release-rejected" type="button" hidden>保留草稿，編輯為新訊息</button></div></section>
+      </section>
+    </main>
+    <aside class="activity-rail" aria-label="專案脈絡與活動">
+      <section><h2>管理摘要</h2><div id="summaries"><p class="empty">選擇代理後顯示專案摘要。</p></div></section>
+      <section><h2>共用資源</h2><p class="rail-note">登錄的歸屬與來源，並非即時健康狀態。</p><div id="resources"></div></section>
+      <section><h2>訊息收據</h2><div id="operations"><p class="empty">尚無訊息收據。</p></div></section>
+      <section><h2>最近活動</h2><div id="events"><p class="empty">正在讀取持久紀錄…</p></div></section>
+    </aside>
+  </div>
+  <noscript>工作台需要 JavaScript 才能讀取代理狀態與對話。</noscript>
+</body>
+</html>
