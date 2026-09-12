@@ -40,3 +40,28 @@ IDs, uncertain delivery, UI waits, owner collisions, stale state and lifecycle
 cleanup. Extension event tests cover unconfirmed-to-started-to-settled and failure.
 A real installed Pi load is verified without a paid model call. Documentation
 provides installation, status, send, receipt and crash-recovery instructions.
+
+## Operator-approved second slice: replies and supervision
+
+The operator subsequently requested bidirectional communication and management
+after a resumed Pi replied with a specific approval question and stopped. A
+transport `started` receipt must never be reported as substantive work resumed.
+
+- Live conversation queries project Pi's actual current branch. For already
+  loaded extensions, read the exact registered session's default transcript,
+  verifying its header/cwd and reconstructing the last persisted branch. Clearly
+  label that evidence; unpersisted branch navigation is not observable there.
+- Return user/assistant text and tool activity, no private reasoning or raw tool
+  payloads. Bound text/pages and require valid incremental cursors. Incomplete or
+  ambiguous history fails closed.
+- Enroll exact sessions with operator-derived scopes; persist read checkpoints
+  and reply intents in the private registry. A host heartbeat supervises them.
+  The integration provides tools, not an autonomous permission-granting engine.
+- Read latest replies before deciding; prefer concrete instructions over generic
+  continuation. Deduplicate by source cursor. Reply only to live idle sessions
+  after refreshing the cursor/instance; this is a preflight, not a lock against
+  concurrent human input. No blind retries, automatic process restart, or inferred
+  new budget/migration permission. Explicitly withheld actions wait for operator.
+- Validate the real-runtime sequence: Pi asks a specific question, controller
+  reads it, sends the authorized answer, and observes the new response. Synthetic
+  provider only, no database operation or paid model call in the smoke test.

@@ -10,7 +10,9 @@ export default function (pi) {
       const stream = createAssistantMessageEventStream();
       const user = [...context.messages].reverse().find((m) => m.role === 'user');
       const text = typeof user?.content === 'string' ? user.content : user?.content?.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
-      const message = { role: 'assistant', content: [{ type: 'text', text: `OFFLINE_ACK: ${text}` }],
+      const answer = text?.endsWith('ASK_OFFLINE_PERMISSION') ? 'Please explicitly reply APPROVE_OFFLINE_TASK.' :
+        text?.endsWith('APPROVE_OFFLINE_TASK') ? 'OFFLINE_TASK_STARTED: completed the synthetic operation.' : `OFFLINE_ACK: ${text}`;
+      const message = { role: 'assistant', content: [{ type: 'text', text: answer }],
         api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: Date.now(),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };

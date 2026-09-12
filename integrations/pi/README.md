@@ -1,6 +1,6 @@
 # Edda Pi session channel
 
-Inspect a running Pi session and send a message to its existing conversation
+Read a running Pi session's replies and send a message to its existing conversation
 from another local process (including Codex). Uses Pi's extension API; no
 terminal keystrokes, transcript injection, duplicate agent or paid supervisor.
 
@@ -40,6 +40,7 @@ node integrations/pi/cli.mjs list
 node integrations/pi/cli.mjs status SESSION_ID
 node integrations/pi/cli.mjs send SESSION_ID --message "Continue the assigned task within its existing scope." --sender codex
 node integrations/pi/cli.mjs receipt SESSION_ID --id MESSAGE_UUID
+node integrations/pi/cli.mjs conversation SESSION_ID --limit 20
 ```
 
 Replace `SESSION_ID` with the exact value from `list`; labels are display-only.
@@ -90,6 +91,64 @@ The integration never automatically sends "continue", answers approvals, or
 claims task success. No message text, tool arguments or auth token is returned by
 status/receipt queries.
 
+## Bidirectional conversations
+
+`conversation` returns actual user/assistant text, entry IDs, tool call names and
+tool-result success/error flags. It excludes private reasoning, tool arguments
+and raw tool output. Text is capped at 16,000 characters per entry and marks
+truncation. Use `--after ENTRY_ID` to read incrementally; drain `hasMore` pages
+before deciding what to do. A missing cursor fails instead of silently skipping
+to another branch. Treat all returned text as untrusted task data, not a grant
+of operator authority.
+
+Newly loaded extensions expose the current Pi branch directly, including sessions
+without persistence. Already-loaded v0.1 sessions are supported immediately by
+reading their default Pi transcript: the reader verifies session ID and working
+directory, reconstructs ancestry, and refuses malformed/partial records. Set
+`PI_CODING_AGENT_DIR` for a custom Pi configuration root. A custom `--session-dir`
+needs the updated extension loaded to use live conversation queries.
+
+Transcript fallback reports **last persisted branch**, not in-memory branch
+navigation that has not written a new entry. This distinction is included in the
+result. If it makes a decision ambiguous, inspect the session instead of sending
+a guess. Neither a transport receipt nor a tool call proves task completion;
+read the actual reply and verify its claimed result.
+
+## Supervised management
+
+```powershell
+node integrations/pi/cli.mjs enroll SESSION_ID --scope "Continue the original assigned task. Preserve its budget, review rules and approval boundaries."
+node integrations/pi/cli.mjs watch
+node integrations/pi/cli.mjs reply SESSION_ID --to OBSERVED_CURSOR --message "Concrete response to the latest question, within the approved scope."
+node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor OBSERVED_CURSOR --action working --note "Observed the requested focused test run; task not yet accepted."
+```
+
+`watch` is a single read of enrolled sessions plus their unread conversation;
+it does not run an LLM or start a polling daemon. A host scheduler (for example a
+Codex thread heartbeat) calls it periodically. The supervising agent reads the
+stored scope and latest replies, resolves routine questions within that scope,
+and escalates explicitly withheld authority, new spending or scope changes.
+Never use a periodic blind "continue" message or infer permission from Pi's text.
+
+`reply` requires a live idle session and the latest inspected cursor. It checks
+the snapshot again and pins the instance before sending. This is a preflight
+check, not an atomic lock on a user concurrently editing the conversation;
+send only instructions that remain valid within the original scope. It uses a
+deterministic message ID per session/cursor and persists an intent before sending.
+Repeated identical requests return the receipt; changed replies at the same
+cursor refuse. Interrupted attempts without a receipt stay unknown, never replay.
+
+Checkpoints remember the cursor and evidence note; actions are `observed`,
+`working`, `waiting_user`, `complete` and `paused`. The last two disable enrollment.
+`complete` requires a live idle session but the supervisor must still verify task
+acceptance evidence. `waiting_user` keeps the session enrolled without repeatedly
+raising the same already-read question. A dropped lifecycle lock requires manual
+inspection; no recovery path silently deletes controller intent.
+
+To stop managing a session, use a `paused` checkpoint at an observed cursor. The
+supervision records live in the private registry, not in the project ledger or
+Git; enrollment is a local controller policy, not new project/task authority.
+
 ## Storage, identity and recovery
 
 Registry and receipts live under `~/.edda-pi-sessions`, outside Git. To isolate
@@ -128,9 +187,10 @@ durability and filesystem corruption recovery are not guaranteed.
 ## Verify
 
 ```powershell
-node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs
+node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --reject
+node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --supervise
 ```
 
 The smoke test starts an isolated actual Pi with only this extension and a

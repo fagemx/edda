@@ -1,5 +1,6 @@
 import { startChannel } from './channel.mjs';
 import { defaultRoot } from './store.mjs';
+import { pageConversation, projectEntry } from './conversation.mjs';
 
 export default function eddaSessionChannel(pi) {
   let channel;
@@ -29,6 +30,7 @@ export default function eddaSessionChannel(pi) {
         root: defaultRoot(), sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
         label: pi.getFlag('edda-session-label') || '',
         deliver: (text, options) => pi.sendUserMessage(text, options),
+        getConversation: (options) => pageConversation(ctx.sessionManager.getBranch().map(projectEntry), options),
       });
       if (!ctx.isIdle()) channel.event('agent_start');
       ctx.ui?.setStatus?.('edda-session', `Edda: ${channel.sessionId.slice(0, 8)}`);

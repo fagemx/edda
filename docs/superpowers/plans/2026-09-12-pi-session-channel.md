@@ -31,3 +31,15 @@ Round 1 independent review found two receipt-truth defects. The correction uses
 nonterminal receipts to durable `unknown` before serving. Windows tests include
 actual owner-process death/recovery and real Pi missing-credential rejection.
 Final review verdict and installation evidence are recorded on Edda task #174.
+
+## Second slice (task #177)
+
+- [x] Add conversation projection, cursor pagination and identity-checked legacy
+  transcript reading; expose live Pi branch replies through the existing server.
+- [x] Add scoped enrollment, watch snapshots, write-ahead per-cursor reply
+  deduplication and evidence checkpoints; preserve original approval boundaries.
+- [x] Verify projection/privacy, branch/cursor correctness, legacy identity,
+  stale/busy replies and deduplication. Exercise actual Pi question/answer loop
+  with a deterministic offline provider.
+- [ ] Obtain independent review, fix frozen-surface findings, enroll the two
+  operator-selected sessions and enable a host heartbeat for ongoing supervision.

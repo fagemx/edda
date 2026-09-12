@@ -27,7 +27,7 @@ async function jsonBody(req) {
   return body;
 }
 
-export async function startChannel({ root, sessionId, cwd, label = '', deliver, heartbeatMs = 5000 }) {
+export async function startChannel({ root, sessionId, cwd, label = '', deliver, getConversation, heartbeatMs = 5000 }) {
   validateSession(sessionId);
   const instanceId = randomUUID();
   const token = randomBytes(32).toString('hex');
@@ -73,7 +73,8 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   };
   const channel = {
     sessionId, instanceId,
-    snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed }),
+    snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
+      capabilities: ['send', 'receipts', ...(getConversation ? ['conversation'] : [])] }),
     event(name, data = {}) {
       if (closed) return;
       if (name === 'agent_start') { busy = true; lastStopReason = null; }
@@ -131,6 +132,11 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       if (req.headers.origin || Buffer.byteLength(auth) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw fail('Unauthorized', 401);
       if (req.headers['x-edda-instance'] !== instanceId) throw fail('Wrong session instance', 409);
       if (req.method === 'GET' && req.url === '/status') return reply(200, channel.snapshot());
+      if (req.method === 'GET' && req.url?.startsWith('/conversation?') && getConversation) {
+        const params = new URL(req.url, 'http://127.0.0.1').searchParams;
+        return reply(200, { ...getConversation({ after: params.get('after') || undefined, limit: params.get('limit') || 20 }),
+          sessionId, instanceId, source: 'pi_runtime', branchEvidence: 'current Pi branch' });
+      }
       if (req.method === 'GET' && req.url?.startsWith('/receipts/')) {
         const receipt = receipts.get(validateId(req.url.slice('/receipts/'.length)));
         if (!receipt) throw fail('Receipt not found', 404);
