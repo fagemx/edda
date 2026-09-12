@@ -83,7 +83,11 @@ export default function eddaSessionChannel(pi) {
     c.messageStarted(text);
   }));
   pi.on('message_end', (event, ctx) => guard(ctx, (c) => {
-    if (event.message.role === 'assistant') c.event('assistant_end', { stopReason: event.message.stopReason });
+    if (event.message.role === 'assistant') {
+      const content = event.message.content;
+      const text = typeof content === 'string' ? content : (content || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+      c.event('assistant_end', { stopReason: event.message.stopReason, text });
+    }
   }));
   pi.on('agent_settled', (_event, ctx) => guard(ctx, (c) => c.settled()));
   pi.registerCommand('edda-session', {

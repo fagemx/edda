@@ -11,12 +11,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { listSessions, requestSession, getReceipt, prepareHandoff, managementContext } from './client.mjs';
 import { enroll, watch, reply } from './supervision.mjs';
 import { largeManifest } from './fixtures/large-handoff.mjs';
+import { listInbox, readInbox, acknowledgeInbox, recordAuthorization, respondInbox } from './inbox-manager.mjs';
 
 const entry = process.argv[2];
 const reject = process.argv.includes('--reject');
 const supervise = process.argv.includes('--supervise');
 const large = process.argv.includes('--handoff-budget');
-const handoff = process.argv.includes('--handoff') || large;
+const inboxMode = process.argv.includes('--inbox');
+const handoff = process.argv.includes('--handoff') || large || inboxMode;
 if (handoff && (supervise || reject)) throw new Error('Run --handoff separately from the other smoke modes');
 if (!entry) throw new Error('Supply the installed Pi JavaScript CLI entry path');
 const root = await mkdtemp(join(tmpdir(), 'edda-pi-smoke-'));
@@ -64,6 +66,7 @@ try {
   child.stdin.write(JSON.stringify({ id: 'initial', type: 'get_state' }) + '\n');
   const session = await until(async () => (await listSessions(registry)).find((row) => row.live), 'registration');
   if (handoff) {
+    if (inboxMode) await enroll(registry, session.sessionId, 'The synthetic offline operation is already authorized. No real work or paid calls.');
     const manifest = large ? largeManifest() : JSON.parse(await readFile(new URL('./fixtures/management-manifest.json', import.meta.url), 'utf8'));
     await prepareHandoff(registry, session.sessionId, manifest);
   }
@@ -91,7 +94,20 @@ try {
     assert.equal(view.handoff.report.decision.question, large ? 'q'.repeat(1000) : 'May the synthetic fixture continue?');
   }
   let secondId = randomUUID();
-  if (supervise) {
+  let authorization;
+  if (inboxMode) {
+    const eventId = listInbox(registry).events.find((event) => event.kind === 'decision_request').eventId;
+    const request = await readInbox(registry, eventId);
+    assert.equal(request.event.report.decision.requestedAction, 'fixture_continue');
+    assert.equal(request.delivery.notified, false);
+    assert.equal(request.wake.status, 'unsupported');
+    acknowledgeInbox(registry, eventId);
+    assert.ok(listInbox(registry).events.some((event) => event.eventId === eventId));
+    authorization = await recordAuthorization(registry, eventId, { requestedAction: 'fixture_continue', resource: 'offline-only',
+      source: { uri: 'fixture://operator', revision: 'already-approved-v1' }, note: 'Reuse the fixture operator authorization; no new scope.' });
+    const response = await respondInbox(registry, eventId, { message: 'CHANNEL_SMOKE_TWO', authorizationId: authorization.id });
+    secondId = response.id;
+  } else if (supervise) {
     await enroll(registry, session.sessionId, 'Approve only the synthetic offline fixture operation; no external side effects.');
     const [view] = await watch(registry, { withConversation: true });
     assert.ok(view.conversation.entries.some((e) => e.text === 'Please explicitly reply APPROVE_OFFLINE_TASK.'));
@@ -124,10 +140,23 @@ try {
       assert.ok(view.handoff.serializedBytes > 16384 && view.handoff.serializedBytes <= 32768);
     }
   }
+  if (inboxMode) {
+    const thirdId = randomUUID();
+    await requestSession(registry, session.sessionId, '/messages', { id: thirdId, message: 'CHANNEL_SMOKE_ONE', sender: 'codex-smoke', mode: 'followUp' });
+    await until(async () => (await getReceipt(registry, session.sessionId, thirdId)).status === 'settled', 'repeated question');
+    const question = listInbox(registry).events.filter((event) => event.kind === 'decision_request').at(-1);
+    const detail = await readInbox(registry, question.eventId);
+    assert.ok(detail.authorizations.some((record) => record.id === authorization.id));
+    const response = await respondInbox(registry, question.eventId, { message: 'CHANNEL_SMOKE_TWO', authorizationId: authorization.id });
+    await until(async () => (await getReceipt(registry, session.sessionId, response.id)).status === 'settled', 'reused authorization response');
+    assert.equal((await readInbox(registry, question.eventId)).delivery.workStarted, true);
+    assert.equal((await respondInbox(registry, question.eventId, { message: 'CHANNEL_SMOKE_TWO', authorizationId: authorization.id })).id, response.id);
+  }
   const conversation = await requestSession(registry, session.sessionId, '/conversation?limit=20');
   assert.ok(conversation.entries.some((e) => e.role === 'assistant' && e.text.includes(supervise ? 'OFFLINE_TASK_STARTED' : 'CHANNEL_SMOKE_TWO')));
   console.log(JSON.stringify({ passed: true, actualPi: true, sessionId: session.sessionId,
-    messagesSettled: 2, sameSession: true, bidirectional: true, supervisedQuestionAnswer: supervise,
+    messagesSettled: inboxMode ? 4 : 2, sameSession: true, bidirectional: true, supervisedQuestionAnswer: supervise,
+    durableInbox: inboxMode, authorizationReused: inboxMode, hostWake: 'not_configured',
     structuredHandoff: handoff, explicitBudgetRecovery: large, provider: 'offline fixture', paidCalls: 0 }, null, 2));
   }
 } finally {
