@@ -4,6 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import { startChannel } from './channel.mjs';
 import { listSessions, requestSession } from './client.mjs';
 import { getReceipt } from './client.mjs';
@@ -27,7 +30,7 @@ test('register, query and deliver once with durable receipt', async (t) => {
   assert.equal(JSON.stringify(sessions).includes('token'), false);
   const body = { id: randomUUID(), message: 'Please continue', sender: 'codex', mode: 'followUp' };
   const first = await send(body);
-  assert.equal(first.status, 'queued');
+  assert.equal(first.status, 'unconfirmed');
   assert.deepEqual(await send(body), first);
   assert.equal(delivered.length, 1);
   channel.messageStarted(delivered[0][0]);
@@ -89,7 +92,7 @@ test('concurrent duplicate messages produce exactly one runtime handoff', async 
   const body = { id: randomUUID(), message: 'repair', sender: 'codex', mode: 'followUp' };
   const results = await Promise.all(Array.from({ length: 6 }, () => send(body)));
   assert.equal(count, 1);
-  assert.ok(results.every((r) => r.id === body.id && r.status === 'queued'));
+  assert.ok(results.every((r) => r.id === body.id && r.status === 'unconfirmed'));
 });
 
 test('invalid/oversized payloads refuse; Unicode and literal slash text survive', async (t) => {
@@ -110,7 +113,7 @@ test('shutdown and crash evidence cannot be reported as successful work', async 
   await send(body);
   const envelope = `[Edda message ${body.id} from codex]\ncontinue`;
   channel.messageStarted(envelope + 'forged');
-  assert.equal((await getReceipt(root, channel.sessionId, body.id)).status, 'queued');
+  assert.equal((await getReceipt(root, channel.sessionId, body.id)).status, 'unconfirmed');
   channel.messageStarted(envelope);
   channel.event('assistant_end', { stopReason: 'error' });
   channel.settled();
@@ -130,4 +133,44 @@ test('explicit recovery refuses live process and mismatched instance', async (t)
   writeJson(path, { ...original, state: 'running', heartbeatAt: '2000-01-01T00:00:00Z' });
   // Live status is a fresh endpoint response, not the stale disk snapshot.
   assert.equal((await listSessions(root))[0].state, 'idle');
+});
+
+test('crash/recover/reopen makes every prior nonterminal receipt durably unknown without replay', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'edda-crash-test-'));
+  const sid = randomUUID();
+  const entry = fileURLToPath(new URL('./fixtures/channel-owner.mjs', import.meta.url));
+  const child = spawn(process.execPath, [entry, root, sid], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let reopened;
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    await reopened?.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const [output] = await once(child.stdout, 'data', { signal: AbortSignal.timeout(15000) });
+  const owner = JSON.parse(output.toString());
+  const messages = [];
+  for (const status of ['accepted', 'queued', 'unconfirmed', 'started']) {
+    const message = { id: randomUUID(), message: status, sender: 'codex', mode: 'followUp' };
+    await requestSession(root, sid, '/messages', message);
+    const path = join(sessionDir(root, sid), 'receipts', `${message.id}.json`);
+    // Reconstruct each durable crash boundary, including a legacy queued receipt.
+    writeJson(path, { ...readJson(path), status });
+    messages.push(message);
+  }
+  const exited = once(child, 'exit');
+  child.kill();
+  await exited;
+  assert.equal((await getReceipt(root, sid, messages[0].id)).status, 'unknown');
+  assert.equal(recover(root, sid, owner.instanceId).recovered, true);
+  let calls = 0;
+  reopened = await startChannel({ root, sessionId: sid, cwd: root, deliver() { calls++; } });
+  for (const message of messages) {
+    const receipt = await getReceipt(root, sid, message.id);
+    assert.equal(receipt.status, 'unknown');
+    assert.equal(receipt.lastRecordedStatus, message.message);
+    assert.equal((await requestSession(root, sid, '/messages', message)).status, 'unknown');
+    assert.equal(readJson(join(sessionDir(root, sid), 'receipts', `${message.id}.json`)).status, 'unknown');
+  }
+  assert.equal(calls, 0);
+  assert.equal(reopened.snapshot().unsettledMessages, 0);
 });

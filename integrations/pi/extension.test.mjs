@@ -46,7 +46,7 @@ test('Pi lifecycle, tool spans, queued messages, UI waits, settlement and sessio
   assert.equal(delivered[0].options.deliverAs, 'followUp');
   await emit('agent_settled');
   // A local run settling cannot complete a message Pi has not started.
-  assert.equal((await getReceipt(root, sid, id)).status, 'queued');
+  assert.equal((await getReceipt(root, sid, id)).status, 'unconfirmed');
   await emit('agent_start');
   await emit('message_start', { message: { role: 'user', content: [{ type: 'text', text: delivered[0].text }] } });
   await emit('message_end', { message: { role: 'assistant', stopReason: 'stop' } });

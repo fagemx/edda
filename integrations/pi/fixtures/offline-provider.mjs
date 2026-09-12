@@ -3,7 +3,7 @@ import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/compat'
 
 export default function (pi) {
   pi.registerProvider('edda-offline-test', {
-    api: 'edda-offline-test-api', baseUrl: 'http://127.0.0.1:1', apiKey: 'test-only',
+    api: 'edda-offline-test-api', baseUrl: 'http://127.0.0.1:1', apiKey: process.env.EDDA_PI_SMOKE_REJECT === '1' ? undefined : 'test-only',
     models: [{ id: 'echo', name: 'Offline channel test', reasoning: false, input: ['text'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 4096 }],
     streamSimple(model, context) {

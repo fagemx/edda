@@ -24,7 +24,7 @@ service, automatic supervisor, task authority, or replacement dispatcher.
   delivery. Slash commands are not expanded.
 - Write an acceptance receipt before handing a message to Pi. Reusing an ID
   with identical content returns its receipt; different content is a conflict.
-  An uncertain handoff is not retried. Receipts distinguish accepted, queued,
+  An uncertain handoff is not retried. Receipts distinguish accepted, unconfirmed,
   started, settled, failed and unknown. Settled means Pi finished the run, not
   that the requested task passed. A bounded receipt count prevents unbounded use.
 - The extension observes the exact message envelope at user-message start;
@@ -37,6 +37,6 @@ service, automatic supervisor, task authority, or replacement dispatcher.
 
 Real HTTP and filesystem tests cover authentication, wrong instance, duplicate
 IDs, uncertain delivery, UI waits, owner collisions, stale state and lifecycle
-cleanup. Extension event tests cover queued-to-started-to-settled and failure.
+cleanup. Extension event tests cover unconfirmed-to-started-to-settled and failure.
 A real installed Pi load is verified without a paid model call. Documentation
 provides installation, status, send, receipt and crash-recovery instructions.

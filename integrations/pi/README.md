@@ -70,11 +70,18 @@ current Pi model's normal usage; this channel sets no new model or spend allowan
 | `heartbeatAt` | Channel heartbeat, independent of task progress |
 | `lastProgressAt` | Last observed runtime event, not inferred from CPU or TCP |
 | receipt `accepted` | Recorded before Pi handoff; does not prove delivery |
-| receipt `queued` | Pi's message API returned; not yet observed as a user message |
+| receipt `unconfirmed` | Pi's void API was called; queueing/start is unconfirmed and asynchronous rejection may be invisible |
 | receipt `started` | The exact envelope appeared in Pi's user-message stream |
 | receipt `settled` | Pi emitted agent_settled after this message started; not task acceptance |
 | receipt `failed` | Run settled with a model error/abort; inspect Pi's conversation |
 | receipt `unknown` | Handoff threw, owner shut down early, or pending evidence is offline |
+
+`unsettledMessages` counts this instance's unfinished channel receipts, **not**
+Pi's queue. Pi 0.85.1's extension API does not expose asynchronous send failures
+to the sending extension. A missing credential can leave an idle session with an
+`unconfirmed` receipt; inspect Pi's reported error rather than assume it will run.
+An HTTP/CLI send success means the channel recorded the request, not runtime
+acceptance. Only `started` and subsequent states confirm observed ingestion.
 
 Plain assistant questions are `idle`, not `waiting_user`: no reliable structured
 signal distinguishes a conversational question from a final answer. Waiting on
@@ -109,6 +116,8 @@ node integrations/pi/cli.mjs recover SESSION_ID --instance OLD_INSTANCE_UUID
 Recovery validates the stored instance and dead PID and preserves receipts.
 PID reuse fails closed. Recovery does not launch Pi, replay messages or restore
 its in-memory queue. Resume the session normally; old message IDs still dedupe.
+On reopening, previous-instance nonterminal receipts become durable `unknown`
+with `lastRecordedStatus` retained; they never return to an apparent queue.
 If the process crashes during the very short lifecycle lock operation, a
 `lifecycle.lock` may need manual inspection/removal after proving no owner lives.
 Receipts are bounded to 1,000 per session; retain/archive evidence before resetting
@@ -121,6 +130,7 @@ durability and filesystem corruption recovery are not guaranteed.
 ```powershell
 node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --reject
 ```
 
 The smoke test starts an isolated actual Pi with only this extension and a

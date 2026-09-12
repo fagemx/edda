@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { listSessions, requestSession, getReceipt } from './client.mjs';
 
 const entry = process.argv[2];
+const reject = process.argv.includes('--reject');
 if (!entry) throw new Error('Supply the installed Pi JavaScript CLI entry path');
 const root = await mkdtemp(join(tmpdir(), 'edda-pi-smoke-'));
 const registry = join(root, 'channel');
@@ -21,7 +22,8 @@ const child = spawn(process.execPath, [resolve(entry), '--mode', 'rpc', '--no-se
   '--no-extensions', '-e', extension, '-e', provider, '--no-skills', '--no-prompt-templates',
   '--no-themes', '--no-tools', '--provider', 'edda-offline-test', '--model', 'echo'], {
   cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-  env: { ...process.env, PI_CODING_AGENT_DIR: join(root, 'agent'), EDDA_PI_CHANNEL_DIR: registry },
+  env: { ...process.env, PI_CODING_AGENT_DIR: join(root, 'agent'), EDDA_PI_CHANNEL_DIR: registry,
+    EDDA_PI_SMOKE_REJECT: reject ? '1' : '0' },
 });
 let stderr = '';
 let buffered = '';
@@ -57,7 +59,19 @@ try {
   const first = await requestSession(registry, session.sessionId, '/messages', {
     id: firstId, message: 'CHANNEL_SMOKE_ONE', sender: 'codex-smoke', mode: 'followUp',
   });
-  assert.ok(['queued', 'started', 'settled'].includes(first.status));
+  assert.ok(['unconfirmed', 'started', 'settled'].includes(first.status));
+  if (reject) {
+    await until(() => events.some((e) => e.type === 'extension_error'), 'preflight rejection');
+    const receipt = await getReceipt(registry, session.sessionId, firstId);
+    const state = await requestSession(registry, session.sessionId, '/status');
+    assert.equal(receipt.status, 'unconfirmed');
+    assert.equal(state.state, 'idle');
+    assert.equal(state.unsettledMessages, 1);
+    assert.equal('pendingMessages' in state, false);
+    assert.equal(events.filter((e) => e.type === 'message_start' && e.message?.role === 'user').length, 0);
+    console.log(JSON.stringify({ passed: true, actualPi: true, test: 'asynchronous preflight rejection',
+      receipt: receipt.status, noFalseQueueClaim: true, paidCalls: 0 }, null, 2));
+  } else {
   await until(async () => (await getReceipt(registry, session.sessionId, firstId)).status === 'settled', 'first settlement');
   const secondId = randomUUID();
   await requestSession(registry, session.sessionId, '/messages', {
@@ -74,6 +88,7 @@ try {
   assert.equal(final.state, 'idle');
   console.log(JSON.stringify({ passed: true, actualPi: true, sessionId: session.sessionId,
     messagesSettled: 2, sameSession: true, provider: 'offline fixture', paidCalls: 0 }, null, 2));
+  }
 } finally {
   // Only the subprocess created above is stopped; no running user session is touched.
   if (child.exitCode === null) {

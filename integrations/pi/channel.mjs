@@ -41,13 +41,23 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const tools = new Map();
   const state = { version: 1, sessionId, instanceId, pid: process.pid, cwd, label: String(label).slice(0, 120),
     state: 'idle', startedAt: now(), heartbeatAt: now(), lastProgressAt: now(), lastEvent: 'session_start',
-    toolNames: [], pendingMessages: 0 };
+    toolNames: [], unsettledMessages: 0 };
   let receipts;
-  try { receipts = new Map(store.receipts().map((r) => [r.id, r])); }
+  try {
+    receipts = new Map(store.receipts().map((r) => {
+      if (!terminal.has(r.status) && r.instanceId !== instanceId) {
+        const recovered = { ...r, status: 'unknown', lastRecordedStatus: r.status, updatedAt: now() };
+        store.putReceipt(recovered);
+        return [r.id, recovered];
+      }
+      return [r.id, r];
+    }));
+  }
   catch (error) { store.release(); throw error; }
   const save = () => {
     state.heartbeatAt = now();
-    state.pendingMessages = [...receipts.values()].filter((r) => r.instanceId === instanceId && !terminal.has(r.status)).length;
+    // These are channel receipts, NOT Pi's runtime queue occupancy.
+    state.unsettledMessages = [...receipts.values()].filter((r) => r.instanceId === instanceId && !terminal.has(r.status)).length;
     store.state(state);
   };
   const update = (receipt, status) => {
@@ -145,10 +155,11 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       store.putReceipt(receipt);
       receipts.set(receipt.id, receipt);
       try {
-        // Pi's extension API is synchronous and queues work; it does not wait for a model.
+        // Pi's void wrapper hides asynchronous rejection. Only message_start
+        // confirms ingestion; a return cannot prove that anything is queued.
         deliver(envelope, { deliverAs: message.mode, expandPromptTemplates: false });
         const current = receipts.get(receipt.id);
-        if (current.status === 'accepted') update(current, 'queued');
+        if (current.status === 'accepted') update(current, 'unconfirmed');
       } catch {
         update(receipts.get(receipt.id), 'unknown');
       }
