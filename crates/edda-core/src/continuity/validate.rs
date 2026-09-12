@@ -223,7 +223,7 @@ fn validate_git(git: &CapsuleGitV1) -> anyhow::Result<()> {
         anyhow::bail!("git.dirty_paths exceeds {MAX_DIRTY_PATHS} entries");
     }
     for path in &git.dirty_paths {
-        if path.chars().count() > MAX_PATH_CHARS || !safe_relative_path(path) {
+        if path.chars().count() > MAX_PATH_CHARS || !safe_portable_dirty_path(path) {
             anyhow::bail!("git.dirty_paths contains an unsafe or oversized path");
         }
     }
@@ -309,6 +309,17 @@ fn safe_relative_slash_path(value: &str) -> bool {
     !value.contains('\\') && safe_relative_path(value)
 }
 
+fn safe_portable_dirty_path(value: &str) -> bool {
+    let path = value.strip_suffix('/').unwrap_or(value);
+    !path.is_empty()
+        && !value.chars().any(char::is_control)
+        && !value.contains(['\\', ':'])
+        && !value.starts_with('/')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && !matches!(part, "." | ".."))
+}
+
 fn scan_value(value: &serde_json::Value, path: &str) -> anyhow::Result<()> {
     match value {
         serde_json::Value::Object(map) => {
@@ -333,4 +344,37 @@ fn scan_value(value: &serde_json::Value, path: &str) -> anyhow::Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirty_paths_use_one_portable_slash_grammar_on_every_host() {
+        for path in [
+            r"..\outside",
+            r"dir\file",
+            r"dir\..\outside",
+            "C:/outside",
+            "/absolute",
+            "dir//file",
+            "dir/../file",
+            "dir/./file",
+            "dir//",
+        ] {
+            let git = CapsuleGitV1 {
+                dirty_paths: vec![path.to_string()],
+                ..CapsuleGitV1::default()
+            };
+            let error = validate_git(&git).expect_err(path);
+            assert!(error.to_string().contains("unsafe"), "{path}: {error}");
+        }
+
+        let git = CapsuleGitV1 {
+            dirty_paths: vec!["src/界.rs".to_string(), ".edda/".to_string()],
+            ..CapsuleGitV1::default()
+        };
+        validate_git(&git).unwrap();
+    }
 }

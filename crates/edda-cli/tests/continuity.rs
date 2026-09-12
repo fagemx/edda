@@ -315,6 +315,65 @@ fn bundle_round_trips_fresh_clone_and_duplicate_is_stable_noop() {
 }
 
 #[test]
+fn export_accepts_relative_output_and_preserves_no_clobber() {
+    let repo = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let inputs = tempfile::tempdir().unwrap();
+    initialize(repo.path());
+    configure_key(repo.path(), "relative/export");
+    let input = write_input(
+        inputs.path(),
+        "relative.json",
+        serde_json::json!({"next_action": "continue"}),
+    );
+    let saved = json(&run(
+        repo.path(),
+        store.path(),
+        &[
+            "continuity",
+            "save",
+            "--file",
+            input.to_str().unwrap(),
+            "--json",
+        ],
+    ));
+
+    let relative = "relative.bundle.json";
+    let exported = run(
+        repo.path(),
+        store.path(),
+        &[
+            "continuity",
+            "export",
+            saved["capsule_id"].as_str().unwrap(),
+            "--out",
+            relative,
+        ],
+    );
+    assert!(
+        exported.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let destination = repo.path().join(relative);
+    let original = std::fs::read(&destination).unwrap();
+
+    let refused = run(
+        repo.path(),
+        store.path(),
+        &[
+            "continuity",
+            "export",
+            saved["capsule_id"].as_str().unwrap(),
+            "--out",
+            relative,
+        ],
+    );
+    assert!(!refused.status.success());
+    assert_eq!(std::fs::read(destination).unwrap(), original);
+}
+
+#[test]
 fn wrong_repository_and_corrupt_bundle_are_refused_without_append() {
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();

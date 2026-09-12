@@ -98,15 +98,6 @@ pub fn record_portable_alias(portable_repo_id: &str, checkout: &Path) -> anyhow:
     write_atomic(&alias_path(), &bytes)
 }
 
-pub fn portable_alias_contains(portable_repo_id: &str, checkout: &Path) -> anyhow::Result<bool> {
-    let registry = load_aliases()?;
-    let local_project_id = project_id(checkout);
-    Ok(registry
-        .repositories
-        .get(portable_repo_id)
-        .is_some_and(|locals| locals.contains_key(&local_project_id)))
-}
-
 pub fn resolve_portable_aliases(checkout: &Path) -> anyhow::Result<PortableAliasResolution> {
     let registry = load_aliases()?;
     let local_project_id = project_id(checkout);

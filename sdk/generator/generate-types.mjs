@@ -39,6 +39,9 @@ function pascal(name) {
 /** Map a JSON Schema (draft 2020-12 subset) to a TS type expression. */
 function tsType(schema, indent = "", nameHint = "") {
   if (schema === true || schema === undefined || schema === false) return "unknown";
+  if (Object.prototype.hasOwnProperty.call(schema, "const")) {
+    return JSON.stringify(schema.const);
+  }
   if (schema.anyOf) {
     const parts = schema.anyOf.map((s) => tsType(s, indent, nameHint));
     return parts.join(" | ");

@@ -143,10 +143,10 @@ export interface CommitPayload {
 
 /** Event type `continuity_capsule` — stability: stable-v1 (source: crates/edda-core/src/continuity/mod.rs). */
 export interface ContinuityCapsulePayload {
-  "data_authority": unknown;
+  "data_authority": "data_only";
   "continuity": {
-    "record_version": unknown;
-    "data_authority": unknown;
+    "record_version": 1;
+    "data_authority": "data_only";
     "origin": {
       "capsule_id": string;
       "event_id": string;
@@ -156,7 +156,7 @@ export interface ContinuityCapsulePayload {
     "capsule_sha256": string;
     "capsule_bytes_hex": string;
     "capsule": {
-      "capsule_version": unknown;
+      "capsule_version": 1;
       "capsule_id": string;
       "created_at": string;
       "source": Record<string, unknown>;

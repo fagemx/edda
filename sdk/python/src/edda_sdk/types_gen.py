@@ -212,7 +212,7 @@ ContinuityCapsulePayloadContinuityCapsuleState = TypedDict(
 ContinuityCapsulePayloadContinuityCapsule = TypedDict(
     'ContinuityCapsulePayloadContinuityCapsule',
     {
-        'capsule_version': Required[object],
+        'capsule_version': Required[Literal[1]],
         'capsule_id': Required[str],
         'created_at': Required[str],
         'source': Required[dict[str, object]],
@@ -228,8 +228,8 @@ ContinuityCapsulePayloadContinuityCapsule = TypedDict(
 ContinuityCapsulePayloadContinuity = TypedDict(
     'ContinuityCapsulePayloadContinuity',
     {
-        'record_version': Required[object],
-        'data_authority': Required[object],
+        'record_version': Required[Literal[1]],
+        'data_authority': Required[Literal['data_only']],
         'origin': Required[ContinuityCapsulePayloadContinuityOrigin],
         'capsule_sha256': Required[str],
         'capsule_bytes_hex': Required[str],
@@ -242,7 +242,7 @@ ContinuityCapsulePayloadContinuity = TypedDict(
 ContinuityCapsulePayload = TypedDict(
     'ContinuityCapsulePayload',
     {
-        'data_authority': Required[object],
+        'data_authority': Required[Literal['data_only']],
         'continuity': Required[ContinuityCapsulePayloadContinuity],
     },
     total=False,

@@ -84,6 +84,32 @@ class GeneratedEnumTypesTests(unittest.TestCase):
         self.assertEqual(_literal_args(members[0]), ("local", "shared", "global"))
         self.assertIs(members[1], type(None))
 
+    def test_const_fields_are_exact_literals(self):
+        fields = [
+            (t.ContinuityCapsulePayload, "data_authority", ("data_only",)),
+            (
+                t.ContinuityCapsulePayloadContinuity,
+                "record_version",
+                (1,),
+            ),
+            (
+                t.ContinuityCapsulePayloadContinuity,
+                "data_authority",
+                ("data_only",),
+            ),
+            (
+                t.ContinuityCapsulePayloadContinuityCapsule,
+                "capsule_version",
+                (1,),
+            ),
+        ]
+        for holder, field, expected in fields:
+            origin, inner = _unwrap(holder.__annotations__[field])
+            self.assertIs(origin, Required, f"{holder.__name__}.{field}")
+            self.assertEqual(
+                _literal_args(inner), expected, f"{holder.__name__}.{field}"
+            )
+
     def test_no_enum_field_degrades_to_object(self):
         # Sweep every annotation that is or wraps a Literal: none may also
         # expose a bare object member (the old degradation mode).

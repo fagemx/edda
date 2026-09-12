@@ -273,7 +273,7 @@ fn read_only_verbs_leave_existing_repository_and_store_bytes_unchanged() {
 }
 
 #[test]
-fn traversal_bundle_is_refused_before_append() {
+fn nonportable_dirty_paths_are_refused_before_append() {
     let repo = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     let files = tempfile::tempdir().unwrap();
@@ -311,42 +311,55 @@ fn traversal_bundle_is_refused_before_append() {
     .status
     .success());
 
-    let mut bundle: Value = serde_json::from_slice(&std::fs::read(&bundle_path).unwrap()).unwrap();
-    let capsule_hex = bundle["capsule_bytes_hex"].as_str().unwrap();
-    let mut capsule: Value = serde_json::from_slice(&hex_decode(capsule_hex)).unwrap();
-    capsule["git"]["dirty_paths"] = serde_json::json!(["../outside"]);
-    let capsule_bytes = edda_core::canon::canonical_json_bytes(&capsule).unwrap();
-    bundle["capsule_bytes_hex"] = hex_encode(&capsule_bytes).into();
-    bundle["capsule_sha256"] = edda_core::hash::sha256_hex(&capsule_bytes).into();
-    let mut bundle_content = bundle.clone();
-    bundle_content
-        .as_object_mut()
-        .unwrap()
-        .remove("bundle_sha256");
-    let bundle_bytes = edda_core::canon::canonical_json_bytes(&bundle_content).unwrap();
-    bundle["bundle_sha256"] = edda_core::hash::sha256_hex(&bundle_bytes).into();
-    std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-
+    let original: Value = serde_json::from_slice(&std::fs::read(&bundle_path).unwrap()).unwrap();
     let count = Ledger::open(repo.path()).unwrap().count_events().unwrap();
-    let refused = run(
-        repo.path(),
-        store.path(),
-        &[
-            "continuity",
-            "import",
-            bundle_path.to_str().unwrap(),
-            "--json",
-        ],
-    );
-    assert!(!refused.status.success());
-    let refusal: Value = serde_json::from_slice(&refused.stdout).unwrap();
-    assert_eq!(refusal["status"], "refused");
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("unsafe"), "stderr: {stderr}");
-    assert_eq!(
-        Ledger::open(repo.path()).unwrap().count_events().unwrap(),
-        count
-    );
+    for dirty_path in [
+        "../outside",
+        r"..\outside",
+        r"dir\..\outside",
+        r"dir\file",
+        "C:/outside",
+        "dir//file",
+    ] {
+        let mut bundle = original.clone();
+        let capsule_hex = bundle["capsule_bytes_hex"].as_str().unwrap();
+        let mut capsule: Value = serde_json::from_slice(&hex_decode(capsule_hex)).unwrap();
+        capsule["git"]["dirty_paths"] = serde_json::json!([dirty_path]);
+        let capsule_bytes = edda_core::canon::canonical_json_bytes(&capsule).unwrap();
+        bundle["capsule_bytes_hex"] = hex_encode(&capsule_bytes).into();
+        bundle["capsule_sha256"] = edda_core::hash::sha256_hex(&capsule_bytes).into();
+        let mut bundle_content = bundle.clone();
+        bundle_content
+            .as_object_mut()
+            .unwrap()
+            .remove("bundle_sha256");
+        let bundle_bytes = edda_core::canon::canonical_json_bytes(&bundle_content).unwrap();
+        bundle["bundle_sha256"] = edda_core::hash::sha256_hex(&bundle_bytes).into();
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+
+        let refused = run(
+            repo.path(),
+            store.path(),
+            &[
+                "continuity",
+                "import",
+                bundle_path.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            !refused.status.success(),
+            "dirty path accepted: {dirty_path}"
+        );
+        let refusal: Value = serde_json::from_slice(&refused.stdout).unwrap();
+        assert_eq!(refusal["status"], "refused");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("unsafe"), "{dirty_path}: {stderr}");
+        assert_eq!(
+            Ledger::open(repo.path()).unwrap().count_events().unwrap(),
+            count
+        );
+    }
 }
 
 #[test]
