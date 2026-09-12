@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile, copyFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -113,4 +113,27 @@ test('missing session file prevents recovery without spawning a replacement', as
   await rm(launched.sessionFile);
   await assert.rejects(resumeManaged(f.registry, f.runId), /ENOENT/);
   await writeFile(launched.sessionFile, source);
+});
+
+test('system-style ancestor aliases do not reject an owned session during resume', async (t) => {
+  const f = await fixture(t);
+  const alias = join(f.root, 'ancestor-alias');
+  const target = join(f.root, 'real-ancestor');
+  await mkdir(target);
+  await symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const registry = join(alias, 'registry');
+  let launched;
+  try {
+    launched = await launchManaged(registry, { project: f.project, piEntry: f.entry, prompt: 'HELLO' });
+    await until(async () => (await managedStatus(registry, launched.runId)).initialReceipt?.status === 'settled');
+    await stopManaged(registry, launched.runId);
+    const resumed = await resumeManaged(registry, launched.runId);
+    assert.equal(resumed.sessionId, launched.sessionId);
+    assert.equal(resumed.live, true);
+  } finally {
+    if (launched) {
+      const status = await managedStatus(registry, launched.runId);
+      if (status.live) await stopManaged(registry, launched.runId, { abort: true });
+    }
+  }
 });

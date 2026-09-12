@@ -113,7 +113,7 @@ export async function resumeManaged(root, id) {
     if (!state?.sessionId || !state.sessionFile || !inside(join(dir, 'sessions'), state.sessionFile)) throw new Error('No owned persisted session to resume');
     if (lstatSync(join(dir, 'sessions')).isSymbolicLink()) throw new Error('Managed session directory must not be a link');
     const file = realpathSync(state.sessionFile);
-    if (!inside(join(dir, 'sessions'), file) || !lstatSync(file).isFile()) throw new Error('Session file escaped managed storage');
+    if (!inside(realpathSync(join(dir, 'sessions')), file) || !lstatSync(file).isFile()) throw new Error('Session file escaped managed storage');
     const headerFd = openSync(file, 'r'), buffer = Buffer.alloc(16384);
     let size;
     try { size = readSync(headerFd, buffer, 0, buffer.length, 0); } finally { closeSync(headerFd); }
