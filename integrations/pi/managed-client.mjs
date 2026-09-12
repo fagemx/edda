@@ -68,7 +68,7 @@ async function awaitLaunch(root, id, serviceId) {
 }
 
 export async function launchManaged(root, { runId = randomUUID(), project, piEntry, provider, model, prompt,
-  extensions = [], agentDir, noTools = false, thinking } = {}) {
+  extensions = [], agentDir, noTools = false, noSkills = false, tools, thinking } = {}) {
   runId = validateId(runId); root = resolve(root);
   if (!project) throw new Error('launch requires --project');
   project = realpathSync(resolve(project));
@@ -76,6 +76,7 @@ export async function launchManaged(root, { runId = randomUUID(), project, piEnt
   if (prompt !== undefined && (typeof prompt !== 'string' || !prompt.trim() || Buffer.byteLength(prompt) > 16384)) throw new Error('Initial prompt must contain 1..16384 UTF-8 bytes');
   for (const value of [provider, model]) if (value !== undefined && (typeof value !== 'string' || !value.trim() || value.length > 300)) throw new Error('Invalid provider/model');
   if (thinking !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(thinking)) throw new Error('Invalid thinking level');
+  if (tools !== undefined && (noTools || !Array.isArray(tools) || !tools.length || tools.length > 16 || tools.some((name) => typeof name !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(name)))) throw new Error('Select explicit tool names or noTools, not both');
   if (!Array.isArray(extensions) || extensions.length > 8) throw new Error('Select at most eight trusted extra extensions');
   extensions = extensions.map((path) => {
     const file = realpathSync(resolve(path));
@@ -85,7 +86,7 @@ export async function launchManaged(root, { runId = randomUUID(), project, piEnt
   if (agentDir) agentDir = realpathSync(resolve(agentDir));
   const pi = findPiEntry(piEntry);
   const inputs = { project, pi, provider: provider || null, model: model || null, prompt: prompt ?? null,
-    extensions, agentDir: agentDir || null, noTools: Boolean(noTools), thinking: thinking || null };
+    extensions, agentDir: agentDir || null, noTools: Boolean(noTools), thinking: thinking || null, ...(noSkills ? { noSkills: true } : {}), ...(tools ? { tools } : {}) };
   const dir = managedDir(root, runId, true), previous = readJson(join(dir, 'config.json'));
   if (previous) {
     if (previous.inputsDigest !== digest(JSON.stringify(inputs))) throw new Error('Run ID already has different launch inputs');

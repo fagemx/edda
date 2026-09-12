@@ -1,6 +1,6 @@
 // Synthetic RPC subprocess for lifecycle boundary tests; actual-Pi smoke is separate.
 import { appendFileSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 const args = process.argv.slice(2), option = (key) => args[args.indexOf(key) + 1];
@@ -26,10 +26,33 @@ channel = await startChannel({ root, sessionId: id, cwd: process.cwd(),
     channel.event('agent_start'); channel.messageStarted(text); message('user', text);
     output({ type: 'agent_start' });
     if (text.endsWith('BUSY')) return;
-    message('assistant', 'FIXTURE_REPLY');
-    channel.event('assistant_end', { stopReason: 'stop', text: 'FIXTURE_REPLY' }); channel.settled();
+    const extract = (marker) => JSON.parse(text.slice(text.indexOf(marker) + marker.length).trimStart().split('\n')[0]);
+    let reply = 'FIXTURE_REPLY';
+    if (text.includes('[EDDA_SUPERVISOR_PACKET]')) {
+      const packet = extract('[EDDA_SUPERVISOR_PACKET]');
+      const shim = args.find((arg) => arg.endsWith('manager-extension.mjs'));
+      writeFileSync(join(dirname(shim), 'decisions', `${packet.id}.json`), JSON.stringify({ packetId: packet.id, taskId: packet.task.id,
+        action: packet.authority.instruction.includes('TEST_INVALID_PROPOSAL') ? 'delete_all' : 'continue', reason: 'Existing authorization covers this fixture' }));
+    } else if (text.includes('[EDDA_SUPERVISOR_TASK]')) {
+      const payload = extract('[EDDA_SUPERVISOR_TASK]');
+      writeFileSync(join(process.cwd(), 'assigned.json'), JSON.stringify(payload));
+      if (payload.task.title.includes('ASK')) reply = 'Please confirm the already-authorized fixture scope.';
+      else finish(payload.project, payload.task.id);
+    } else if (text.includes('[EDDA_SUPERVISOR_CONTINUE]')) {
+      const assigned = JSON.parse(readFileSync(join(process.cwd(), 'assigned.json'), 'utf8'));
+      finish(assigned.project, assigned.task.id);
+    }
+    message('assistant', reply);
+    channel.event('assistant_end', { stopReason: 'stop', text: reply }); channel.settled();
     output({ type: 'agent_settled' });
   } });
+function finish(project, id) {
+  const path = join(project, `task-${id}.json`), task = JSON.parse(readFileSync(path, 'utf8'));
+  if (task.status !== 'done') {
+    writeFileSync(join(process.cwd(), 'result.txt'), 'DONE\n', { flag: 'wx' });
+    task.status = 'done'; task.receipt = 'Fixture complete'; writeFileSync(path, JSON.stringify(task));
+  }
+}
 let buffer = '';
 process.stdin.on('data', (chunk) => {
   buffer += chunk.toString();
