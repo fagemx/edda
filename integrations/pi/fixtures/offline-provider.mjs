@@ -1,5 +1,6 @@
 // Test fixture only: real Pi runtime, deterministic response, zero network/model spend.
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/compat';
+import { largeReport } from './large-handoff.mjs';
 
 export default function (pi) {
   pi.registerProvider('edda-offline-test', {
@@ -21,13 +22,19 @@ export default function (pi) {
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
       if (process.env.EDDA_PI_SMOKE_HANDOFF === '1') {
         const last = context.messages.at(-1);
-        if (last?.role === 'toolResult' && last.toolName === 'edda_report') {
+        const large = process.env.EDDA_PI_SMOKE_LARGE === '1';
+        if (!large && last?.role === 'toolResult' && last.toolName === 'edda_report') {
           message.content = [{ type: 'text', text: `OFFLINE_ACK: ${text}; handoff report recorded, not independently verified.` }];
         } else {
           let name = 'edda_handoff';
           let args = {};
           if (last?.role === 'toolResult' && last.toolName === 'edda_handoff') {
             const card = JSON.parse(last.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n'));
+            if (large && card.status === 'needs_context') {
+              args = { budgetBytes: 32768 };
+            } else if (large && card.report) {
+              name = null;
+            } else {
             const completed = text?.endsWith('CHANNEL_SMOKE_TWO');
             name = 'edda_report';
             args = { manifestRevision: card.manifestRevision, reportedState: completed ? 'completed' : 'waiting_decision',
@@ -36,9 +43,13 @@ export default function (pi) {
               evidence: completed ? [{ uri: 'fixture://result', revision: 'v1' }] : [],
               ...(completed ? {} : { decision: { question: 'May the synthetic fixture continue?', requestedAction: 'fixture_continue',
                 resource: 'offline-only', recommendation: 'Continue under the fixture scope' } }) };
+            if (large) args = largeReport(card.manifestRevision, completed);
+            }
           }
-          message.content = [{ type: 'toolCall', id: `handoff-${Date.now()}`, name, arguments: args }];
-          message.stopReason = 'toolUse';
+          if (name) {
+            message.content = [{ type: 'toolCall', id: `handoff-${Date.now()}`, name, arguments: args }];
+            message.stopReason = 'toolUse';
+          }
         }
       }
       setTimeout(() => {

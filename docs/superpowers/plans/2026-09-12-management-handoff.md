@@ -49,3 +49,8 @@ Pi-to-Codex wake routing are explicitly outside this MVP.
 
 Task #180 carries execution/review receipts. Worktree remains
 `C:/ai_agent/edda-worktrees/pi-session-channel`; no Cargo build lane is needed.
+
+Independent Round 5 corrections: expose the already-bounded budget on the Pi
+read tool (verified with actual Pi needs_context -> larger explicit read), and
+keep epochs monotonic through A -> B -> A manifest replacement. Both changes
+retain historical report deduplication and unverified acceptance semantics.

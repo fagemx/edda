@@ -10,9 +10,11 @@ export function createHandoff(dir, sessionId, instanceId) {
   let data = readJson(path);
   if (data && (data.version !== 1 || data.sessionId !== sessionId)) throw problem('Unsupported handoff storage identity/version');
   if (data) {
+    data.preparedEpoch ??= 0;
     validateId(data.instanceId);
     if (digest(JSON.stringify(normalizeManifest(data.manifest))) !== data.manifestRevision ||
       !Number.isSafeInteger(data.workEpoch) || data.workEpoch < 0 ||
+      !Number.isSafeInteger(data.preparedEpoch) || data.preparedEpoch < 0 || data.preparedEpoch > data.workEpoch ||
       !Number.isSafeInteger(data.settledEpoch) || data.settledEpoch < 0 || data.settledEpoch > data.workEpoch ||
       !data.reportIds || typeof data.reportIds !== 'object' || Array.isArray(data.reportIds)) throw problem('Invalid persisted handoff state');
     if (data.latestReport) {
@@ -31,8 +33,10 @@ export function createHandoff(dir, sessionId, instanceId) {
       if (current() && data.manifestRevision === revision) return;
       if (data && expectedRevision !== data.manifestRevision) throw problem('Expected manifest revision does not match; inspect before updating or rebinding', 409);
       if (!data && expectedRevision !== null) throw problem('First manifest requires expectedRevision=null', 409);
+      const epoch = current() ? data.workEpoch : 0;
       commit({ version: 1, sessionId, instanceId, manifestRevision: revision, manifest,
-        workEpoch: 0, settledEpoch: 0, latestReport: null, reportIds: data?.reportIds || {}, preparedAt: now() });
+        workEpoch: epoch, preparedEpoch: epoch, settledEpoch: epoch,
+        latestReport: null, reportIds: data?.reportIds || {}, preparedAt: now() });
     },
     event(name) {
       if (!current()) return;
@@ -67,7 +71,7 @@ export function createHandoff(dir, sessionId, instanceId) {
         previousInstanceId: data.instanceId }, budget);
       const report = data.latestReport?.workEpoch === data.workEpoch ? data.latestReport : null;
       let attention = 'not_started';
-      if (data.workEpoch) {
+      if (data.workEpoch > data.preparedEpoch) {
         if (runtime.state !== 'idle' && runtime.state !== 'stopped') attention = runtime.state === 'waiting_user' ? 'waiting_user' : 'running';
         else if (!report || report.reportedState === 'working') attention = 'missing_report';
         else attention = { waiting_decision: 'decision_required', waiting_dependency: 'dependency_wait',

@@ -191,6 +191,9 @@ cryptographic authorization signature.
 Newly loaded Pi extensions expose:
 
 - `edda_handoff`: read the prepared brief and its current manifest revision.
+- If the tool returns `needs_context`, call `edda_handoff` with
+  `budgetBytes: 32768` (or another explicit 512..32768-byte budget). The tool
+  validates the bound; it never silently increases the budget or truncates scope.
 - `edda_report`: report a milestone or stopping reason against that revision.
 
 Only prepared sessions receive a short context reminder, once per manifest
@@ -210,6 +213,9 @@ without a current stopping report (or only says `working`), attention is
 `missing_report`. Waiting decisions/dependencies, failed/paused reports and
 `completion_pending` are separately visible. No transcript keyword inference is
 used; the reports remain worker claims, and `acceptance` remains `unverified`.
+Work epochs remain monotonic within an instance across manifest replacement,
+including restoring earlier manifest content; historical report IDs cannot
+become eligible for a later run merely because the content digest matches again.
 
 `brief` composes the full required manifest + latest current report + observed
 runtime + local supervisor enrollment scope, if present. It never reads a
@@ -275,6 +281,7 @@ node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/p
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --reject
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --supervise
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff
+node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff-budget
 ```
 
 The smoke test starts an isolated actual Pi with only this extension and a

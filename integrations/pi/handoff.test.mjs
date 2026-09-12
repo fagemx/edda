@@ -155,3 +155,21 @@ test('CLI prepares and reads context; insufficient budget is nonzero with no tru
     return true;
   });
 });
+
+test('A to B to A manifest replacement never revives an earlier work epoch', async (t) => {
+  const { channel, prepare, context } = await fixture(t);
+  const a = await prepare(manifest());
+  channel.event('agent_start');
+  const id = randomUUID();
+  const value = report(a.manifestRevision);
+  const old = channel.reportHandoff(id, value);
+  channel.settled();
+  const b = await prepare({ ...manifest(), goal: 'Different bounded goal' }, a.manifestRevision);
+  const again = await prepare(manifest(), b.manifestRevision);
+  assert.equal(again.attention, 'not_started');
+  assert.equal(again.manifestRevision, a.manifestRevision);
+  channel.event('agent_start');
+  assert.throws(() => channel.reportHandoff(id, value), /previous instance\/work epoch/);
+  assert.ok((await context()).workEpoch > old.workEpoch);
+  assert.equal((await context()).report, null);
+});

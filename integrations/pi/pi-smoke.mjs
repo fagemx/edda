@@ -10,11 +10,13 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { listSessions, requestSession, getReceipt, prepareHandoff, managementContext } from './client.mjs';
 import { enroll, watch, reply } from './supervision.mjs';
+import { largeManifest } from './fixtures/large-handoff.mjs';
 
 const entry = process.argv[2];
 const reject = process.argv.includes('--reject');
 const supervise = process.argv.includes('--supervise');
-const handoff = process.argv.includes('--handoff');
+const large = process.argv.includes('--handoff-budget');
+const handoff = process.argv.includes('--handoff') || large;
 if (handoff && (supervise || reject)) throw new Error('Run --handoff separately from the other smoke modes');
 if (!entry) throw new Error('Supply the installed Pi JavaScript CLI entry path');
 const root = await mkdtemp(join(tmpdir(), 'edda-pi-smoke-'));
@@ -28,7 +30,8 @@ const child = spawn(process.execPath, [resolve(entry), '--mode', 'rpc', '--no-se
   '--provider', 'edda-offline-test', '--model', 'echo'], {
   cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
   env: { ...process.env, PI_CODING_AGENT_DIR: join(root, 'agent'), EDDA_PI_CHANNEL_DIR: registry,
-    EDDA_PI_SMOKE_REJECT: reject ? '1' : '0', EDDA_PI_SMOKE_HANDOFF: handoff ? '1' : '0' },
+    EDDA_PI_SMOKE_REJECT: reject ? '1' : '0', EDDA_PI_SMOKE_HANDOFF: handoff ? '1' : '0',
+    EDDA_PI_SMOKE_LARGE: large ? '1' : '0' },
 });
 let stderr = '';
 let buffered = '';
@@ -61,7 +64,7 @@ try {
   child.stdin.write(JSON.stringify({ id: 'initial', type: 'get_state' }) + '\n');
   const session = await until(async () => (await listSessions(registry)).find((row) => row.live), 'registration');
   if (handoff) {
-    const manifest = JSON.parse(await readFile(new URL('./fixtures/management-manifest.json', import.meta.url), 'utf8'));
+    const manifest = large ? largeManifest() : JSON.parse(await readFile(new URL('./fixtures/management-manifest.json', import.meta.url), 'utf8'));
     await prepareHandoff(registry, session.sessionId, manifest);
   }
   const firstId = randomUUID();
@@ -83,9 +86,9 @@ try {
   } else {
   await until(async () => (await getReceipt(registry, session.sessionId, firstId)).status === 'settled', 'first settlement');
   if (handoff) {
-    const view = await managementContext(registry, session.sessionId);
+    const view = await managementContext(registry, session.sessionId, large ? 32768 : 16384);
     assert.equal(view.handoff.attention, 'decision_required');
-    assert.equal(view.handoff.report.decision.question, 'May the synthetic fixture continue?');
+    assert.equal(view.handoff.report.decision.question, large ? 'q'.repeat(1000) : 'May the synthetic fixture continue?');
   }
   let secondId = randomUUID();
   if (supervise) {
@@ -110,16 +113,22 @@ try {
   assert.equal(final.sessionId, session.sessionId);
   assert.equal(final.state, 'idle');
   if (handoff) {
-    const view = await managementContext(registry, session.sessionId);
+    const view = await managementContext(registry, session.sessionId, large ? 32768 : 16384);
     assert.equal(view.handoff.attention, 'completion_pending');
     assert.equal(view.handoff.acceptance, 'unverified');
     assert.ok(events.some((e) => e.type === 'tool_execution_end' && e.toolName === 'edda_report' && !e.isError));
+    if (large) {
+      const reads = events.filter((e) => e.type === 'tool_execution_end' && e.toolName === 'edda_handoff' && !e.isError);
+      assert.ok(reads.some((e) => e.result?.details?.status === 'needs_context'));
+      assert.ok(reads.some((e) => e.result?.details?.status === 'ready'));
+      assert.ok(view.handoff.serializedBytes > 16384 && view.handoff.serializedBytes <= 32768);
+    }
   }
   const conversation = await requestSession(registry, session.sessionId, '/conversation?limit=20');
   assert.ok(conversation.entries.some((e) => e.role === 'assistant' && e.text.includes(supervise ? 'OFFLINE_TASK_STARTED' : 'CHANNEL_SMOKE_TWO')));
   console.log(JSON.stringify({ passed: true, actualPi: true, sessionId: session.sessionId,
     messagesSettled: 2, sameSession: true, bidirectional: true, supervisedQuestionAnswer: supervise,
-    structuredHandoff: handoff, provider: 'offline fixture', paidCalls: 0 }, null, 2));
+    structuredHandoff: handoff, explicitBudgetRecovery: large, provider: 'offline fixture', paidCalls: 0 }, null, 2));
   }
 } finally {
   // Only the subprocess created above is stopped; no running user session is touched.

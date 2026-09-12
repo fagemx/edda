@@ -56,10 +56,10 @@ export default function eddaSessionChannel(pi) {
   });
   pi.registerTool({ name: 'edda_handoff', label: 'Read management handoff',
     description: 'Read the prepared management brief, current manifest revision, and latest report. No conversation replay or new authorization.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
-    async execute() {
+    parameters: { type: 'object', properties: { budgetBytes: { type: 'integer', minimum: 512, maximum: 32768 } }, additionalProperties: false },
+    async execute(_toolCallId, params = {}) {
       if (!channel || failed) throw new Error('Edda channel unavailable');
-      const card = channel.handoffContext();
+      const card = channel.handoffContext(params.budgetBytes ?? 16384);
       return { content: [{ type: 'text', text: JSON.stringify(card) }], details: { status: card.status } };
     } });
   pi.registerTool({ name: 'edda_report', label: 'Report management checkpoint',
