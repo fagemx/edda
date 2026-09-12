@@ -43,7 +43,7 @@ Carry modes:
 | Path | Reason |
 |---|---|
 | `crates/edda-ledger/src/control.rs` | compiled control manifest and effect request/result |
-| `crates/edda-ledger/src/control_authority.rs` | sealed owner-only authority/merge-capability provisioning |
+| `crates/edda-ledger/src/control_authority.rs` | sealed owner-only authority/merge-capability provisioning. One local adaptation: the Unix `write_private_new` tail uses the block value instead of `return` (`clippy::needless_return` under exact-head CI) |
 | `crates/edda-ledger/src/control_events.rs` | control event append helpers |
 | `crates/edda-ledger/src/control_projection.rs` | control_manifest/intent/receipt projection |
 | `crates/edda-ledger/src/control_projection_targets.rs` | projection target checks |

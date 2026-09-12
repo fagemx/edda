@@ -786,7 +786,7 @@ fn write_private_new(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
                 path.display()
             )
         })?;
-        return write_secret_and_cleanup(file, path, bytes);
+        write_secret_and_cleanup(file, path, bytes)
     }
     #[cfg(windows)]
     {
