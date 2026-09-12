@@ -86,8 +86,89 @@ that evidence rather than creating another run ID on a timeout. A crash before
 the initial prompt is sent can leave an unknown initial intent; recovery never
 blindly replays it. Newly created empty sessions may not yet have a persisted file.
 
-This is the process/event entry point for management. It does not autonomously
-approve work, poll a manager model, or wake the Codex desktop conversation.
+This is the process/event entry point for management. The optional supervisor below
+handles bounded event decisions; neither component wakes the Codex desktop conversation.
+
+## Supervise one Edda task pair
+
+The first supervisor policy covers one Edda project and one or two explicitly
+selected existing tasks. Program code dispatches ready assigned work; a manager
+Pi is invoked only for a current stopping event or changed task/dependency evidence.
+It can read selected task/brief facts and propose continue, wait, escalate or observe.
+It has only those two custom tools, no builtin shell/file execution tools or unrelated
+skills. The host constructs continuation instructions from the original operator
+scope, not arbitrary model-written instructions.
+
+Create a configuration such as this, replacing the task IDs and worker directories
+with already-assigned tasks and their actual worktrees:
+
+```json
+{
+  "version": 1,
+  "project": "C:/ai_agent/edda",
+  "authority": {
+    "instruction": "Complete these assigned tasks within their original briefs and exclusions. The normal implementation, review and CI steps are already approved; do not ask again just to start the same scope. Preserve all existing acceptance gates.",
+    "source": { "uri": "operator://existing-task-approval", "revision": "approval-reference" }
+  },
+  "tasks": [
+    { "id": "17", "cwd": "C:/ai_agent/edda-worktrees/task-17" },
+    { "id": "18", "cwd": "C:/ai_agent/edda-worktrees/task-18" }
+  ],
+  "worker": { "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "thinking": "low" },
+  "manager": { "provider": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "thinking": "low" },
+  "maxDecisions": 10,
+  "maxResponses": 10
+}
+```
+
+The source reference must identify the actual prior approval; example text is not
+itself a grant. Select a worker model appropriate to the task, including any existing
+repository reviewer-model requirement. Profiles also accept `piEntry`, `agentDir`
+and explicitly trusted extensions. The supervisor does not create worktrees: prepare
+them for repository work first. Workers must belong to the selected repository and
+have distinct worktrees; non-Git fixture directories stay within the selected project.
+
+```powershell
+node integrations/pi/cli.mjs supervisor-start --config supervisor.json
+node integrations/pi/cli.mjs supervisor-status SUPERVISOR_ID
+node integrations/pi/cli.mjs supervisor-stop SUPERVISOR_ID
+node integrations/pi/cli.mjs supervisor-start --config supervisor.json --id SUPERVISOR_ID
+```
+
+Keep the printed supervisor ID or put it in the JSON `id` field. Restarting the same
+configuration/ID reconnects to durable task/run/packet/receipt records. The service
+survives calling-client exit. Status shows selected task states, worker run/session
+identities, manager decision and response attempt counts, and bounded recent cases.
+Counters are not a dollar budget or proof of delivery; inspect individual receipts.
+
+New worker run identities use repository-common/project identity plus the immutable
+task-creation event. Dispatch and response intents precede effects. Existing managed
+run IDs can be supplied as a task's `runId` to attach explicitly; an existing running
+task with no known binding is reported as owner-elsewhere rather than duplicated.
+The supervisor never creates new Edda tasks or marks them accepted; workers retain
+their original task start/done/fail workflow and review/CI/merge responsibilities.
+
+Readiness and immediate prerequisite facts come from the existing Rust task CLI.
+The bounded packet reads at most eight selected/direct-prerequisite task sources.
+Full receipt/failure/evidence digests detect changes beyond displayed excerpts.
+Unchanged state creates no new model invocation. Waiting decisions are revisited
+when relevant source evidence changes; unknown delivery is exposed and never blindly
+resent. Busy workers are not interrupted. Invalid proposals and exhausted manager
+attempt limits stop new manager effects, not the original worker's execution.
+
+Stop writes a durable pause marker and ends new dispatch/response decisions while
+preserving workers, the manager session and all evidence. An effect already handed
+off cannot be recalled. Source/observation failure also leaves workers running.
+When all selected task receipts are done, the service records `tasks_done` and exits
+its polling loop; same-ID start returns that terminal result rather than searching
+for new work. This is not independent acceptance or LGTM. Idle managed Pi processes
+remain inspectable and can be stopped with `run-stop` when no longer needed.
+
+Escalations are local status/evidence (`operatorNotified: false`), not proof of a
+desktop or phone alert. This slice has no universal workflow language, automatic
+task decomposition, strong-model fallback, or arbitrary model-selected action engine.
+The configuration is local trusted operator input; this is not a security sandbox
+between processes running under the same OS user.
 
 ## Start here: adopt an existing session
 
@@ -573,6 +654,7 @@ node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/p
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff-budget
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --inbox
 node integrations/pi/managed-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+node integrations/pi/supervisor-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js C:/Users/fagem/.cargo/bin/edda.exe
 node integrations/pi/dependency-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js C:/Users/fagem/.cargo/bin/edda.exe
 ```
 
@@ -593,6 +675,14 @@ verifies one file only in its temporary project, records observed usage, and cle
 up owned processes. Failed smoke evidence is preserved in its printed temporary
 directory. The real model test is separate from deterministic CI and is not a model
 quality benchmark.
+
+The supervisor smoke creates a temporary real Edda project and two task/worker
+directories. Actual Pi runtimes demonstrate automatic question/response, dependent
+dispatch, service restart without duplicate initial work, and no model calls on
+unchanged terminal state. The default manager and workers use an offline provider.
+An explicitly authorized `--live-manager PROVIDER MODEL` trial uses that real model
+only for the management decision, retaining deterministic workers so failures can
+be attributed. Its reported usage is separate from CI and is not a general benchmark.
 
 ## Remaining usability/product work
 
