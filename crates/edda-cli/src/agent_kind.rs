@@ -216,11 +216,19 @@ pub(crate) struct LauncherOptions {
     /// `{transcript_dir}/{phase_id}-{session_id_prefix}.jsonl`.
     pub transcript_dir: Option<PathBuf>,
     /// Persist codex's session→thread map in the per-user edda store so a
-    /// repeated `--session-id` resumes across invocations. Dispatch-scoped
-    /// (GH-535 round 1): `edda dispatch` sets this, `edda conduct` must not
-    /// — conduct session ids are deterministic per plan/phase/attempt and
-    /// its behavior must stay byte-identical with the pre-persistence path.
+    /// repeated `--session-id` resumes across invocations. Dispatch and
+    /// product review opt in; conduct must not because its session ids are
+    /// deterministic per plan/phase/attempt.
     pub persistent_codex_threads: bool,
+    /// Require the codex mapping store to be readable before launch and every
+    /// mapping/tombstone update to persist before success is returned. Product
+    /// review enables this for first and resumed rounds; dispatch/conduct do not.
+    pub require_codex_persistence: bool,
+    /// Require an existing persisted codex session→thread binding and refuse
+    /// a missing or rejected binding without starting a replacement thread.
+    /// Product review enables this only for `--resume`; ordinary dispatch and
+    /// conduct remain best-effort/non-persistent respectively.
+    pub require_codex_thread: bool,
     /// pi `--session-dir` (GH-574). Other backends manage their own session
     /// storage; dispatch rejects the flag for them before reaching here.
     pub session_dir: Option<PathBuf>,
@@ -263,6 +271,12 @@ pub(crate) fn build_launcher(
             let mut launcher = CodexLauncher::new().with_verbose(options.verbose);
             if options.persistent_codex_threads {
                 launcher = launcher.with_persistent_threads();
+            }
+            if options.require_codex_persistence {
+                launcher = launcher.with_required_persistence();
+            }
+            if options.require_codex_thread {
+                launcher = launcher.with_required_thread();
             }
             launcher.verify_available()?;
             Box::new(launcher)
@@ -315,6 +329,8 @@ mod tests {
                     verbose: false,
                     transcript_dir: None,
                     persistent_codex_threads: false,
+                    require_codex_persistence: false,
+                    require_codex_thread: false,
                     session_dir: None,
                     resume: false,
                 },

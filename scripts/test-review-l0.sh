@@ -11,6 +11,9 @@
 #   clean fixture — the diff adds a valid good.sh → every run row is PASS
 #     (N.A. / 需升級 rows are the runner's own contract, never FAIL/ERROR),
 #     runner exit 0;
+#   U3 mutations — exact line present, missing-only (including an Issue-looking
+#     stderr warning), no PR, body-read failure, and missing plus a real R3
+#     syntax failure prove only the exact-line convention is nonblocking;
 #   pre-push fixture (GH-922) — the dirty fixture run with NO PR number:
 #     U1/C5/R3 read the runner's file list and still run, R3 FAILs, while
 #     U2/U3/U6 stay N.A.(needs PR number);
@@ -55,7 +58,17 @@ case "$1 $2" in
   "pr view")
     case "$*" in
       *baseRefOid*) cat "$GH_STUB_DIR/base-sha" ;;
-      *) printf 'Issue: #1\noffline fixture PR body\n' ;;
+      *)
+        if [ -f "$GH_STUB_DIR/body-read-stderr" ]; then
+          cat "$GH_STUB_DIR/body-read-stderr" >&2
+        fi
+        if [ -f "$GH_STUB_DIR/body-read-exit" ]; then
+          # Simulate a transport that emitted partial body bytes before its
+          # nonzero status. Nonempty stdout is not authority for success.
+          cat "$GH_STUB_DIR/pr-body"
+          exit "$(cat "$GH_STUB_DIR/body-read-exit")"
+        fi
+        cat "$GH_STUB_DIR/pr-body" ;;
     esac ;;
   "pr diff")
     case "$*" in
@@ -74,8 +87,27 @@ esac
 STUB
 chmod +x "$TMP/bin/gh" "$TMP/bin/edda"
 
+set_pr_body() { # <body> — successful read, no stderr
+  rm -f "$TMP/body-read-exit" "$TMP/body-read-stderr"
+  printf '%s\n' "$1" > "$TMP/pr-body"
+}
+
+set_pr_body_with_stderr() { # <body> <stderr> — successful read
+  set_pr_body "$1"
+  printf '%s\n' "$2" > "$TMP/body-read-stderr"
+}
+
+set_body_read_failure() { # <exit> <stderr>
+  rm -f "$TMP/body-read-stderr"
+  printf '%s\n' "$1" > "$TMP/body-read-exit"
+  printf '%s\n' "$2" > "$TMP/body-read-stderr"
+}
+
+set_pr_body 'Issue: #1
+offline fixture PR body'
+
 # ---- fixture repo -----------------------------------------------------------
-# <mode: dirty|clean|cjk> — base commit carries the repo-shaped stubs the
+# <mode: dirty|syntax|clean|cjk> — base commit carries the repo-shaped stubs the
 # blocks need (lint / wiring scripts, a Cargo.toml with a version line); the
 # branch commit adds the fixture script that the rules then judge. Each call
 # builds a fresh directory: re-using one would re-point its origin/main at
@@ -125,6 +157,12 @@ STUB
     } > "$fix/bad.sh"
     echo bad.sh > "$TMP/file-list"
     msg="feat(fleet): dirty fixture change"
+  elif [ "$mode" = syntax ]; then
+    # A real R3 failure without an R1 candidate, used to prove U3's advisory
+    # result does not suppress another rule's aggregate failure.
+    printf '#!/bin/sh\nif then\n' > "$fix/syntax.sh"
+    echo syntax.sh > "$TMP/file-list"
+    msg="fix(fleet): syntax fixture change"
   elif [ "$mode" = cjk ]; then
     # GH-922: one syntactically valid line whose Chinese comment pushes the
     # R1 evidence well past the 160-byte cell cap (98 CJK chars = 294 bytes).
@@ -206,6 +244,77 @@ done
 echo "clean fixture: every routed rule printed a row — OK"
 
 echo "clean fixture: all rows PASS/N.A./需升級, runner exit 0 — OK"
+
+# ---- 2a. U3 policy mutations (delivery-first V3) ---------------------------
+# One clean code-risk fixture is reused while only the PR body/read outcome is
+# mutated. This isolates U3 from the unchanged rules and keeps every case
+# offline.
+make_fixture clean
+
+set_pr_body 'Issue: #1
+offline fixture PR body'
+rc=0
+run_l0 "$FIXDIR" "$SPEC" "$TMP/u3-present.out" 17 || rc=$?
+[ "$rc" -eq 0 ] || fail "U3 present: expected exit 0, got $rc: $(cat "$TMP/u3-present.out")"
+grep -Fq '| U3 | any | P2 | PASS' "$TMP/u3-present.out" \
+  || fail "U3 present: exact line was not observed as PASS: $(grep -F '| U3 |' "$TMP/u3-present.out")"
+echo "U3 present fixture: exact Issue line observed, runner exit 0 — OK"
+
+# The stderr text deliberately looks like an exact line. Only gh stdout is PR
+# body data, so this remains missing-only and advisory rather than false PASS.
+set_pr_body_with_stderr 'Closes #1
+no exact convention line' 'Issue: #999 (simulated gh warning on stderr)'
+rc=0
+run_l0 "$FIXDIR" "$SPEC" "$TMP/u3-missing.out" 17 || rc=$?
+[ "$rc" -eq 0 ] || fail "U3 missing-only: expected exit 0, got $rc: $(cat "$TMP/u3-missing.out")"
+grep -F '| U3 | any | P2 |' "$TMP/u3-missing.out" \
+  | grep -Fq 'N.A.(non-blocking convention)' \
+  || fail "U3 missing-only: no visible advisory row: $(grep -F '| U3 |' "$TMP/u3-missing.out")"
+grep -F '| U3 |' "$TMP/u3-missing.out" | grep -Fq 'no exact Issue:/Issues: line' \
+  || fail "U3 missing-only: advisory lacks explicit missing-line evidence"
+grep -Fq '| U3 | any | P2 | PASS' "$TMP/u3-missing.out" \
+  && fail "U3 missing-only: stderr masqueraded as a present Issue line"
+echo "U3 missing-only fixture: visible P2 advisory, stderr cannot masquerade, runner exit 0 — OK"
+
+rc=0
+run_l0 "$FIXDIR" "$SPEC" "$TMP/u3-no-pr.out" || rc=$?
+[ "$rc" -eq 0 ] || fail "U3 no-PR: expected exit 0, got $rc: $(cat "$TMP/u3-no-pr.out")"
+grep -F '| U3 | any | P2 |' "$TMP/u3-no-pr.out" \
+  | grep -Fq 'N.A.(needs PR number)' \
+  || fail "U3 no-PR: needs-PR result changed: $(grep -F '| U3 |' "$TMP/u3-no-pr.out")"
+echo "U3 no-PR fixture: needs-PR N.A. unchanged, runner exit 0 — OK"
+
+# Exit 41 is intentionally outside the runner's generic 2/127/128 refusal set:
+# the U3 branch itself must preserve gh's status and classify the failed read,
+# even when partial stdout and stderr both look like present Issue lines.
+set_pr_body 'Issue: #42
+partial body from a failed read'
+set_body_read_failure 41 'Issue: #999 (simulated failed gh read on stderr)'
+rc=0
+run_l0 "$FIXDIR" "$SPEC" "$TMP/u3-read-failure.out" 17 || rc=$?
+[ "$rc" -eq 2 ] || fail "U3 body-read failure: expected aggregate exit 2, got $rc: $(cat "$TMP/u3-read-failure.out")"
+grep -Fq '| U3 | any | P2 | ERROR 41 |' "$TMP/u3-read-failure.out" \
+  || fail "U3 body-read failure: gh exit was not preserved as ERROR: $(grep -F '| U3 |' "$TMP/u3-read-failure.out")"
+grep -Fq '| U3 | any | P2 | PASS' "$TMP/u3-read-failure.out" \
+  && fail "U3 body-read failure: stderr/nonzero masqueraded as a present line"
+echo "U3 body-read failure fixture: ERROR 41 and aggregate exit 2 preserved — OK"
+
+set_pr_body 'Closes #1
+no exact convention line'
+make_fixture syntax
+rc=0
+run_l0 "$FIXDIR" "$SPEC" "$TMP/u3-plus-r3.out" 17 || rc=$?
+[ "$rc" -eq 1 ] || fail "U3 plus R3: expected aggregate exit 1, got $rc: $(cat "$TMP/u3-plus-r3.out")"
+grep -F '| U3 | any | P2 |' "$TMP/u3-plus-r3.out" \
+  | grep -Fq 'N.A.(non-blocking convention)' \
+  || fail "U3 plus R3: missing line did not remain advisory"
+grep -Fq '| R3 | code-risk | P0 | FAIL' "$TMP/u3-plus-r3.out" \
+  || fail "U3 plus R3: real syntax failure was not blocking"
+echo "U3 plus R3 fixture: advisory retained, R3 FAIL and aggregate exit 1 preserved — OK"
+
+# Restore the ordinary successful body for all historical fixtures below.
+set_pr_body 'Issue: #1
+offline fixture PR body'
 
 # ---- 3. unmarked block: `UNMARKED <first line>`, exit 3 ---------------------
 # Cut the U1 marker pair out of a temp copy of the spec; the U1 fence then

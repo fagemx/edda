@@ -1,205 +1,345 @@
 ---
 name: coord-orchestrate
-description: Use when coordinating two or more sessions on parallel implementation work as the controller — assigning bundles, briefing workers and a verifier, adjudicating mid-flight, and closing with dual review
+description: Route delivery work, and coordinate two or more parallel implementing sessions when a real formation is warranted
 ---
 
 # Coordination Orchestrate
 
-You are the controller of a multi-session formation. The other coord skills
-teach a session to be a good peer (coord-sync/request/handoff/review); this
-one teaches the seat that runs the whole formation. The companion prose is
-the "Coordination discipline" section of edda's multi-agent guide.
+<!-- delivery-flow/1 -->
 
-This policy applies when this skill is invoked. It guides the coordinating
-session; it is not an Edda runtime rule imposed on every project.
+This is the generic authored delivery flow. A tracked or installed host copy is
+a projection, not a second procedure. Host and repository instructions retain
+precedence for safety, verification, review and merge authority. This skill is
+caller guidance; it adds no Edda scheduler, lock, approval service or runtime
+role enforcement.
 
-## Layers — never mixed
+## Choose the entry before forming a fleet
+
+Use the first matching route.
+
+| Situation | Next action | Do not add |
+|---|---|---|
+| Assigned worker or reviewer, including a resumed session | Read `edda task show <id>`, its reachable brief, prior results and actual source; perform only that role | new planning, neighbouring tasks or a formation |
+| Controller resuming an existing plan | Recover the rail owner, active map, task JSON, dispatch/session handles and source/PR evidence before selecting an action | replacement tasks or a relaunch merely because chat vanished |
+| New request with usable acceptance or a plan | Reuse that acceptance; bind owners, scope and only material prerequisites | repeated discovery or one issue/task per step |
+| Small single-owner change | Use ordinary implementation and the repository's existing review path | a rail, program or formation solely for ceremony |
+| Cohesive multi-step change with one writer | Keep one author context; create one task only when delegation or persistence helps | one agent per function |
+| Two or more genuinely parallel implementing sessions | One controller runs the formation sections below; workers stay on their assigned route | a new universal delivery command |
+| Material acceptance is unknown | Do bounded discovery in the current context, then bind only the affected work | freezing unrelated ready work |
+
+Issue entry flags preserve intent. `--skip-plan` means reuse already available
+acceptance; it never means acceptance may be absent. `--no-merge` stops before
+merge and never confers, expands or implies merge authority. An issue number is
+a traceability input, not a reason to force one worker or PR per issue.
+
+## Durable facts and isolation
 
 | Layer | Carrier | Property |
 |---|---|---|
-| Truth | `edda task` / `edda decide` / issue comments | survives any session's death |
-| Doorbell | `edda request`, host cross-session messaging | may drop — never the only copy |
-| Isolation | one git worktree per work bundle | conflicts impossible, not discouraged |
+| Truth | `edda task`, `edda decide`, issue/PR records | survives a session loss |
+| Doorbell | `edda request`, host messaging | may drop; never the only copy |
+| Isolation | one writer worktree per bundle | limits accidental writes; does not prevent merge or semantic conflicts |
 
-Core rule: **messages may drop; state may not.** Every load-bearing fact is
-fixated in the truth layer FIRST, then doorbelled.
+Fix load-bearing facts in the truth layer before ringing a doorbell. Existing
+claims and source permissions remain in force. Worktree isolation is not
+conflict immunity: overlapping or unstable code chains use one owner or an
+explicit serial handoff.
 
-## Formation
+## Select exactly one repository rail owner
 
-1 controller (you) + 1 read-only verifier + N workers. The verifier is
-mandatory from 2 workers up — it is the highest-leverage seat, not a wasted
-worker: your review inherits your own spec blind spots, and end-only review
-is reactive.
+Before creating or launching tasks, select one owner for the whole repository
+task rail, not one owner per plan. Current reconcile planning considers eligible
+tasks across `plan_id`, while manual `task start` creates no reconcile lease.
+Manual and reconcile callers therefore cannot safely co-own the rail.
 
-The whole formation — you included — produces delivery candidates and
-**execution evidence**, not acceptance. A worker's `edda task done --receipt`
-proves what was done and how it was verified; sign-off belongs to whoever
-holds merge authority outside the formation, unless explicitly delegated. A
-repository standing merge rule is explicit delegation: when it grants the
-controller authority, the controller integrates immediately after final
-current-head LGTM and every rule condition holds, without another operator
-prompt.
+### Manual rail
 
-## Review scope contract
+One named controller creates, selects, starts and dispatches; the worker
+normally records done/fail. Before task creation or launch, scan all active
+plans/tasks and peers, and prove the scheduled reconciler is absent or disabled,
+no one-off reconcile process is live, and prior reconcile-owned attempts are
+settled. An uninstall scheduler post-delete query is only one input; it does not
+prove an already running child stopped. Unknown or conflicting evidence refuses
+manual task creation, start, retry and dispatch.
 
-Before every review, freeze `IN SCOPE`: changed behavior/paths, directly
-affected callers/consumers, explicit issue/spec acceptance, security or
-data-loss regressions introduced or exposed by the change, and current-base
-integration conflicts. Adjacent, pre-existing, or speculative findings that
-do not invalidate the requested behavior become evidenced `FOLLOW-UP ISSUE`s;
-they do not extend the PR or require a response/current-round fix.
+Record and read back the one exact coordination key:
 
-This is a bounded complete review, never a minimal review. Audit every item in
-the frozen surface; any failure there is mandatory. Only findings genuinely
-outside that surface qualify for follow-up.
-
-The issue/spec is the acceptance ceiling. Extra evidence is advisory unless
-needed to prove a required fact or safety boundary. Before `Changes Requested`,
-the reviewer completes the whole scoped audit and batches all blocking P0/P1.
-A later round adds a blocker only when the fix caused it or made it previously
-unobservable; otherwise it is follow-up.
-
-Select gates proportionally. Code/product-blob, base, or toolchain changes run
-the relevant code gates. A docs/evidence-only push with those inputs unchanged
-reuses still-applicable code results as `READ` with source SHA, then runs only
-relevant diff/docs/evidence checks and exact-head CI as `RAN`.
-
-Verify once per frozen artifact. The implementer runs the full gate set once
-per frozen full SHA in the assigned build lane and records a gate receipt (SHA,
-gate set, toolchain, lane, result). The reviewer READs that receipt and
-exact-head CI, RANs only focused or adversarial checks they do not cover, and
-states the reason for any full rerun (no receipt, red or absent CI, grounds to
-distrust the receipt, or coverage the project's CI genuinely lacks — know that
-gap before you cite CI as independent evidence). Deterministically red CI
-already blocks the artifact: audit and request changes rather than spending a
-full run, and re-run only the failed job when the red is environmental. Focused
-gates on touched units while iterating, never the full set per edit. A status,
-label, or draft flip is not a push and reruns nothing.
-
-Each handoff records available elapsed/token/tool cost. Stop after two
-consecutive non-product evidence/docs or harness-only cycles without improved
-required behavior/proof, or at clear diminishing returns; route the finding to
-follow-up or ask the operator to expand scope.
-
-Over-verification is a process finding, not a product blocker: a second RAN
-for an already-receipted SHA without a reason, full gates for a docs-only push,
-or an ad-hoc build directory goes into the cost line, routes as a `FOLLOW-UP
-ISSUE`, and corrects the next brief.
-
-Use this request template; it is not a verdict:
-
-```text
-## Code Review Handoff: Round N
-Full SHA: <full SHA>
-Base full SHA: <full SHA>
-IN SCOPE: <frozen blocking surface>
-FOLLOW-UP ISSUE: <links or none>
-Blocking counts entering review: P0=<n>, P1=<n>
-Evidence:
-- RAN: <commands/checks run on this SHA>
-- READ: <reused results and source SHAs>
-- Lane: <assigned build lane>
-- Receipt: <gate receipt for this SHA (SHA, gate set, toolchain, lane, result), or none>
-Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
-Request: audit the whole scoped surface; publish no self-verdict from the implementer
+```bash
+edda decide "delivery.rail-owner=manual:$CONTROLLER_SESSION" \
+  --session "$CONTROLLER_SESSION" \
+  --reason "repository-wide mode; scheduler/process/attempt evidence=<locations>"
+edda ask "delivery.rail-owner" --json
 ```
 
-## Protocol
+This decision is discoverable coordination evidence, not authenticated
+authority, mutual exclusion or an exactly-once guarantee. Later unauthorized
+reconcile remains a product limitation; callers must not describe prose as
+mechanical enforcement.
 
-1. **Decompose.** Bundle by code-chain cohesion (same chain → same worker,
-   serial). Ownership per file, per SECTION where bundles share a file.
-2. **Ledger first.** `edda task new "<bundle>" --assignee <label>` per
-   bundle. Specs live in issues, never only in messages.
-3. **Brief workers** — self-contained (they have zero context): issues to
-   read, worktree + branch command, `edda claim` label and paths, files
-   owned/forbidden, quality gates verbatim, assigned build lane from the fixed
-   pool **with its absolute lane root** (a worker who cannot resolve
-   `<lane root>/<lane name>` will invent a directory — the exact failure the
-   lane rule exists to prevent), verification budget (focused gates on touched
-   units while iterating; the full gate set once per frozen SHA with a receipt;
-   READ receipts before any RAN), cleanup authority (lane build output is
-   disposable; per `fleet.merged-artifact-cleanup` the branch and lane worktree
-   of a **merged** PR may be reclaimed — the squash commit is on main and
-   GitHub keeps refs/pull/N/head — anything unmerged stays untouched: open or
-   closed-unmerged branches, worktrees with uncommitted work, another
-   session's active branch or worktree, and sources), done =
-   GitHub PR when available,
-   otherwise a frozen local branch plus durable review carrier (never invent a
-   PR); never merge + `edda task done --receipt`. Include the receiver tie-break
-   verbatim (see Traffic rules).
-4. **Brief the verifier — read-only, starts BEFORE code:** baseline on the
-   basis SHA by READing exact-head CI and any existing gate receipt, RANning
-   only what they do not cover in the assigned verifier lane, and classifying
-   existing red checks; flake hunt; observable-behavior criteria per issue;
-   sweep for two test poisons — tests asserting the behavior being removed
-   (invert and rename, never delete) and single-case tests that pass either
-   way (demand the second case). One verifier identity per delivery
-   candidate: rounds resume the same session and lane; a replacement reads
-   receipts and CI before running anything.
-5. **Relay loop:** verifier intel → spot-check the load-bearing claims
-   yourself → adjudicate → fixate as issue comment → doorbell affected
-   workers. Never fixate an unverified claim.
-6. **Track without interrupting:** workers' done-bells + background poll on
-   `edda task list` / PR state + read-only peeks. "Queued" means busy — fine.
-7. **Close:** receipt on the rail → publish the review handoff above → your
-   review + verifier's adversarial review, independently → for GitHub delivery,
-   publish `Code Review: Round N` on the PR pinned to the full SHA with
-   `IN SCOPE`, blocking P0/P1, `FOLLOW-UP ISSUE`, and `RAN`/`READ` evidence.
-   `Changes Requested` requires the implementer's point-by-point `Review
-   Response: Round N` for blocking findings, a new frozen SHA, and another
-   review round. Publish final current-head LGTM with P0=0, P1=0 and exact
-   required gates → when a repository standing merge rule grants the controller
-   authority, you integrate immediately after every rule condition holds,
-   without another operator prompt; otherwise hand off to the actual merge
-   authority. For local-only delivery, record the same round/response/verdict
-   fields in the strongest durable local carrier; do not invent a PR. Internal
-   reports do not replace the durable visible loop.
+### Reconcile rail
 
-## Traffic rules (messages WILL cross)
+For **legacy/uncontrolled tasks**, the configured reconciler owns the whole rail
+and its actual Codex start/resume/requeue/retry/settlement lifecycle, including
+global attempt limits. Do not manually start, dispatch or settle those attempts,
+and do not enqueue Pi, ACP, host-subagent or per-card no-retry tasks for
+reconcile to pick. The per-plan active map below does not filter the current
+reconciler.
 
-- Rulings live in the truth layer with monotonic ids (d-001, d-002, …);
-  messages carry only pointers. Numbering is the ordering.
-- Changing or accepting a deviation from a prior ruling requires a
-  SUPERSEDES entry in the same durable place, before any doorbell.
-- Receiver tie-break (verbatim in every brief): obey the highest d-NNN in
-  the ledger, not the latest message; on conflict reply with your state
-  instead of executing; never discard pushed work unless the ruling names
-  the exact commit.
-- Reviews pin a full SHA, never a PR number; the branch freezes from
-  assignment to verdict; any push voids the verdict. Report claims are
-  tagged ran-vs-read — a harness count you executed is evidence, a test
-  described in someone's message is not.
-- Code-touching instructions carry intent + basis SHA + a drift branch
-  ("if your HEAD differs, satisfy the intent and reply with your SHA").
-- Write a board line at every transition: `edda note --tag fleet-board`
-  ("<lane>@<sha> FROZEN review-pending | ..."). The confused read the
-  board, not chat history.
+A task bound to an accepted `ExecutionBriefV1` is instead **controlled**. At the
+current accepted product boundary, controlled reconcile validates and binds an
+attempt but returns a descriptor with `execution: "none"`: it does not launch or
+enter the legacy Codex runner. Direct controlled execution remains unavailable
+until an authorized S6 capability exists. A literal `CONTROL_UNAVAILABLE`
+result is only a future planned S6 contract, not current product evidence. A
+descriptor, caller-authored event or ordinary task command is not launch
+authority and must not be described as a promised launch.
 
-## Doorbell vs registered letter
+Changing modes requires operator authorization, exact scheduler lifecycle when
+installed, process/lease/attempt reconciliation, and no unresolved task side
+effects. Unknown evidence refuses the switch. Never use `edda reconcile` merely
+to inspect or recover a manual attempt.
 
-`edda request` is a registered letter to a **role**: durable, acknowledged,
-survives session replacement — and structurally unable to wake an idle peer.
-Host cross-session messaging is the bell: it wakes, but binds to one session
-and may not exist. Both present → letter first, bell second. Terminal-only →
-letters at the peers' natural cadence. Bell-only → ring, ledger as backstop.
+## Manual active map and task creation
 
-## Common mistakes
+Manual mode uses a stable lower-case `PLAN_KEY`, a monotonic zero-padded
+`PLAN_REV`, and exact `PLAN_ID="$PLAN_KEY/$PLAN_REV/$PLAN_SHA"`. Every task in
+the revision uses that `plan_id` and an idempotency key
+`$PLAN_ID/$CARD_ID`. Put source/worktree, exact write paths, acceptance,
+exclusions, receiver role, evidence budget, and a build lane only when local
+compilation occurs in a brief reachable from the worker's worktree.
 
-| Mistake | Fix |
+Create only concrete work. `--after` means an actual predecessor artifact, not
+membership in the same batch. Legacy/host and ACP tasks are separate records:
+
+```bash
+# Legacy or host-backed task: no ACP agent_kind claim.
+edda task new "$TITLE" --assignee "$OWNER" --plan "$PLAN_ID" \
+  --brief "$BRIEF_REL" --path "$WRITE_SCOPE" --key "$PLAN_ID/$CARD_ID"
+
+# ACP alternative: matching kind and existing repository-relative concrete roots.
+edda task new "$ACP_TITLE" --assignee "$ACP_OWNER" --agent "$ACP_TARGET" \
+  --plan "$PLAN_ID" --brief "$ACP_BRIEF_REL" --path "$ACP_ROOT" \
+  --key "$PLAN_ID/$ACP_CARD_ID"
+
+edda task show "$TASK_ID" --json
+edda task list --json
+```
+
+Capture the returned ID and read back every field. A repeated key only returns
+the existing task; it does not update title, assignee, brief, scope or
+predecessors. Compare JSON to intent rather than parsing human stderr. After the
+complete intended map is verified, publish and read back its exact key:
+
+```bash
+edda decide "delivery.active.$PLAN_KEY=$PLAN_ID" \
+  --session "$CONTROLLER_SESSION" \
+  --reason "card-to-task: A1=#<id>; rail-owner=manual:<session>; replaces=<old-or-none>"
+edda ask "delivery.active.$PLAN_KEY" --json
+edda task list --json
+```
+
+A fresh controller starts with no chat assumptions: read exact
+`delivery.rail-owner`, then one exact active-plan value, filter task-list JSON
+by exact `plan_id`, show each selected ID, and verify card/source SHA,
+dependencies, owner, scope, brief and observed artifacts. Missing, malformed or
+conflicting data permits read-only recovery only and stops this plan's launch,
+not unrelated work.
+
+Changed owner, brief, scope or dependency graph is replacement, not retry.
+First settle or reconcile the old live attempt. Create the next plan revision
+and only still-needed pending tasks/successors, wire successors to the new
+predecessor IDs, verify the new map, then supersede the active decision. Keep
+old tasks as history: never fake them done and never put a replacement after a
+failed old task. Refuse replacement while reconcile could still select old
+Ready/Failed records.
+
+## Manual dispatch adapters are not interchangeable
+
+The controller starts the selected task immediately before launch, after rail,
+map, input, capability and ownership checks. The worker reads the Running task
+and does not start it again. `task new` and `task start` do not launch a model,
+and dispatch `outcome=done` does not complete the task.
+
+| Backend | Required carrier | Resume | Refused substitution |
+|---|---|---|---|
+| Pi | task-linked `--prompt-file` plus explicit `--cwd` | repeat real `--session-id`; preserve `--session-dir` if selected | no `--task-id`; no `--resume` |
+| Claude | task-linked `--prompt-file` plus explicit `--cwd` | existing conversation uses the same `--session-id` with `--resume` | no `--task-id` |
+| Codex | task-linked `--prompt-file` plus explicit `--cwd` | repeat the real `--session-id` and verify observed thread/session | no `--task-id`, `--resume`, or unsupported model/tool flags |
+| ACP target | separately created task with matching `--agent acp:<target>`; `--task-id`; Running status; concrete existing repository-relative scope roots | ledger `task.session` | no prompt/session substitute, legacy budget/model/tool flags or `--detach` |
+| Host subagent | task-linked brief in host task text | host-native continuity if observed, otherwise explicit replacement | no claim that host launch is an Edda dispatch/session |
+
+For non-ACP dispatch, the prompt file is read verbatim; it must name the task,
+attempt, source/worktree, reachable full brief and lifecycle owner. Use only
+help/source-proven flags. Linked issue work still supplies the repository's
+required claim inputs; omitting `--issue` must not evade an ownership rule.
+
+ACP preflight checks task existence, Running status, matching kind and concrete
+existing roots. It does not prove the brief was readable. The task brief
+reference must be repository-relative; the injected content is bounded to 4096
+bytes and can be marked unavailable or truncated. The worker must read the
+reachable full card with its actual capabilities before editing. Refuse before
+launch when the caller's readback finds an omitted `--agent`, a legacy task ID,
+an unreachable brief or insufficient roots; do not broaden roots for
+convenience. Caller-authored data, including an execution-brief event, does not
+become controlled execution authority without the product-verifiable authority
+seal required by the current product boundary.
+
+Example alternatives, never both for one task:
+
+```bash
+edda task start "$LEGACY_TASK_ID"
+edda dispatch --agent pi --prompt-file "$PROMPT_FILE" --cwd "$WORKTREE" \
+  --model "$PI_MODEL" --timeout-sec "$TIMEOUT_SEC" --json
+
+# Or start the separately-created ACP task, then:
+edda dispatch --agent "$ACP_TARGET" --task-id "$ACP_TASK_ID" \
+  --cwd "$WORKTREE" --json
+```
+
+## Completion, restart and retry
+
+These rows are manual-mode caller discipline, not runtime role enforcement.
+Worker and controller must not race to settle a live task.
+
+| Observation | Truthful action |
 |---|---|
-| All sessions implement, review at end | verifier from 2 workers up, audit before code |
-| Truth only in messages | fixate to ledger/issue, then doorbell |
-| Accepting a deviation without revoking the old ruling | SUPERSEDES in the same place, then bell |
-| Review assigned to a PR, not a SHA | pin + freeze + void-on-push |
-| Verifier accepted only in chat/report | publish the numbered SHA-pinned review round on the PR |
-| Requested changes fixed without a response | implementer replies point-by-point, then reviewer opens the next round |
-| Worker obeys latest message over ledger | tie-break: highest d-NNN wins, reply don't execute |
-| Controller reads worker diffs mid-flight | compressed signals only until review time |
-| Verifier fixes things | read-only, always |
-| Treating a worker receipt as acceptance | receipts are execution evidence; sign-off lives outside the formation |
-| Adjacent finding becomes another blocking round | file an evidenced follow-up issue unless it is in the frozen blocking surface |
-| Docs-only push restarts full code gates | reuse applicable code gates as `READ`; run delta checks plus exact-head CI |
-| Review drips one blocker per round | audit the whole scope and batch P0/P1 before requesting changes |
-| Fresh verifier reruns every gate "to be safe" | READ the frozen SHA's receipt and exact-head CI; RAN only what they do not cover, or state the reason |
-| New build directory per round, SHA, or timestamp | one assigned lane per session for its lifetime; lane cache is disposable, sources are not |
-| Status/label/draft flip treated as a push | not a push; nothing reruns |
+| Ready with inputs bound | controller starts once and dispatches; worker reads Running |
+| Running/Blocked/Done start refusal | inspect task, dependencies, attempt and result; no unconditional retry |
+| Legacy/uncontrolled worker met the task's stated output | worker records ordinary `task done --receipt ... --evidence ...`; a candidate need not be a PR or merge |
+| Controlled attempt is bound to an accepted `ExecutionBriefV1` | completion must come from the authorized product path with a validated `WorkReceiptV1`, the exact brief/session/attempt/lease/outcome correlation and the required S6 authority seal; ordinary `task done --evidence` is refused, and the current product fails closed while that authorized capability is unavailable |
+| Definite stopped/prelaunch failure | worker fails, or controller fails only after observing the stop |
+| Failed with the same assignment/brief/scope and authorized retry | controller starts the SAME ID; its attempt increments and existing successor edges remain |
+| Running but silent, expired-looking lease or missing handle | inspect process, handle, source, task history and side effects; elapsed time alone never authorizes fail/relaunch |
+| Dispatch done but task still Running or receipt inadequate | recover a truthful receipt or leave unverified; never infer acceptance/merge |
+| Legacy/uncontrolled Done receipt metadata correction | ordinary `task done` may correct metadata without another execution or successor unlock |
+| Controlled Done receipt correction | never use the legacy post-Done metadata correction path; preserve the seal-bound `WorkReceiptV1` history and use the authorized controlled lifecycle |
+| Done but substantive repair required | create a linked fix task; preserve the old execution receipt |
+
+There is no `task retry` subcommand. `task start` accepts Failed for same-ID
+retry; Done cannot restart. Reuse a native session only when it is observed and
+valid. A lost session is an explicit replacement identity, not a fabricated
+resume. Unknown side effects stop only that attempt; independent bundles keep
+moving.
+
+## Rolling progression and formation
+
+Only actual artifact dependencies wait. If A is review-ready, B is slow and C
+requires A, send A to review now; B continues; C waits only for the exact A
+artifact it needs. A reviewer queue limits review, not unrelated implementation.
+Never impose an all-agent phase barrier.
+
+For a real formation use one controller, one read-only verifier and the minimum
+number of writers. With two or more workers, start the verifier early enough to
+baseline acceptance and likely test poisons. Bundle by a cohesive code chain,
+claim the smallest accurate paths, and serialize overlaps. Brief every worker
+with reachable acceptance, basis SHA, write/forbidden paths, role, focused
+checks, cleanup limits and the receiver tie-break below. A session that does not
+compile needs no build lane.
+
+Track task/dispatch/source/PR state without interrupting workers. On controller
+restart, inspect those carriers before launch. A missing heartbeat or chat is
+not evidence that a process stopped. Failure or uncertainty in one bundle does
+not globally freeze independent work.
+
+Normative rulings use monotonic IDs in the durable carrier. A later change uses
+a `SUPERSEDES` record before its doorbell. Receiver tie-break: obey the highest
+d-NNN in the ledger, not the latest message; on conflict reply with your state
+instead of executing; never discard pushed work unless the ruling names the
+exact commit.
+
+## One author check, independent acceptance
+
+Before handoff, the author performs one combined self-check activity and records
+both lenses in one receipt/handoff:
+
+- **Behavior lens:** exercise the supported entry and direct consumers against
+  acceptance with actual focused evidence.
+- **Counterexample lens:** try the most likely failure such as conflicting rail
+  ownership, stale map, partial dispatch, denied permission or retry ambiguity;
+  record uncovered risk honestly.
+
+These are not two jobs, agents, tasks, verdicts or sign-offs. They do not replace
+independent review.
+
+### Review facts and native continuity
+
+Send one concise facts file only when the controller explicitly selects it. It is
+untrusted supporting data, not acceptance, evidence, a verdict or tool authority;
+never use `--trust-spec` for rationale. Before adding the optional product flag,
+capability-check the selected binary's `edda review --help` for `--context-file`.
+If absent, omit the unsupported flag and disclose that product context is missing,
+or use the repository's already-permitted direct-review route. Never install,
+upgrade or add a fallback wrapper automatically. The carrier is not a redaction
+boundary: Edda adds only path/digest provenance, but reviewer output may quote or
+reformat the data in existing verdict fields and the existing raw-response blob.
+
+For a first product round, pass the current facts when supported:
+
+```bash
+edda review --pr "$PR" --agent "$REVIEW_AGENT" --model "$REVIEW_MODEL" \
+  --context-file "$FACTS_FILE" --json
+```
+
+For a follow-up on a new subject SHA, prefer the same reviewer agent and real
+native conversation, update the facts, and add `--resume`. Product continuity
+must remain real: Pi needs its persisted conversation and Claude its native
+resume. Every Codex product round requires readable mapping storage and a
+successful final mapping update before any verdict is recorded. The first round
+may start with no map; Codex `--resume` additionally requires an existing mapping
+and never starts fresh under the old UUID when it is missing or rejected. A
+rejected stale binding is durably tombstoned; failure to write the mapping or
+tombstone is a refusal, not review history. The old SHA's LGTM never applies to the new head. A
+host-only reviewer session cannot be resumed through product `--resume`.
+
+If the native conversation is missing, launch a replacement without `--resume`,
+allocate a distinct reviewer UUID, and pass current facts including prior
+findings. State that it is a replacement; never reuse an empty or old UUID to
+imitate continuity. A replacement without context remains allowed only with its
+limitation visible. Direct host review similarly uses actual host-native
+continuity or an explicit replacement, with controller-quoted data it can reach.
+
+Product review retains its own `WorktreeGuard`; callers add no second review
+worktree. Direct read-only review retains immutable refs and the host's existing
+capability proof. Follow-up review covers the delta, prior findings, affected
+direct consumers, current base and introduced security/data-loss risk, while
+READing still-applicable evidence. It never reuses an old verdict as acceptance.
+
+Freeze review scope to changed behavior/paths, direct callers/consumers,
+issue/spec acceptance, introduced or exposed security/data-loss regressions,
+and current-base integration. Review the entire frozen surface and batch all
+blocking findings; genuinely adjacent work becomes evidenced follow-up. Every
+push invalidates a prior verdict. A final verdict binds current head and the
+host's existing gate rules.
+
+Use the repository verification ladder. Authors run focused checks on touched
+units while iterating. A frozen head uses exact-head CI where the host defines
+that as L1; reviewers READ applicable receipts/CI and run only uncovered focused
+or adversarial checks. Do not run a full local workspace merely because a SHA
+froze, and do not invent a build lane for docs-only work. Record RAN versus READ,
+source SHA, lane or n/a, result and available cost.
+
+Task completion is execution evidence, not acceptance or merge authority. If a
+PR is in scope, use the host's canonical product merge path only after an
+independent current-head verdict and every existing merge condition. Never
+substitute a direct forge merge command. If the repository grants standing
+controller authority, that controller acts when its rule gate is green;
+`--no-merge`, worker, fixer and reviewer roles never acquire that authority.
+Local-only delivery uses the strongest durable local carrier and invents no PR.
+
+## Projection and adoption
+
+`edda init` projects this embedded template only for a detected host: `.claude`
+receives `.claude/skills/...`; an existing `AGENTS.md` or `.agents` receives
+`.agents/skills/...`; an undetected host receives neither. Existing skill files
+are preserved unless the owner explicitly requests the existing all-skill
+force option. Do not recommend `--force-skills` for an unknown customized
+checkout because it overwrites every embedded project skill, including any
+future or non-coordination additions.
+
+For an existing installation, the owner compares against a pinned template and
+updates only the selected copy explicitly, preserving custom files. A
+`delivery-flow/1` marker or digest identifies bytes that were read; it is not
+admission, authority or proof an agent followed them. Record actual host/path,
+marker/digest and source SHA when known. Old, customized or unknown remains
+truthful state; a successful local parity check is not publication or all-host
+adoption.

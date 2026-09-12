@@ -1244,7 +1244,8 @@ output are unstable. `edda log --type review_verdict` reads the events.
 
 ```bash
 edda review --agent pi --model openai-codex/gpt-5.6-sol --spec acceptance.md --gate 'cargo test -p mycrate'
-edda review --pr 123 --resume --json
+edda review --pr 123 --context-file review-facts.md --json
+edda review --pr 123 --resume --context-file current-review-facts.md --json
 ```
 
 The default agent is pi, with its inherited model. The base resolves through
@@ -1252,6 +1253,44 @@ origin/HEAD, origin/main, origin/master, main, then master; use `--base` to
 override, and `--head` to select a committed subject. Empty diffs fail before
 launch. `--pr` resolves immutable head/base and the first closing issue as the
 spec; an explicit `--spec <path|#issue>` takes precedence.
+
+`--context-file <path>` optionally supplies controller-selected untrusted
+supporting context. A relative path resolves at the invocation working directory;
+an absolute path is allowed. Edda accepts an empty file or at most 32,768 bytes
+of valid UTF-8, preserving BOM, whitespace and newlines exactly. It lstats the
+final component, refuses symlinks/reparse points and non-regular files, then
+safe-opens it without following the final component (`O_NOFOLLOW|O_NONBLOCK` on
+Unix; `FILE_FLAG_OPEN_REPARSE_POINT` on Windows). Edda fstats the handle and
+compares the before/path-after/handle identities (device+inode on Unix; genuine
+volume-serial+file-index identity through the pinned safe `same-file` API on
+Windows) while the Windows handle denies write/delete sharing, before one
+bounded read of at most 32,769 bytes. Failure to establish any identity omits
+the input.
+A changed identity omits the input. It never truncates, follows a final
+symlink/reparse point, recursively reads references, or discovers a context file
+automatically.
+
+A valid file is hashed and rendered from that same in-memory buffer. The brief
+adds one JSON-escaped `SUPPORTING CONTEXT` DATA object after trusted review rules
+and engine qualification, carrying the actual prepared head SHA, SHA-256 digest,
+`untrusted supporting context` trust label and exact content. The digest is
+provenance for bytes read, not truth or authority. Edda's system-added provenance contains only the digest and selected path; it
+does not copy the selected file into a separate event field or context blob.
+This is not complete redaction: the reviewer can quote or reformat any input in
+existing verdict fields, and the existing raw-response blob stores that reviewer
+output just as it can store text derived from SPEC or DIFF. The context cannot
+alter subject identity, spec trust, evidence, gates, checklist measures, verdict
+rules or reviewer tools.
+
+Missing, unreadable, invalid UTF-8, oversized, directory, symlink/reparse,
+changed identity or other non-regular input omits the whole optional context and
+continues the review.
+A stable reason is written to existing verdict notes and an `edda review:
+warning:` line on stderr; `--json` stdout remains one JSON object. With no flag,
+prompt, notes, filesystem behavior and launch behavior remain the legacy path.
+Callers supporting old binaries must capability-check `edda review --help`, then
+omit the unsupported flag and disclose missing product context or use an
+already-permitted direct review route; Edda does not install a wrapper fallback.
 
 The reviewer receives the base version of REVIEW.md, scoped decisions,
 evidence, and the diff in a unique detached checkout. pi and Claude use a
@@ -1261,8 +1300,22 @@ is optional with `--require-model-diversity`. `--session-id` sets the reviewer
 UUID explicitly; it must be a UUID and cannot name an author session. When
 resuming, an explicit `--session-id` must match the prior ledger-recorded
 reviewer session. `--resume` requires that prior review and reuses its
-reviewer session; a backend fork disqualifies it. `--thinking` selects pi's
-thinking level; Claude and Codex reject the option rather than silently
+reviewer session for the newly prepared subject; each new head gets a new round
+and an old LGTM is not current-head acceptance. Pi requires its persisted
+conversation and Claude uses native resume. Every Codex product review requires
+a readable mapping store before launch and a successful final mapping update
+before any verdict is recorded; no map yet is valid for the first round. Corrupt
+or unreadable storage and lock/write/atomic-replace failures refuse the round.
+Codex `--resume` additionally requires an existing mapping and refuses a missing
+or server-rejected thread without starting fresh under the old UUID. A rejected
+stale binding is durably removed, and a failed tombstone reports both failures.
+Ordinary `edda dispatch` keeps persistence enabled but best-effort with fresh
+fallback; `edda conduct` keeps persistence, required persistence and strict
+thread requirements disabled. A host-only conversation cannot be resumed through
+product `--resume`. If the native conversation is unavailable, omit `--resume`,
+choose a distinct reviewer UUID, and pass current context with prior findings as
+an explicit replacement; never reuse an empty or old UUID to imitate continuity. `--thinking` selects
+pi's thinking level; Claude and Codex reject the option rather than silently
 ignoring it.
 
 The brief also carries an `ENGINE QUALIFICATION (R22)` section naming the PR's

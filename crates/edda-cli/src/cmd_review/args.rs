@@ -1,5 +1,6 @@
 use crate::agent_kind::AgentKind;
 use clap::Args;
+use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 pub struct ReviewArgs {
@@ -15,6 +16,9 @@ pub struct ReviewArgs {
     /// Acceptance specification: path or #issue
     #[arg(long)]
     pub spec: Option<String>,
+    /// Explicit untrusted supporting context (UTF-8, maximum 32 KiB)
+    #[arg(long)]
+    pub context_file: Option<PathBuf>,
     /// Trust an issue's verify commands for opt-in gate execution
     #[arg(long)]
     pub trust_spec: bool,
@@ -60,6 +64,7 @@ impl Default for ReviewArgs {
             head: "HEAD".into(),
             pr: None,
             spec: None,
+            context_file: None,
             trust_spec: false,
             gates: vec![],
             require_model_diversity: false,
@@ -75,5 +80,29 @@ impl Default for ReviewArgs {
             keep_worktree: false,
             json: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Harness {
+        #[command(flatten)]
+        review: ReviewArgs,
+    }
+
+    #[test]
+    fn context_file_is_optional_and_preserves_the_selected_path() {
+        let absent = Harness::try_parse_from(["test"]).expect("legacy args");
+        assert!(absent.review.context_file.is_none());
+        let present = Harness::try_parse_from(["test", "--context-file", "facts/review.md"])
+            .expect("context args");
+        assert_eq!(
+            present.review.context_file.as_deref(),
+            Some(std::path::Path::new("facts/review.md"))
+        );
     }
 }

@@ -2,7 +2,7 @@ use super::timing::ProcessTiming;
 use crate::agent::codex_app_server::{CodexAppServer, CodexTurnOutcome};
 use crate::agent::launcher::{AgentLauncher, PhaseResult};
 use crate::plan::schema::Phase;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+/// Prefix identifying a required Codex mapping-store failure. Product review
+/// uses it to refuse persistence of any verdict from an unresumable round.
+pub const REQUIRED_PERSISTENCE_ERROR_PREFIX: &str = "required Codex thread persistence failed";
 
 /// Resolve the codex executable from an explicit `EDDA_CODEX_BIN` value,
 /// falling back to the name npm installs on this platform.
@@ -48,29 +52,12 @@ fn default_codex_bin() -> PathBuf {
 /// and the `threads` map keys on the conductor session id, resuming a
 /// thread via `thread/resume` whenever a caller reuses a session id.
 ///
-/// Cross-process, `edda dispatch` persists the map in the per-user edda
-/// store at `<store_root>/projects/<project_id(cwd)>/state/
-/// codex-threads.json`, written through `edda_store::write_atomic` under an
-/// exclusive file lock (GH-535). Persistence is dispatch-scoped: a launcher
-/// built with [`CodexLauncher::with_persistent_threads`] — which is exactly
-/// what `edda dispatch` builds — merges the persisted map into `threads` on
-/// the first successful spawn, so a repeated `--session-id` resumes the
-/// conversation a previous process recorded. Conduct deliberately keeps the
-/// default non-persistent launcher: its session ids are deterministic per
-/// plan/phase/attempt, and its behavior must stay byte-identical with the
-/// pre-persistence path (no store reads, no surprise resumes). A missing
-/// entry is simply a new conversation. A persisted binding that the server
-/// rejects — corrupt file or a stale/invalid thread id — degrades to
-/// `thread/start` within the same dispatch, and the bad binding is erased
-/// from the persisted map: the removal is recorded as an explicit deletion
-/// that [`ThreadStore::persist`] honors, so even a failed fallback (the
-/// retry also erroring, timing out, or being cancelled) cannot write the
-/// rejected binding back and make the next dispatch resume it again.
-/// Resume is a convenience and must never fail a dispatch. This degrade
-/// path is persistence-scoped: a launcher without a thread store (conduct)
-/// keeps the pre-persistence behavior for an in-memory resume failure — the
-/// turn simply crashes — because conduct's verdict-gated redispatch turns
-/// reuse the same session id on purpose and must stay byte-identical.
+/// Dispatch and product review persist the session map under the per-user
+/// project state (GH-535); conduct stays non-persistent. Dispatch falls back
+/// from missing/rejected bindings with best-effort storage. Every product
+/// review requires storage success; strict resume also requires an existing
+/// binding. Strict rejection durably removes stale bindings without starting
+/// under the old reviewer UUID.
 /// Within one process the in-memory map stays the hot path and behavior is
 /// unchanged. When the child dies (crash, timeout, cancellation) the
 /// client is dropped and the next phase re-spawns it; the thread map
@@ -79,25 +66,44 @@ pub struct CodexLauncher {
     pub codex_bin: PathBuf,
     pub verbose: bool,
     thread_store: Option<ThreadStore>,
+    require_persistence: bool,
+    require_thread: bool,
     state: Mutex<LauncherState>,
     timing: Arc<ProcessTiming>,
 }
 
 /// File-backed cold-start store for the session→thread map.
 ///
-/// Purely a resume convenience: every fallible step (missing file, corrupt
-/// JSON, lock or write failure) degrades to "no persisted entries" rather
-/// than an error, so persistence problems can never fail a dispatch. Only
-/// corruption warns — a missing file is just a first conversation.
+/// Ordinary dispatch treats this as a resume convenience and swallows store
+/// failures. Every product-review round requires a readable store and a
+/// successful final update; strict resume additionally requires an existing
+/// binding and durably removes a rejected one.
 struct ThreadStore {
     /// Per-user edda store root (`edda_store::store_root()`).
     root: PathBuf,
+    #[cfg(test)]
+    failure: StoreFailure,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum StoreFailure {
+    #[default]
+    None,
+    Load,
+    Persist,
 }
 
 impl ThreadStore {
     fn from_default_root() -> Self {
+        Self::from_root(edda_store::store_root())
+    }
+
+    fn from_root(root: PathBuf) -> Self {
         Self {
-            root: edda_store::store_root(),
+            root,
+            #[cfg(test)]
+            failure: StoreFailure::None,
         }
     }
 
@@ -111,21 +117,36 @@ impl ThreadStore {
             .join("codex-threads.json")
     }
 
-    fn load(&self, cwd: &Path) -> HashMap<String, String> {
+    fn load(&self, cwd: &Path) -> Result<HashMap<String, String>> {
+        #[cfg(test)]
+        if self.failure == StoreFailure::Load {
+            anyhow::bail!("injected codex thread map read failure");
+        }
         let path = self.map_path(cwd);
-        match std::fs::read_to_string(&path) {
-            Err(_) => HashMap::new(),
-            Ok(raw) => match serde_json::from_str(&raw) {
-                Ok(map) => map,
-                Err(_) => {
-                    eprintln!(
-                        "Warning: codex thread map {} is corrupt; ignoring it and \"
-                         starting fresh conversations (resume needs a new dispatch).",
-                        path.display()
-                    );
-                    HashMap::new()
-                }
-            },
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HashMap::new());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read codex thread map {}", path.display()));
+            }
+        };
+        serde_json::from_str(&raw)
+            .with_context(|| format!("parse codex thread map {}", path.display()))
+    }
+
+    fn load_best_effort(&self, cwd: &Path) -> HashMap<String, String> {
+        match self.load(cwd) {
+            Ok(map) => map,
+            Err(error) => {
+                eprintln!(
+                    "Warning: {error:#}; ignoring it and starting fresh conversations \"
+                     (resume needs a new dispatch)."
+                );
+                HashMap::new()
+            }
         }
     }
 
@@ -135,15 +156,30 @@ impl ThreadStore {
     /// in `removals` is deleted from the merged map before the overlay: a
     /// binding the server rejected must not survive a failed fallback just
     /// because it is absent from the in-memory overlay.
-    fn persist(&self, cwd: &Path, threads: &HashMap<String, String>, removals: &HashSet<String>) {
+    fn persist(
+        &self,
+        cwd: &Path,
+        threads: &HashMap<String, String>,
+        removals: &HashSet<String>,
+        require_readable: bool,
+    ) -> Result<()> {
         if threads.is_empty() && removals.is_empty() {
-            return;
+            return Ok(());
+        }
+        #[cfg(test)]
+        if self.failure == StoreFailure::Persist {
+            anyhow::bail!("injected codex thread map persist failure");
         }
         let path = self.map_path(cwd);
-        let Ok(_lock) = edda_store::lock_file(&path.with_extension("lock")) else {
-            return;
+        let _lock = edda_store::lock_file(&path.with_extension("lock"))
+            .with_context(|| format!("lock codex thread map {}", path.display()))?;
+        let mut merged = if require_readable {
+            self.load(cwd)?
+        } else {
+            // Preserve dispatch's existing best-effort repair: after warning
+            // on preflight, a corrupt map may be replaced by the fresh map.
+            self.load(cwd).unwrap_or_default()
         };
-        let mut merged = self.load_quiet(cwd);
         // Honor explicit deletions before overlaying in-memory entries, so
         // a rejected binding is erased from disk even when no fresh binding
         // replaces it. In-memory entries still win for anything present in
@@ -154,20 +190,10 @@ impl ThreadStore {
         for (session, thread) in threads {
             merged.insert(session.clone(), thread.clone());
         }
-        if let Ok(bytes) = serde_json::to_vec(&merged) {
-            let _ = edda_store::write_atomic(&path, &bytes);
-        }
-    }
-
-    /// [`Self::load`] without the corruption warning — used while already
-    /// holding the lock inside [`Self::persist`], where the warning would
-    /// fire twice for the same bad file.
-    fn load_quiet(&self, cwd: &Path) -> HashMap<String, String> {
-        let path = self.map_path(cwd);
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+        let bytes = serde_json::to_vec(&merged).context("serialize codex thread map")?;
+        edda_store::write_atomic(&path, &bytes)
+            .with_context(|| format!("persist codex thread map {}", path.display()))?;
+        Ok(())
     }
 }
 
@@ -195,6 +221,8 @@ impl CodexLauncher {
             codex_bin: default_codex_bin(),
             verbose: false,
             thread_store: None,
+            require_persistence: false,
+            require_thread: false,
             timing: Arc::default(),
             state: Mutex::new(LauncherState::default()),
         }
@@ -205,6 +233,8 @@ impl CodexLauncher {
             codex_bin,
             verbose: false,
             thread_store: None,
+            require_persistence: false,
+            require_thread: false,
             timing: Arc::default(),
             state: Mutex::new(LauncherState::default()),
         }
@@ -226,7 +256,32 @@ impl CodexLauncher {
     /// (tests use this to stay out of the real per-user store; dispatch
     /// uses [`CodexLauncher::with_persistent_threads`] instead).
     pub fn with_thread_store(mut self, root: PathBuf) -> Self {
-        self.thread_store = Some(ThreadStore { root });
+        self.thread_store = Some(ThreadStore::from_root(root));
+        self
+    }
+
+    /// Require readable storage before launch and a successful final mapping
+    /// update. Product review enables this for both first and resumed rounds;
+    /// ordinary dispatch keeps persistence best-effort.
+    pub fn with_required_persistence(mut self) -> Self {
+        self.require_persistence = true;
+        self
+    }
+
+    /// Require the caller's session id to resolve to an existing persisted
+    /// thread. Product review uses this for `--resume`; launcher construction
+    /// must separately opt into storage and required persistence.
+    pub fn with_required_thread(mut self) -> Self {
+        self.require_thread = true;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_store_failure(mut self, failure: StoreFailure) -> Self {
+        self.thread_store
+            .as_mut()
+            .expect("test failure injection needs a thread store")
+            .failure = failure;
         self
     }
 
@@ -267,11 +322,17 @@ impl AgentLauncher for CodexLauncher {
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
         self.timing.reset();
-        // GH-574 honesty: the codex app-server exposes no model/thinking/
-        // tool-policy selection path edda can verify, so a phase declaring
-        // any of them would be silently ignored — the exact failure mode
-        // GH-574 removes. Refuse with an explicit error instead of guessing
-        // at an unverified configuration channel.
+        if self.require_persistence && self.thread_store.is_none() {
+            anyhow::bail!(
+                "required codex persistence needs thread storage; refusing an uncheckable mapping"
+            );
+        }
+        if self.require_thread && (!self.require_persistence || self.thread_store.is_none()) {
+            anyhow::bail!(
+                "required codex thread mode needs required persistent thread storage; refusing an uncheckable resume"
+            );
+        }
+        // Refuse capabilities the app-server cannot verifiably select (GH-574).
         let declared: Vec<&str> = [
             ("model", phase.model.is_some()),
             ("thinking", phase.thinking.is_some()),
@@ -291,8 +352,7 @@ impl AgentLauncher for CodexLauncher {
             );
         }
 
-        // The app-server has no system-prompt channel; carry plan context
-        // inline, same as the pi launcher.
+        // The app-server has no system-prompt channel.
         let message = if plan_context.is_empty() {
             prompt.to_owned()
         } else {
@@ -300,18 +360,36 @@ impl AgentLauncher for CodexLauncher {
         };
         let mut state = self.state.lock().await;
         if state.server.is_none() {
-            match CodexAppServer::spawn_timed(&self.codex_bin, Arc::clone(&self.timing)).await {
-                // Cold start: merge the persisted session→thread map so a
-                // session id recorded by a previous process resumes instead
-                // of starting over. In-memory entries win (hot path).
-                Ok(server) => {
-                    if let Some(store) = &self.thread_store {
-                        for (session, thread) in store.load(cwd) {
-                            state.threads.entry(session).or_insert(thread);
+            // Required product-review storage is checked before the paid
+            // app-server launch. A missing map is a valid first round; a map
+            // that exists but cannot be read or parsed is not.
+            if let Some(store) = &self.thread_store {
+                let persisted = if self.require_persistence {
+                    match store.load(cwd) {
+                        Ok(map) => map,
+                        Err(error) => {
+                            return Ok(PhaseResult::AgentCrash {
+                                error: format!("{REQUIRED_PERSISTENCE_ERROR_PREFIX}: {error:#}"),
+                            });
                         }
                     }
-                    state.server = Some(server);
+                } else {
+                    store.load_best_effort(cwd)
+                };
+                // Merge persisted bindings without replacing the hot map.
+                for (session, thread) in persisted {
+                    state.threads.entry(session).or_insert(thread);
                 }
+            }
+            if self.require_thread && !state.threads.contains_key(session_id) {
+                return Ok(PhaseResult::AgentCrash {
+                    error: format!(
+                        "--resume requires an existing persisted Codex thread mapping for reviewer session {session_id}; refusing to start a fresh thread under the old UUID"
+                    ),
+                });
+            }
+            match CodexAppServer::spawn_timed(&self.codex_bin, Arc::clone(&self.timing)).await {
+                Ok(server) => state.server = Some(server),
                 Err(error) => {
                     return Ok(PhaseResult::AgentCrash {
                         error: format!(
@@ -323,18 +401,24 @@ impl AgentLauncher for CodexLauncher {
             }
         }
 
+        if self.require_thread && !state.threads.contains_key(session_id) {
+            if let Some(mut server) = state.server.take() {
+                server.terminate().await;
+            }
+            return Ok(PhaseResult::AgentCrash {
+                error: format!(
+                    "--resume requires an existing persisted Codex thread mapping for reviewer session {session_id}; refusing to start a fresh thread under the old UUID"
+                ),
+            });
+        }
+
         let LauncherState {
             server,
             threads,
             removals,
         } = &mut *state;
         let server = server.as_mut().expect("server spawned above");
-        // Only a persistence-enabled launcher may degrade a rejected
-        // resume to thread/start. With `thread_store: None` (conduct), an
-        // in-memory resume failure must crash exactly as before the
-        // persistence feature: conduct deliberately redispatches the same
-        // session id, and silently starting a new thread would lose the
-        // same-session conversation.
+        // Non-persistent conduct never degrades a rejected in-memory resume.
         let persist_enabled = self.thread_store.is_some();
         let outcome = drive_turn(
             server,
@@ -350,23 +434,14 @@ impl AgentLauncher for CodexLauncher {
         .await;
 
         if !outcome.keep_server {
-            // The turn ended in a crash, timeout, or shutdown, and the child
-            // was killed along the way (KillOnCancel or terminate). Drop the
-            // client so the next phase re-spawns a fresh app-server. The
-            // thread map survives: codex persists threads and `thread/resume`
-            // restores the conversation.
+            // Drop a failed child; the thread map survives for a later spawn.
             if let Some(server) = state.server.as_mut() {
                 server.terminate().await;
             }
             state.server = None;
         }
-        let result = if outcome.dropped_stale_binding {
-            // The persisted binding for this session was rejected by the
-            // server (stale or invalid thread id). Degrade to a plain
-            // `thread/start` within the same dispatch: the failed resume
-            // terminated the child, so spawn a fresh app-server first. The
-            // bad binding was already removed from `threads`, so it is not
-            // written back below.
+        let mut result = if outcome.dropped_stale_binding && !self.require_thread {
+            // Best-effort dispatch retries; strict review skips this branch.
             match CodexAppServer::spawn_timed(&self.codex_bin, Arc::clone(&self.timing)).await {
                 Ok(server) => state.server = Some(server),
                 Err(error) => {
@@ -406,11 +481,30 @@ impl AgentLauncher for CodexLauncher {
         } else {
             outcome.result
         };
-        // Record the turn's session→thread binding even on a crash path:
-        // the thread was created and codex persists it, so the next process
-        // can resume it. Best-effort — failures are swallowed by design.
+        // Product-review writes are required independently of whether this
+        // round resumed an existing thread. Ordinary dispatch remains
+        // best-effort. Preserve the agent failure text too when a rejected
+        // strict binding could not be durably tombstoned.
         if let Some(store) = &self.thread_store {
-            store.persist(cwd, &state.threads, &state.removals);
+            let persisted = store.persist(
+                cwd,
+                &state.threads,
+                &state.removals,
+                self.require_persistence,
+            );
+            if self.require_persistence {
+                if let Err(error) = persisted {
+                    let prior = match &result {
+                        PhaseResult::AgentCrash { error } => {
+                            format!("; prior agent failure: {error}")
+                        }
+                        _ => String::new(),
+                    };
+                    result = PhaseResult::AgentCrash {
+                        error: format!("{REQUIRED_PERSISTENCE_ERROR_PREFIX}: {error:#}{prior}"),
+                    };
+                }
+            }
         }
         Ok(result)
     }
@@ -427,10 +521,7 @@ impl AgentLauncher for CodexLauncher {
     }
 }
 
-/// One [`drive_turn`] attempt: the mapped phase result, whether the
-/// app-server child survived, and whether a stale persisted thread binding
-/// was dropped — asking [`AgentLauncher::run_phase`] to retry once as a
-/// plain `thread/start`.
+/// One turn result, child liveness, and stale-binding fallback signal.
 struct DriveOutcome {
     result: PhaseResult,
     keep_server: bool,
@@ -447,9 +538,7 @@ impl DriveOutcome {
     }
 }
 
-/// Why a thread open did not produce a thread id. `Error` leaves the
-/// child's fate to the protocol layer (a failed request terminates it);
-/// timeout and cancellation mean the dispatch itself is over.
+/// Why opening a thread did not produce an id.
 enum OpenFailure {
     Error(anyhow::Error),
     Timeout,
@@ -486,10 +575,7 @@ async fn open_thread_or_fail(
     }
 }
 
-/// Open (or resume) the codex thread for `session_id`, run one turn, and map
-/// the outcome onto [`DriveOutcome`]. The parameters are one flat turn
-/// description; a parameter struct would be churn, so the argument count is
-/// accepted here.
+/// Open/resume a thread and map one turn onto [`DriveOutcome`].
 #[allow(clippy::too_many_arguments)]
 async fn drive_turn(
     server: &mut CodexAppServer,
@@ -520,20 +606,14 @@ async fn drive_turn(
     .await
     {
         Ok(thread_id) => thread_id,
-        // A persisted binding the server rejects (stale or invalid thread
-        // id) must degrade to `thread/start`, not fail the dispatch. Drop
-        // the binding and record an explicit deletion so `persist` erases
-        // it from disk even if the fallback never records a fresh id, and
-        // tell run_phase to retry on a fresh app-server — the failed resume
-        // terminated the child. Gated on persistence: with no thread store
-        // (conduct) the error below falls through to the plain crash path,
-        // byte-identical with the pre-persistence behavior.
-        Err(OpenFailure::Error(_)) if resume.is_some() && persist_enabled => {
+        // Tombstone a rejected persisted binding; the caller decides whether
+        // ordinary fallback is allowed. Conduct falls through without a store.
+        Err(OpenFailure::Error(error)) if resume.is_some() && persist_enabled => {
             threads.remove(session_id);
             removals.insert(session_id.to_owned());
             return DriveOutcome {
                 result: PhaseResult::AgentCrash {
-                    error: "persisted thread binding rejected; degrading to thread/start".into(),
+                    error: format!("persisted Codex thread binding rejected: {error}"),
                 },
                 keep_server: false,
                 dropped_stale_binding: true,
@@ -594,10 +674,7 @@ pub(crate) mod test_support {
     use std::path::PathBuf;
     use tokio::sync::Mutex;
 
-    /// A launcher pre-seeded with an already-spawned server, for tests that
-    /// drive `run_phase` against a fake app-server without spawning binaries.
-    /// Persistence is off (the default now): these tests assert in-process
-    /// behavior and must never touch the real per-user store.
+    /// In-memory fake launcher with persistence disabled.
     pub(crate) fn launcher_with_server(server: CodexAppServer) -> CodexLauncher {
         let mut launcher = CodexLauncher::with_bin(PathBuf::from("unused-fake-bin"));
         launcher.state = Mutex::new(super::LauncherState {
@@ -634,10 +711,7 @@ mod tests {
         (dir, server)
     }
 
-    /// GH-574: codex has no verifiable model/thinking/tool-policy selection
-    /// path, so each declared capability must be refused explicitly — never
-    /// accepted and silently ignored. The refusal fires before any server
-    /// spawn, so the test runs against a bare launcher.
+    /// Unsupported Codex capability declarations fail before spawn (GH-574).
     #[tokio::test]
     async fn codex_refuses_phase_declared_capabilities() {
         let launcher = CodexLauncher::new();
@@ -671,10 +745,7 @@ mod tests {
 
     #[test]
     fn persistence_is_opt_in() {
-        // GH-535 round 1: persistence must be dispatch-scoped. `new()` and
-        // `with_bin()` — the constructors conduct's launcher factory goes
-        // through — must not touch the per-user store at all; only an
-        // explicit opt-in enables it.
+        // Constructors stay non-persistent until a caller opts in (GH-535).
         assert!(CodexLauncher::new().thread_store.is_none());
         assert!(
             CodexLauncher::with_bin(PathBuf::from("unused"))
@@ -696,6 +767,12 @@ mod tests {
                 .is_some(),
             "with_thread_store opts into an explicit store root"
         );
+        assert!(
+            CodexLauncher::new()
+                .with_required_persistence()
+                .require_persistence
+        );
+        assert!(CodexLauncher::new().with_required_thread().require_thread);
     }
 
     #[test]
@@ -740,9 +817,7 @@ mod tests {
 
     #[tokio::test]
     async fn budget_cannot_fire_without_cost_data() -> Result<()> {
-        // The app-server protocol reports no usage, so a budgeted phase that
-        // completes normally still lands on AgentDone rather than
-        // BudgetExceeded — the budget gate is inert for codex by design.
+        // No app-server usage means the budget gate is inert.
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n    budget_usd: 0.01\n");
         let (_dir, mut server) = spawn_fake_server(FakeScenario::RunTurnCompletes).await;
         let mut threads = HashMap::new();
@@ -857,12 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_session_id_resumes_the_same_conversation() -> Result<()> {
-        // Exercises the forward-looking resume path: the scripted fake
-        // answers thread/start with t-1 and thread/resume with t-2, so a
-        // second turn that produces output proves the launcher resumed the
-        // persisted thread instead of starting a new one. The sequential
-        // runner assigns a unique session id per phase+attempt, so this
-        // reuse is not hit in production today.
+        // A repeated in-memory session id resumes its thread.
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
         let (_dir, mut server) = spawn_fake_server(FakeScenario::TwoTurnsWithResume).await;
         let mut threads = HashMap::new();
@@ -938,9 +1008,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_phase_survives_a_crashed_server_by_respawning() -> Result<()> {
-        // First phase crashes (turn error); the client is dropped, so the
-        // second phase reports the re-spawn failure instead of reusing a
-        // dead child — proving the reset happened.
+        // A crashed child is not reused by the next phase.
         let (_dir, server) = spawn_fake_server(FakeScenario::RunTurnStartError).await;
         let launcher = launcher_with_server(server);
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
@@ -1006,364 +1074,5 @@ mod tests {
         Ok(())
     }
 
-    // ── Cross-process thread-map persistence (GH-535) ──
-
-    /// The map file a launcher with `root` writes for `cwd`.
-    fn map_path_for(root: &Path, cwd: &Path) -> PathBuf {
-        root.join("projects")
-            .join(edda_store::project_id(cwd))
-            .join("state")
-            .join("codex-threads.json")
-    }
-
-    #[test]
-    fn thread_store_round_trips_the_session_map() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let store = ThreadStore {
-            root: root.path().to_path_buf(),
-        };
-        let mut threads = HashMap::new();
-        threads.insert("sess-1".to_owned(), "t-1".to_owned());
-
-        store.persist(cwd.path(), &threads, &HashSet::new());
-
-        let loaded = store.load(cwd.path());
-        assert_eq!(loaded.get("sess-1").map(String::as_str), Some("t-1"));
-        Ok(())
-    }
-
-    #[test]
-    fn thread_store_persist_merges_with_entries_from_another_process() -> Result<()> {
-        // Simulate the other process having written its own binding to the
-        // shared map between our load and our write: the merge must keep it.
-        let root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let store = ThreadStore {
-            root: root.path().to_path_buf(),
-        };
-        let foreign = r#"{"sess-other":"t-other","sess-mine":"t-stale"}"#;
-        std::fs::create_dir_all(map_path_for(root.path(), cwd.path()).parent().unwrap())?;
-        std::fs::write(map_path_for(root.path(), cwd.path()), foreign)?;
-
-        let mut threads = HashMap::new();
-        threads.insert("sess-mine".to_owned(), "t-fresh".to_owned());
-        store.persist(cwd.path(), &threads, &HashSet::new());
-
-        let loaded = store.load(cwd.path());
-        assert_eq!(
-            loaded.get("sess-other").map(String::as_str),
-            Some("t-other")
-        );
-        assert_eq!(loaded.get("sess-mine").map(String::as_str), Some("t-fresh"));
-        Ok(())
-    }
-
-    #[test]
-    fn thread_store_persist_honors_removal_tombstones() -> Result<()> {
-        // A rejected binding is modeled as an explicit deletion, not mere
-        // absence from the in-memory overlay: persist must apply the
-        // removal to the on-disk map, so a failed fallback (no fresh
-        // binding recorded) cannot resurrect the rejected entry.
-        let root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let store = ThreadStore {
-            root: root.path().to_path_buf(),
-        };
-        let map = map_path_for(root.path(), cwd.path());
-        std::fs::create_dir_all(map.parent().unwrap())?;
-        std::fs::write(&map, r#"{"sess-1":"stale","sess-other":"t-other"}"#)?;
-
-        let mut threads = HashMap::new();
-        threads.insert("sess-2".to_owned(), "t-2".to_owned());
-        let mut removals = HashSet::new();
-        removals.insert("sess-1".to_owned());
-        store.persist(cwd.path(), &threads, &removals);
-
-        let loaded = store.load(cwd.path());
-        assert_eq!(
-            loaded.get("sess-other").map(String::as_str),
-            Some("t-other")
-        );
-        assert_eq!(loaded.get("sess-2").map(String::as_str), Some("t-2"));
-        assert!(
-            !loaded.contains_key("sess-1"),
-            "the tombstoned binding must be deleted from disk, got {loaded:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn thread_store_missing_or_corrupt_file_loads_empty() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let store = ThreadStore {
-            root: root.path().to_path_buf(),
-        };
-        assert!(store.load(cwd.path()).is_empty(), "missing file is empty");
-
-        let map = map_path_for(root.path(), cwd.path());
-        std::fs::create_dir_all(map.parent().unwrap())?;
-        std::fs::write(&map, b"{ not json")?;
-        assert!(store.load(cwd.path()).is_empty(), "corrupt file is empty");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn fresh_launcher_resumes_the_thread_a_previous_process_recorded() -> Result<()> {
-        // Stand-in for two `edda dispatch --agent codex --session-id sess-1`
-        // processes: two independently constructed launchers sharing the
-        // store root. The first records sess-1 → t-1 via thread/start; the
-        // second must send thread/resume (the ResumeOnly fake answers an
-        // error for anything else) and produce the resumed turn's answer.
-        let store_root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-
-        let (_fake_dir, first_bin) =
-            fake_app_server_bin(FakeScenario::RunTurnCompletes).expect("first fake written");
-        let first =
-            CodexLauncher::with_bin(first_bin).with_thread_store(store_root.path().to_path_buf());
-        let first_result = first
-            .run_phase(
-                &phase,
-                "turn one",
-                "",
-                "sess-1",
-                cwd.path(),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("first dispatch runs");
-        assert!(
-            matches!(&first_result, PhaseResult::AgentDone { result_text, .. } if result_text.as_deref() == Some("turn complete")),
-            "first dispatch should complete, got {first_result:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(map_path_for(store_root.path(), cwd.path()))
-                .expect("map persisted"),
-            r#"{"sess-1":"t-1"}"#
-        );
-
-        let (_fake_dir, second_bin) =
-            fake_app_server_bin(FakeScenario::ResumeOnly).expect("second fake written");
-        let second =
-            CodexLauncher::with_bin(second_bin).with_thread_store(store_root.path().to_path_buf());
-        let second_result = second
-            .run_phase(
-                &phase,
-                "turn two",
-                "",
-                "sess-1",
-                cwd.path(),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("second dispatch runs");
-        match second_result {
-            PhaseResult::AgentDone { result_text, .. } => {
-                assert_eq!(result_text.as_deref(), Some("resumed answer"));
-            }
-            other => panic!("second dispatch should resume the recorded thread, got {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn corrupt_store_entry_degrades_to_thread_start() -> Result<()> {
-        // A corrupt map must never fail the dispatch: the fresh launcher
-        // warns and falls back to thread/start, which completes normally.
-        let store_root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let map = map_path_for(store_root.path(), cwd.path());
-        std::fs::create_dir_all(map.parent().unwrap())?;
-        std::fs::write(&map, b"{ corrupted")?;
-
-        let (_fake_dir, bin) =
-            fake_app_server_bin(FakeScenario::RunTurnCompletes).expect("fake written");
-        let launcher =
-            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
-        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = launcher
-            .run_phase(
-                &phase,
-                "do the task",
-                "",
-                "sess-1",
-                cwd.path(),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("dispatch must not fail on a corrupt store entry");
-        assert!(
-            matches!(&result, PhaseResult::AgentDone { result_text, .. } if result_text.as_deref() == Some("turn complete")),
-            "degraded dispatch should complete via thread/start, got {result:?}"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stale_persisted_binding_degrades_to_thread_start_and_is_not_rewritten() -> Result<()> {
-        // A syntactically valid but stale entry (the server no longer knows
-        // the thread) loads fine, so the first open is a thread/resume that
-        // the fake rejects. The dispatch must recover via thread/start
-        // within the same run — not crash — and must not write the stale
-        // binding back: the map ends up holding only the fresh binding.
-        let store_root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let map = map_path_for(store_root.path(), cwd.path());
-        std::fs::create_dir_all(map.parent().unwrap())?;
-        std::fs::write(&map, br#"{"sess-1":"stale-thread"}"#)?;
-
-        let (_fake_dir, bin) =
-            fake_app_server_bin(FakeScenario::ResumeErrorThenStart).expect("fake written");
-        let launcher =
-            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
-        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = launcher
-            .run_phase(
-                &phase,
-                "turn one",
-                "",
-                "sess-1",
-                cwd.path(),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("a stale binding must degrade, not fail the dispatch");
-        match result {
-            PhaseResult::AgentDone { result_text, .. } => {
-                assert_eq!(result_text.as_deref(), Some("fresh answer"));
-            }
-            other => panic!(
-                "stale binding should degrade to thread/start in the same dispatch, got {other:?}"
-            ),
-        }
-        assert_eq!(
-            std::fs::read_to_string(&map).expect("map rewritten"),
-            r#"{"sess-1":"t-1"}"#,
-            "the stale binding must not be written back"
-        );
-        Ok(())
-    }
-
-    /// Seed the in-memory session→thread map of a launcher built by
-    /// [`launcher_with_server`], without touching the real store.
-    async fn seed_threads(launcher: &CodexLauncher, session: &str, thread: &str) {
-        let mut state = launcher.state.lock().await;
-        state.threads.insert(session.to_owned(), thread.to_owned());
-    }
-
-    #[tokio::test]
-    async fn conduct_without_persistence_still_crashes_when_resume_is_rejected() -> Result<()> {
-        // GH-535 round 2, P1-B: the stale-binding fallback (drop + retry as
-        // thread/start) must be reachable only on the persistence-enabled
-        // dispatch path. Conduct reuses a deterministic session id for a
-        // verdict-gated redispatch; if that in-memory resume is rejected,
-        // conduct must fail with the server's error exactly as before the
-        // persistence feature — not silently start a new thread and lose
-        // the same-session conversation. The ResumeErrorThenStart fake
-        // would happily answer thread/start with "fresh answer", so a
-        // retry here would show up as AgentDone instead of the crash.
-        let (_dir, server) = spawn_fake_server(FakeScenario::ResumeErrorThenStart).await;
-        let launcher = launcher_with_server(server);
-        seed_threads(&launcher, "sid", "stale-thread").await;
-        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = launcher
-            .run_phase(
-                &phase,
-                "redispatch turn",
-                "",
-                "sid",
-                Path::new("."),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("run_phase returns a result, not an IO error");
-        match result {
-            PhaseResult::AgentCrash { error } => {
-                assert!(
-                    error.contains("unknown thread"),
-                    "conduct resume failure must surface the server's own error, got {error}"
-                );
-            }
-            other => {
-                panic!("non-persistent conduct must not fall back to thread/start, got {other:?}")
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn failed_fallback_still_erases_the_stale_binding_from_disk() -> Result<()> {
-        // GH-535 round 2, P1-A: dropping the stale binding from the
-        // in-memory map is not enough — if the fallback thread/start fails
-        // (or times out, or is cancelled) before a fresh id is recorded,
-        // the merge-style persist reloads the on-disk map and would write
-        // the rejected binding straight back. The removal must survive as
-        // an explicit deletion that persist honors, so the next dispatch
-        // never resumes the same rejected thread id again.
-        let store_root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let map = map_path_for(store_root.path(), cwd.path());
-        std::fs::create_dir_all(map.parent().unwrap())?;
-        std::fs::write(&map, br#"{"sess-1":"stale-thread"}"#)?;
-
-        let (_fake_dir, bin) =
-            fake_app_server_bin(FakeScenario::ResumeErrorThenStartError).expect("fake written");
-        let launcher =
-            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
-        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = launcher
-            .run_phase(
-                &phase,
-                "turn one",
-                "",
-                "sess-1",
-                cwd.path(),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("run_phase returns a result, not an IO error");
-        // The fallback thread/start fails too, so the phase ends in a
-        // crash — but the rejected binding must still be gone from disk.
-        assert!(
-            matches!(&result, PhaseResult::AgentCrash { error } if error.contains("unknown thread")),
-            "expected the failed fallback to surface as AgentCrash, got {result:?}"
-        );
-        let loaded: HashMap<String, String> =
-            serde_json::from_str(&std::fs::read_to_string(&map).expect("map still readable"))
-                .expect("map stays valid JSON");
-        assert!(
-            !loaded.contains_key("sess-1"),
-            "the rejected binding must not survive on disk after a failed fallback, got {loaded:?}"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn missing_store_entry_starts_a_fresh_thread() -> Result<()> {
-        // No map file at all: the first dispatch with a session id is a
-        // plain thread/start, not a failure and not a warning.
-        let store_root = tempfile::tempdir()?;
-        let cwd = tempfile::tempdir()?;
-        let (_fake_dir, bin) =
-            fake_app_server_bin(FakeScenario::RunTurnCompletes).expect("fake written");
-        let launcher =
-            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
-        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = launcher
-            .run_phase(
-                &phase,
-                "do the task",
-                "",
-                "sess-fresh",
-                cwd.path(),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("first dispatch runs");
-        assert!(matches!(result, PhaseResult::AgentDone { .. }));
-        Ok(())
-    }
+    include!("codex_rpc_persistence_tests.rs");
 }
