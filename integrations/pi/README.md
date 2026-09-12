@@ -31,6 +31,64 @@ idle point. Loading the extension does not resume work. It cannot silently attac
 to arbitrary existing terminals. New sessions load installed packages normally.
 Use `/edda-session` inside Pi to see its exact identity and status.
 
+## Start a managed Pi
+
+For new sessions, managed launch owns the process and fixes the integration version
+from the beginning. It automatically snapshots the runtime outside the checkout:
+
+```powershell
+node integrations/pi/cli.mjs launch --project C:/my-project --provider openrouter --model deepseek/deepseek-v4.1-flash --thinking low --prompt-file task.txt
+node integrations/pi/cli.mjs run-status RUN_ID
+node integrations/pi/cli.mjs run-stop RUN_ID
+node integrations/pi/cli.mjs run-resume RUN_ID
+```
+
+The run ID is printed before launch. The result contains a separate Pi session ID,
+runner instance, loaded integration version/release/module path, selected model,
+session file and initial-message receipt. Use the Pi session ID with `send`,
+`conversation`, `adopt` and other session commands. Use the run ID for lifecycle
+commands. The calling CLI may exit; the hidden runner and its owned Pi remain alive.
+
+`--provider`, `--model`, `--thinking` and the initial prompt are optional; normal Pi
+model configuration applies when omitted. Pi is discovered in a local/global Node
+installation, or supply `--pi-entry /path/to/pi/dist/bundle/cli.js` (also configurable
+through `EDDA_PI_ENTRY`). A missing installation gives an explicit setup error.
+`--agent-dir` can select an existing isolated Pi configuration directory. Extra
+trusted extensions can be loaded with `--extension FILE`; `--no-tools` is useful
+for isolated protocol tests. This process uses `--no-extensions` plus the fixed
+Edda integration and explicitly requested extensions, avoiding duplicate legacy
+channels. Other Pi configuration and standard resource discovery still apply.
+
+Runtime files live under the private registry's `releases/<digest>/`. A release
+manifest verifies their bytes before launch and recovery. Source edits cannot change
+an already-installed release. `runtime-install` creates/verifies a release without
+starting Pi or changing global settings; `<release.path>/cli.mjs` is a stable CLI
+entry independent of this development worktree. Pi itself remains an installed
+dependency: its version is reported, while the integration is digest-pinned.
+
+`run-status` authenticates the actual runner and queries its Pi channel. Readiness
+is not proof of work starting: inspect `initialReceipt` and current Pi state. Progress
+and provider-reported token/cost totals are bounded metadata, not raw RPC logs.
+Model errors expose a category/status code without credential or response-body dumps.
+
+Idle stop closes only the runner's owned Pi child. `run-stop RUN_ID --abort` explicitly
+interrupts busy owned work; ordinary stop refuses to interrupt it. Neither command
+kills arbitrary saved PIDs. Stop retains session history, inbox and receipts.
+`run-resume` restores the same validated session file and observed model/thinking
+settings; it does not resend the original task. Send a fresh explicit instruction
+when you want work to continue. Retrying `launch` with the same run ID and identical
+inputs reconnects instead of starting a duplicate; different inputs conflict.
+
+If the runner crashes, status reports unavailable rather than inferring ownership
+from a PID. Recovery refuses when a previous runner/Pi may still be alive, the
+session file is missing/mismatched, or a launch/resume lock is ambiguous. Inspect
+that evidence rather than creating another run ID on a timeout. A crash before
+the initial prompt is sent can leave an unknown initial intent; recovery never
+blindly replays it. Newly created empty sessions may not yet have a persisted file.
+
+This is the process/event entry point for management. It does not autonomously
+approve work, poll a manager model, or wake the Codex desktop conversation.
+
 ## Start here: adopt an existing session
 
 When the task has a structured management brief, one command prepares its context,
@@ -514,6 +572,7 @@ node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/p
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff-budget
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --inbox
+node integrations/pi/managed-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
 node integrations/pi/dependency-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js C:/Users/fagem/.cargo/bin/edda.exe
 ```
 
@@ -527,6 +586,14 @@ using the offline provider, changes only its synthetic task, waits for the actua
 60-second timer to notify, verifies the same-session reply, then pauses and cleans
 only that test's processes/directories.
 
+The managed smoke checks client reconnection, same-session stop/resume, inbox
+retention and no initial-prompt replay. Its default provider is offline. An explicitly
+authorized real-model fixture can run with `--live PROVIDER MODEL`; it writes and
+verifies one file only in its temporary project, records observed usage, and cleans
+up owned processes. Failed smoke evidence is preserved in its printed temporary
+directory. The real model test is separate from deterministic CI and is not a model
+quality benchmark.
+
 ## Remaining usability/product work
 
 - Automatic selection of newly created review/fix tasks and structured acceptance joins.
@@ -535,7 +602,8 @@ only that test's processes/directories.
 - Full authority resolution and manager/strong-model escalation policy; no natural
   language permission guessing is implemented.
 - Proactive Pi-to-Codex wake routing, Claude/Hermes recipient adapters and remote hosts.
-- Packaged distribution and a stable installer path independent of a development worktree.
+- Published package distribution and upgrade management for the Pi dependency itself;
+  managed integration releases already have a stable path outside the worktree.
 
 These are separate stages. Current dependency alerts are usable with explicit
 selected tasks and limits; they do not claim those broader capabilities.
