@@ -81,8 +81,11 @@ test('CLI launch survives client exit; duplicate identity, authenticated stop an
   assert.equal((await managedStatus(f.registry, f.runId)).live, true);
   const before = await requestSession(f.registry, state.sessionId, '/conversation?limit=20');
   assert.equal((await stopManaged(f.registry, f.runId)).status, 'stopped');
+  await writeFile(join(f.root, 'pi/package.json'), JSON.stringify({ type: 'module', name: '@earendil-works/pi-coding-agent', version: 'fixture-updated' }));
   const resumed = await resumeManaged(f.registry, f.runId);
   assert.equal(resumed.sessionId, state.sessionId);
+  assert.equal(resumed.piVersion, 'fixture-updated');
+  assert.equal(resumed.expectedPiVersion, 'fixture');
   assert.notEqual(resumed.instanceId, state.instanceId);
   assert.equal((await requestSession(f.registry, state.sessionId, '/conversation?limit=20')).headCursor, before.headCursor);
   assert.ok(listInbox(f.registry).events.length);

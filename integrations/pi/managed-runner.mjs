@@ -4,7 +4,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, unlinkSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { managedDir, verifyRelease, rpcFrames, inside } from './managed-store.mjs';
+import { managedDir, verifyRelease, rpcFrames, inside, findPiEntry } from './managed-store.mjs';
 import { readJson, writeJson, validateId, digest } from './store.mjs';
 import { requestSession, getReceipt } from './client.mjs';
 import { messageId } from './inbox-store.mjs';
@@ -20,7 +20,7 @@ const resume = mode === '--resume';
 if (mode && !resume) throw new Error('Unknown runner mode');
 const token = randomBytes(32).toString('hex');
 let state = { ...prior, runId, serviceId, runnerPid: process.pid, phase: 'starting',
-  release: config.release, piVersion: config.pi.version, updatedAt: new Date().toISOString() };
+  release: config.release, piVersion: null, expectedPiVersion: config.pi.version, updatedAt: new Date().toISOString() };
 let child, stopped = false, server, heartbeat, rpcError, observed, stateSequence = 0;
 const save = () => { state.updatedAt = new Date().toISOString(); writeJson(join(dir, 'state.json'), state); };
 const initialId = messageId(digest(`${runId}:initial`));
@@ -60,6 +60,8 @@ async function snapshot() {
 }
 
 try {
+  state.piVersion = findPiEntry(config.pi.entry).version;
+  save();
   const env = { ...process.env, EDDA_PI_CHANNEL_DIR: root, EDDA_PI_RELEASE_ID: config.release.id,
     EDDA_SESSION_ID: runId, EDDA_SESSION_LABEL: `managed-pi-${runId.slice(0, 8)}` };
   delete env.EDDA_PROJECT_ID;
