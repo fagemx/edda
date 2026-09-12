@@ -6,6 +6,7 @@ import { listSessions, requestSession, getReceipt, inspectSession, prepareHandof
 import { enroll, watch, checkpoint, reply, managementBrief } from './supervision.mjs';
 import { composeHandoff } from './compose.mjs';
 import { followDependencies, dependencyStatus, unfollowDependencies, doctor } from './dependency-client.mjs';
+import { adoptSession } from './adoption.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs list
@@ -25,6 +26,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor CURSOR --action observed|working|waiting_user|complete|paused --note TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --action paused --note TEXT
   node integrations/pi/cli.mjs doctor [SESSION_ID]
+  node integrations/pi/cli.mjs adopt SESSION_ID_OR_PREFIX --task ID [--project PATH] [--include ID,ID] [--context FILE] [--scope TEXT] [--notify] [--max-notifications 10] [--preview] [--expected REVISION]
   node integrations/pi/cli.mjs follow SESSION_ID --project PATH --tasks ID,ID [--scope TEXT] [--notify] [--max-notifications 10]
   node integrations/pi/cli.mjs dependencies SESSION_ID
   node integrations/pi/cli.mjs check-dependencies SESSION_ID
@@ -44,7 +46,7 @@ async function main(args) {
   const options = {};
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
-    if (['--conversation', '--notify'].includes(arg) && options[arg] === undefined) { options[arg] = true; continue; }
+    if (['--conversation', '--notify', '--preview'].includes(arg) && options[arg] === undefined) { options[arg] = true; continue; }
     if (!arg.startsWith('--')) { positional.push(arg); continue; }
     if (options[arg] !== undefined || rest[i + 1] === undefined || rest[i + 1].startsWith('--')) throw new Error(`Missing or duplicate option ${arg}`);
     options[arg] = rest[++i];
@@ -56,6 +58,7 @@ async function main(args) {
     prepare: ['--manifest', '--expected'], brief: ['--budget-bytes'],
     compose: ['--project', '--task', '--context', '--output', '--edda-bin'],
     doctor: [], follow: ['--project', '--tasks', '--scope', '--notify', '--max-notifications'],
+    adopt: ['--task', '--project', '--include', '--context', '--scope', '--notify', '--max-notifications', '--preview', '--expected'],
     dependencies: [], 'check-dependencies': [], unfollow: [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
@@ -65,6 +68,10 @@ async function main(args) {
   const sessionId = positional[0];
   let result;
   if (command === 'doctor') result = await doctor(root, sessionId);
+  if (command === 'adopt') result = await adoptSession(root, sessionId, { id: options['--task'], project: options['--project'],
+    include: options['--include']?.split(',').map((s) => s.trim()), contextFile: options['--context'], scope: options['--scope'],
+    notify: options['--notify'] === true, maxNotifications: Number(options['--max-notifications'] ?? 10),
+    preview: options['--preview'] === true, expectedRevision: options['--expected'] });
   if (command === 'follow') result = await followDependencies(root, sessionId, { project: options['--project'],
     taskIds: options['--tasks']?.split(',').map((s) => s.trim()), scope: options['--scope'],
     notify: options['--notify'] === true, maxNotifications: Number(options['--max-notifications'] || 10) });
@@ -100,7 +107,8 @@ async function main(args) {
       sender: options['--sender'] || 'codex', mode: options['--mode'] || 'followUp' });
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-  if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable', 'needs_reload', 'needs_enrollment', 'not_registered'].includes(result?.status)) process.exitCode = 2;
+  if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable', 'needs_reload', 'needs_enrollment', 'not_registered',
+    'ambiguous_session', 'invalid_selector', 'offline', 'busy', 'source_changed', 'needs_expected_revision', 'adoption_incomplete'].includes(result?.status)) process.exitCode = 2;
 }
 
 main(process.argv.slice(2)).catch((error) => {
