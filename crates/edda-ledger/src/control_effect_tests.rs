@@ -1,6 +1,20 @@
 use super::*;
 use crate::ControlReviewClaimOutcomeV1;
 use crate::{ControlEffectRequestV1, ControlEffectResultV1};
+
+/// The stable repository key every controlled effect test binds to.
+fn bound_portable() -> String {
+    format!("repo_{}", "d".repeat(64))
+}
+
+/// Bind the canonical GitHub repository and stable repository key the
+/// production compiler requires for every non-local completion condition.
+fn compile_input(control_id: &str) -> ControlCompileInputV1 {
+    let mut input = super::compile_input(control_id);
+    input.manifest.basis.portable_repo_id = Some(bound_portable());
+    input.manifest.basis.github_repository = Some("owner/repo".into());
+    input
+}
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -8,7 +22,7 @@ use std::time::Duration;
 #[test]
 fn product_effect_is_intent_first_and_recovery_adopts_the_same_action() {
     let fixture = Fixture::new();
-    let authority_token = fixture.provision();
+    let authority_token = fixture.provision_for(Some(&bound_portable()));
     let ledger = Ledger::open(fixture.root.path()).unwrap();
     let mut input = compile_input("control_effectorder");
     input.manifest.completion_condition = ControlCompletionConditionV1::VerificationSucceeded;
@@ -147,7 +161,7 @@ fn product_effect_is_intent_first_and_recovery_adopts_the_same_action() {
 #[test]
 fn concurrent_presenters_execute_one_product_effect_for_the_durable_intent() {
     let fixture = Fixture::new();
-    let authority_token = fixture.provision();
+    let authority_token = fixture.provision_for(Some(&bound_portable()));
     let ledger = Ledger::open(fixture.root.path()).unwrap();
     let mut input = compile_input("control_oneeffect");
     input.manifest.completion_condition = ControlCompletionConditionV1::VerificationSucceeded;
@@ -297,7 +311,7 @@ fn review_claim_for(request: &ControlEffectRequestV1) -> ControlReviewClaimV1 {
 #[test]
 fn production_workspace_lock_selects_one_live_signed_claim() {
     let fixture = Fixture::new();
-    let authority_token = fixture.provision();
+    let authority_token = fixture.provision_for(Some(&bound_portable()));
     let ledger = Ledger::open(fixture.root.path()).unwrap();
     let mut input = compile_input("control_reviewclaimrace");
     input.manifest.completion_condition = ControlCompletionConditionV1::VerificationSucceeded;
@@ -358,7 +372,7 @@ fn production_workspace_lock_selects_one_live_signed_claim() {
 #[test]
 fn signed_claim_payload_and_same_head_retry_require_inconclusive_adjudication() {
     let fixture = Fixture::new();
-    let authority_token = fixture.provision();
+    let authority_token = fixture.provision_for(Some(&bound_portable()));
     let ledger = Ledger::open(fixture.root.path()).unwrap();
     let mut input = compile_input("control_reviewgeneration");
     input.manifest.completion_condition = ControlCompletionConditionV1::VerificationSucceeded;
@@ -429,7 +443,7 @@ fn signed_claim_payload_and_same_head_retry_require_inconclusive_adjudication() 
 #[test]
 fn adjudication_can_supersede_a_signed_claim_after_claim_evidence_failure() {
     let fixture = Fixture::new();
-    let authority_token = fixture.provision();
+    let authority_token = fixture.provision_for(Some(&bound_portable()));
     let ledger = Ledger::open(fixture.root.path()).unwrap();
     let mut input = compile_input("control_reviewclaimretry");
     input.manifest.completion_condition = ControlCompletionConditionV1::VerificationSucceeded;
@@ -519,7 +533,7 @@ fn adjudication_can_supersede_a_signed_claim_after_claim_evidence_failure() {
 #[test]
 fn needs_decision_receipt_never_satisfies_a_product_prerequisite_after_adjudication() {
     let fixture = Fixture::new();
-    let authority_token = fixture.provision();
+    let authority_token = fixture.provision_for(Some(&bound_portable()));
     let ledger = Ledger::open(fixture.root.path()).unwrap();
     let mut input = compile_input("control_failedclaim");
     input.manifest.completion_condition = ControlCompletionConditionV1::VerificationSucceeded;

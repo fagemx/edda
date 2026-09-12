@@ -527,10 +527,11 @@ fn external_action_is_explicitly_unavailable_and_writes_no_intent() {
         required_delivery: DeliveryRequirementV1::LocalOnly,
     });
     input.brief_inputs.push(execution_brief_input());
+    input.brief_inputs[0].basis.portable_repo_id = input.manifest.basis.portable_repo_id.clone();
     let ledger = Ledger::open(fixture.root.path()).unwrap();
     let mut repo_mismatch = input.clone();
     repo_mismatch.manifest.control_id = "control_repomismatch".into();
-    repo_mismatch.brief_inputs[0].basis.portable_repo_id = Some(format!("repo_{}", "d".repeat(64)));
+    repo_mismatch.brief_inputs[0].basis.portable_repo_id = Some(format!("repo_{}", "e".repeat(64)));
     let error = ledger
         .compile_control(repo_mismatch, &fixture.session, &authority_token)
         .unwrap_err()
@@ -645,6 +646,11 @@ fn taskless_external_completion_conditions_never_receive_local_complete_tokens()
     let mut invalid_profile = compile_input("control_invalidprofile");
     invalid_profile.manifest.completion_condition =
         ControlCompletionConditionV1::VerificationSucceeded;
+    invalid_profile.manifest.basis.portable_repo_id = Some(format!("repo_{}", "d".repeat(64)));
+    invalid_profile.manifest.basis.github_repository = Some("owner/repo".into());
+    invalid_profile.manifest.merge_policy.pr_number = Some(1141);
+    invalid_profile.manifest.merge_policy.expected_head_sha = Some("b".repeat(40));
+    invalid_profile.manifest.merge_policy.expected_base_sha = Some("c".repeat(40));
     invalid_profile.manifest.review_policy.verifier_profile = "strong".into();
     let error = ledger
         .compile_control(invalid_profile, &fixture.session, &authority_token)
@@ -655,6 +661,8 @@ fn taskless_external_completion_conditions_never_receive_local_complete_tokens()
     let mut verification = compile_input("control_verifyonly");
     verification.manifest.completion_condition =
         ControlCompletionConditionV1::VerificationSucceeded;
+    verification.manifest.basis.portable_repo_id = Some(format!("repo_{}", "d".repeat(64)));
+    verification.manifest.basis.github_repository = Some("owner/repo".into());
     let error = ledger
         .compile_control(verification, &fixture.session, &authority_token)
         .unwrap_err()
