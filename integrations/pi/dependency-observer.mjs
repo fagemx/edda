@@ -11,7 +11,7 @@ function clip(text, maxBytes) {
   while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
   return { text: bytes.subarray(0, end).toString('utf8'), truncated: end < bytes.length };
 }
-function fact(task) {
+export function dependencyFact(task) {
   if (!Number.isSafeInteger(task.attempts) || task.attempts < 0 ||
     (task.receipt !== null && task.receipt !== undefined && typeof task.receipt !== 'string') ||
     (task.failure_reason !== null && task.failure_reason !== undefined && typeof task.failure_reason !== 'string') ||
@@ -87,7 +87,7 @@ export function createDependencyObserver({ dir, sessionId, instanceId, policy, r
     if (allowed()) return status();
     let facts;
     try {
-      facts = await Promise.all(data.taskIds.map(async (id) => fact((await readTask(data.project, id, command, signal)).task)));
+      facts = await Promise.all(data.taskIds.map(async (id) => dependencyFact((await readTask(data.project, id, command, signal)).task)));
     } catch {
       const cancelled = signal.aborted;
       abort.abort();
