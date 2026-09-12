@@ -7,6 +7,10 @@ import { readEnrollment } from './supervision.mjs';
 import { createInboxProducer } from './inbox-producer.mjs';
 import { inboxStore, inboxId, messageId } from './inbox-store.mjs';
 import { assertCurrentEvent } from './inbox-binding.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const integrationVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
 const terminal = new Set(['settled', 'failed', 'unknown']);
 const now = () => new Date().toISOString();
@@ -86,6 +90,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
+      integration: { version: integrationVersion, modulePath: fileURLToPath(import.meta.url), releaseId: process.env.EDDA_PI_RELEASE_ID || null },
       capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
       inbox: inbox?.status() }),
     get dependencies() { return dependencies; },
