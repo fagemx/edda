@@ -1,14 +1,19 @@
 //! Event persistence: append, iterate, get, find, refs, chain verification.
 
+use crate::guided_execution::execution_brief_data;
+use crate::task_actions::CONTROLLED_TASK_LEASE_PREFIX;
+use crate::tasks::{self, TaskStatus};
 use edda_core::event::finalize_event;
+use edda_core::guided_execution::{parse_work_receipt, ReceiptExpectationV1, ResultClassV1};
 use edda_core::types::Event;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde::Deserialize;
 
 use super::mappers::*;
 use super::status_to_is_active;
 use super::SqliteStore;
 
-fn validate_event_hash(event: &Event) -> anyhow::Result<()> {
+pub(super) fn validate_event_hash(event: &Event) -> anyhow::Result<()> {
     let mut canonical = event.clone();
     finalize_event(&mut canonical)?;
     if event.event_family != canonical.event_family || event.event_level != canonical.event_level {
@@ -41,6 +46,216 @@ pub(super) fn validate_event_for_append(conn: &Connection, event: &Event) -> any
     }
 
     validate_event_hash(event)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlledCompletion {
+    attempt: u32,
+    lease_owner: String,
+    session_id: String,
+    agent_kind: String,
+    brief_event_id: String,
+    brief_digest: String,
+    outcome_code: String,
+}
+
+fn task_events_on(conn: &Connection) -> anyhow::Result<Vec<Event>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                payload, refs_blobs, refs_events, refs_provenance,
+                schema_version, digests, event_family, event_level
+         FROM events WHERE event_type LIKE 'task.%' ORDER BY rowid",
+    )?;
+    let rows = stmt
+        .query_map([], map_event_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter().map(row_to_event).collect()
+}
+
+fn event_on(conn: &Connection, event_id: &str) -> anyhow::Result<Option<Event>> {
+    let row = conn
+        .query_row(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE event_id = ?1",
+            params![event_id],
+            map_event_row,
+        )
+        .optional()?;
+    row.map(row_to_event).transpose()
+}
+
+fn consume_controlled_lease(
+    tx: &Transaction<'_>,
+    task_id: u64,
+    attempt: u32,
+    lease_owner: &str,
+) -> anyhow::Result<()> {
+    let deleted = tx.execute(
+        "DELETE FROM task_leases
+         WHERE task_id = ?1 AND attempt = ?2 AND owner = ?3
+           AND julianday(expires_at) > julianday('now')",
+        params![task_id, attempt, lease_owner],
+    )?;
+    anyhow::ensure!(
+        deleted == 1,
+        "controlled task.done lost its exact unexpired lease; completion rolled back"
+    );
+    Ok(())
+}
+
+fn validate_controlled_task_done(
+    tx: &Transaction<'_>,
+    event: &Event,
+    test_authority_sealed: bool,
+) -> anyhow::Result<()> {
+    let task_id = event
+        .payload
+        .get("task_id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("task.done omits task_id"))?;
+    let views = tasks::project_tasks(&task_events_on(tx)?);
+    let Some(task) = views.iter().find(|view| view.task_id == task_id) else {
+        anyhow::ensure!(
+            event.payload.get("controlled_completion").is_none(),
+            "controlled task.done metadata requires a known controlled task"
+        );
+        return Ok(());
+    };
+    let lease: Option<crate::TaskLease> = tx
+        .query_row(
+            "SELECT task_id, attempt, owner, expires_at, heartbeat_at
+             FROM task_leases WHERE task_id = ?1",
+            params![task_id],
+            |row| {
+                Ok(crate::TaskLease {
+                    task_id: row.get(0)?,
+                    attempt: row.get(1)?,
+                    owner: row.get(2)?,
+                    expires_at: row.get(3)?,
+                    heartbeat_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    let controlled_state = task.session_brief_event_id.is_some()
+        || task.session_brief_digest.is_some()
+        || task.session_lease_owner.is_some()
+        || lease
+            .as_ref()
+            .is_some_and(|value| value.owner.starts_with(CONTROLLED_TASK_LEASE_PREFIX));
+    let supplied = event.payload.get("controlled_completion");
+    if !controlled_state {
+        anyhow::ensure!(
+            supplied.is_none(),
+            "controlled task.done metadata requires a current controlled task state"
+        );
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        task.status == TaskStatus::Running,
+        "controlled task is not running; stale completion refused"
+    );
+    let controlled: ControlledCompletion = serde_json::from_value(
+        supplied
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("controlled task.done requires completion metadata"))?,
+    )
+    .map_err(|_| anyhow::anyhow!("controlled task.done has invalid completion metadata"))?;
+    let (brief_event_id, brief_digest, session_id, agent_kind, lease_owner, attempt) = match (
+        task.session_brief_event_id.as_deref(),
+        task.session_brief_digest.as_deref(),
+        task.session_id.as_deref(),
+        task.session_agent_kind.as_deref(),
+        task.session_lease_owner.as_deref(),
+        task.session_attempt,
+    ) {
+        (Some(event_id), Some(digest), Some(session), Some(agent), Some(owner), Some(attempt)) => {
+            (event_id, digest, session, agent, owner, attempt)
+        }
+        _ => anyhow::bail!("controlled task has an incomplete session authority binding"),
+    };
+    anyhow::ensure!(
+        attempt == task.attempts
+            && controlled.attempt == attempt
+            && controlled.lease_owner == lease_owner
+            && controlled.session_id == session_id
+            && controlled.agent_kind == agent_kind
+            && controlled.brief_event_id == brief_event_id
+            && controlled.brief_digest == brief_digest,
+        "controlled task.done correlation does not match current task state"
+    );
+    let lease = lease.ok_or_else(|| anyhow::anyhow!("controlled task lease is missing"))?;
+    anyhow::ensure!(
+        lease.attempt == attempt && lease.owner == lease_owner,
+        "controlled task lease changed before completion"
+    );
+    let expires = time::OffsetDateTime::parse(
+        &lease.expires_at,
+        &time::format_description::well_known::Rfc3339,
+    )?;
+    anyhow::ensure!(
+        expires > time::OffsetDateTime::now_utc(),
+        "controlled task lease expired before completion"
+    );
+    let prefix = format!("{CONTROLLED_TASK_LEASE_PREFIX}{brief_event_id}:{brief_digest}:");
+    anyhow::ensure!(
+        lease_owner.starts_with(&prefix),
+        "controlled task lease is bound to a different execution brief"
+    );
+    let brief_event = event_on(tx, brief_event_id)?
+        .ok_or_else(|| anyhow::anyhow!("controlled execution brief event is missing"))?;
+    let accepted_data = execution_brief_data(&brief_event, brief_digest)?;
+    anyhow::ensure!(
+        accepted_data.brief.task_ref == Some(task_id),
+        "execution brief does not identify the completed task"
+    );
+    let task_scope: std::collections::BTreeSet<_> = task.scope_paths.iter().collect();
+    let brief_scope: std::collections::BTreeSet<_> =
+        accepted_data.brief.scope.allowed_paths.iter().collect();
+    anyhow::ensure!(
+        task_scope == brief_scope,
+        "execution brief scope does not match the completed task"
+    );
+    let receipt_text = event
+        .payload
+        .get("receipt")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("controlled task.done omits WorkReceiptV1"))?;
+    let receipt = parse_work_receipt(
+        receipt_text.as_bytes(),
+        &accepted_data.brief,
+        ReceiptExpectationV1 {
+            task_id: Some(task_id),
+            attempt: Some(attempt),
+            lease_owner: Some(lease_owner),
+            agent_kind: Some(agent_kind),
+            session_id: Some(session_id),
+            ..ReceiptExpectationV1::default()
+        },
+    )?;
+    anyhow::ensure!(
+        receipt.result_class == ResultClassV1::Success
+            && receipt.outcome_code == controlled.outcome_code,
+        "controlled task.done requires its correlated success outcome"
+    );
+    anyhow::ensure!(
+        event
+            .payload
+            .get("evidence_paths")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "controlled task.done evidence must come from WorkReceiptV1"
+    );
+    anyhow::ensure!(
+        test_authority_sealed,
+        "controlled task.done requires an S6 product-verifiable execution authority seal"
+    );
+
+    consume_controlled_lease(tx, task_id, attempt, lease_owner)
 }
 
 fn materialize_snapshot(conn: &Connection, event: &Event) -> anyhow::Result<()> {
@@ -84,8 +299,23 @@ impl SqliteStore {
     ///
     /// If the event is a decision (note with `"decision"` tag), the `decisions`
     /// table is also updated atomically within the same transaction.
-    #[allow(clippy::too_many_lines)] // 166 lines at #779; split tracked in none
     pub fn append_event(&self, event: &Event) -> anyhow::Result<()> {
+        self.append_event_inner(event, false)
+    }
+
+    /// Test-only stand-in for the future S6 authority verifier. This method is
+    /// not compiled into production artifacts and cannot be reached through
+    /// [`crate::Ledger::append_event`].
+    #[cfg(test)]
+    pub(crate) fn append_event_with_test_execution_authority(
+        &self,
+        event: &Event,
+    ) -> anyhow::Result<()> {
+        self.append_event_inner(event, true)
+    }
+
+    #[allow(clippy::too_many_lines)] // append and materialization are one transaction
+    fn append_event_inner(&self, event: &Event, test_authority_sealed: bool) -> anyhow::Result<()> {
         let payload = serde_json::to_string(&event.payload)?;
         let refs_blobs = serde_json::to_string(&event.refs.blobs)?;
         let refs_events = serde_json::to_string(&event.refs.events)?;
@@ -94,6 +324,13 @@ impl SqliteStore {
 
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         validate_event_for_append(&tx, event)?;
+
+        // Classification comes from current controlled state, never from the
+        // caller-selected constructor/path. Full receipt correlation and exact
+        // lease consumption share this BEGIN IMMEDIATE transaction.
+        if event.event_type == "task.done" {
+            validate_controlled_task_done(&tx, event, test_authority_sealed)?;
+        }
 
         tx.execute(
             "INSERT INTO events (
@@ -272,6 +509,12 @@ impl SqliteStore {
         }
 
         validate_event_for_append(&tx, event)?;
+        if event.event_type == "task.done" {
+            // Idempotent append has no authority-bearing path. A new
+            // controlled completion therefore fails closed after the same
+            // current-state and full-receipt validation.
+            validate_controlled_task_done(&tx, event, false)?;
+        }
 
         tx.execute(
             "INSERT INTO events (

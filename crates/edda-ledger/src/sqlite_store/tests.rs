@@ -3133,17 +3133,17 @@ fn task_lease_v12_migrates_and_round_trips() {
     assert_eq!(store.task_lease(7).unwrap(), Some(lease.clone()));
     let replacement = crate::TaskLease {
         attempt: 3,
-        owner: "runner-7-3".into(),
+        owner: "r".into(),
         ..lease.clone()
     };
     store.upsert_task_lease(&replacement).unwrap();
-    assert!(!crate::Ledger::open(&dir)
-        .unwrap()
-        .renew_task_lease(7, 2, "stale-expiry", "stale-heartbeat")
-        .unwrap());
+    let ledger = crate::Ledger::open(&dir).unwrap();
+    let stale = ledger.renew_task_lease(7, 2, "x", "x").unwrap();
+    assert!(!stale);
     assert_eq!(store.task_lease(7).unwrap(), Some(replacement.clone()));
-    assert!(crate::Ledger::open(&dir)
-        .unwrap()
+    assert!(!store.renew_task_lease_owned(7, 3, "x", "x", "x").unwrap());
+    assert!(store.renew_task_lease_owned(7, 3, "r", "x", "x").unwrap());
+    assert!(ledger
         .renew_task_lease(7, 3, "new-expiry", "new-heartbeat")
         .unwrap());
     assert_eq!(

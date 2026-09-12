@@ -3,6 +3,7 @@
 //! Replaces the file-based storage (events.jsonl, refs/HEAD, refs/branches.json)
 //! with a single `ledger.db` SQLite file using WAL mode.
 
+mod control;
 mod decisions;
 mod dependencies;
 mod entities;

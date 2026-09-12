@@ -52,6 +52,73 @@ impl WorkspaceLock {
     }
 }
 
+/// Per-task generation lock held across an ACP turn.
+///
+/// `task.started` and `task.failed` appends take the same lock, so a running
+/// prompt cannot become stale through a fail/restart transition while it can
+/// still receive action authority. This lock is deliberately separate from
+/// [`WorkspaceLock`]: ACP permission audits must remain able to append while a
+/// turn is in progress.
+pub struct TaskDispatchLock {
+    _file: File,
+    task_id: u64,
+}
+
+impl TaskDispatchLock {
+    pub fn acquire(paths: &EddaPaths, task_id: u64) -> anyhow::Result<Self> {
+        let file = open_task_lock(paths, task_id)?;
+        file.lock_exclusive().map_err(|error| {
+            anyhow::anyhow!("cannot lock ACP task #{task_id} dispatch generation: {error}")
+        })?;
+        Ok(Self {
+            _file: file,
+            task_id,
+        })
+    }
+
+    pub fn try_acquire(paths: &EddaPaths, task_id: u64) -> anyhow::Result<Self> {
+        let file = open_task_lock(paths, task_id)?;
+        file.try_lock_exclusive().map_err(|_| {
+            anyhow::anyhow!(
+                "task #{task_id} has an active ACP turn; start/fail generation change refused"
+            )
+        })?;
+        Ok(Self {
+            _file: file,
+            task_id,
+        })
+    }
+
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+}
+
+pub(crate) fn task_generation_guard(
+    paths: &EddaPaths,
+    event: &edda_core::Event,
+) -> anyhow::Result<Option<TaskDispatchLock>> {
+    if !matches!(event.event_type.as_str(), "task.started" | "task.failed") {
+        return Ok(None);
+    }
+    let task_id = event
+        .payload
+        .get("task_id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("{} omits task_id", event.event_type))?;
+    TaskDispatchLock::try_acquire(paths, task_id).map(Some)
+}
+
+fn open_task_lock(paths: &EddaPaths, task_id: u64) -> anyhow::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(paths.edda_dir.join(format!("acp-task-{task_id}.lock")))
+        .map_err(|error| anyhow::anyhow!("cannot open ACP task dispatch lock: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

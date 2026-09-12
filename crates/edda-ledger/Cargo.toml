@@ -12,6 +12,7 @@ keywords.workspace = true
 
 [dependencies]
 edda-core = { path = "../edda-core", version = "0.6.1" }
+edda-store = { path = "../edda-store", version = "0.6.1" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -26,8 +27,12 @@ hex.workspace = true
 tracing.workspace = true
 globset.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
+edda-store = { path = "../edda-store", version = "0.6.1", features = ["test-support"] }
 
 
 [lints]

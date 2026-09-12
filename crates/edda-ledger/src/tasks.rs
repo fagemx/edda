@@ -70,6 +70,14 @@ pub struct TaskView {
     pub session_id: Option<String>,
     pub session_agent_kind: Option<String>,
     pub session_attempt: Option<u32>,
+    /// Exact mutable lease owner bound to a controlled runtime turn.
+    #[serde(skip_serializing)]
+    pub session_lease_owner: Option<String>,
+    /// Immutable brief identity bound to the latest runtime session.
+    #[serde(skip_serializing)]
+    pub session_brief_event_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub session_brief_digest: Option<String>,
     /// Last `task.failed` reason, kept across requeue for operator context.
     pub failure_reason: Option<String>,
     pub created_ts: String,
@@ -134,6 +142,9 @@ pub fn project_tasks(events: &[Event]) -> Vec<TaskView> {
                         session_id: None,
                         session_agent_kind: None,
                         session_attempt: None,
+                        session_lease_owner: None,
+                        session_brief_event_id: None,
+                        session_brief_digest: None,
                         failure_reason: None,
                         created_ts: event.ts.clone(),
                         updated_ts: event.ts.clone(),
@@ -152,9 +163,19 @@ pub fn project_tasks(events: &[Event]) -> Vec<TaskView> {
             }
             "task.session" => {
                 if let Some(v) = map.get_mut(&task_id) {
-                    if let Some(acp_session_id) = opt_str(&event.payload, "acp_session_id") {
-                        v.acp_session_id = Some(acp_session_id);
+                    let event_is_controlled = event.payload.get("brief_event_id").is_some()
+                        || event.payload.get("brief_digest").is_some()
+                        || event.payload.get("lease_owner").is_some();
+                    // Once an attempt has a controlled session, a later legacy
+                    // event cannot erase that authority binding. A new valid
+                    // controlled event may replace it for a later attempt.
+                    let attempt_is_controlled = v.session_brief_event_id.is_some()
+                        || v.session_brief_digest.is_some()
+                        || v.session_lease_owner.is_some();
+                    if attempt_is_controlled && !event_is_controlled {
+                        continue;
                     }
+                    v.acp_session_id = opt_str(&event.payload, "acp_session_id");
                     v.session_id =
                         opt_str(&event.payload, "session_id").or_else(|| v.acp_session_id.clone());
                     v.session_agent_kind = opt_str(&event.payload, "agent_kind");
@@ -163,6 +184,9 @@ pub fn project_tasks(events: &[Event]) -> Vec<TaskView> {
                         .get("attempt")
                         .and_then(|value| value.as_u64())
                         .and_then(|attempt| u32::try_from(attempt).ok());
+                    v.session_lease_owner = opt_str(&event.payload, "lease_owner");
+                    v.session_brief_event_id = opt_str(&event.payload, "brief_event_id");
+                    v.session_brief_digest = opt_str(&event.payload, "brief_digest");
                     v.updated_ts = event.ts.clone();
                 }
             }
@@ -313,7 +337,8 @@ mod tests {
     use edda_core::event::{
         new_task_created_event, new_task_done_event, new_task_failed_event,
         new_task_host_session_event, new_task_requeued_event, new_task_session_event,
-        new_task_started_event, TaskCreatedParams,
+        new_task_session_event_with_execution_brief, new_task_started_event,
+        ControlledTaskSessionParams, TaskCreatedParams,
     };
 
     fn created(task_id: u64, title: &str, after: &[u64]) -> Event {
@@ -542,6 +567,7 @@ mod tests {
         assert_eq!(view.session_id.as_deref(), Some("thread-123"));
         assert_eq!(view.session_agent_kind.as_deref(), Some("codex"));
         assert_eq!(view.session_attempt, Some(2));
+        assert_eq!(view.acp_session_id, None);
 
         let old = project_tasks(&[
             created(1, "build", &[]),
@@ -549,6 +575,38 @@ mod tests {
         ])
         .remove(0);
         assert_eq!(old.session_id.as_deref(), Some("acp-old"));
+
+        let controlled = project_tasks(&[
+            created(1, "build", &[]),
+            new_task_session_event_with_execution_brief(
+                "main",
+                None,
+                1,
+                &ControlledTaskSessionParams {
+                    agent_kind: "acp:grok",
+                    session_id: "acp-controlled",
+                    attempt: 1,
+                    lease_owner: "controlled-owner",
+                    brief_event_id: "evt_brief",
+                    brief_digest: &"a".repeat(64),
+                },
+            )
+            .unwrap(),
+        ])
+        .remove(0);
+        assert_eq!(
+            controlled.session_brief_event_id.as_deref(),
+            Some("evt_brief")
+        );
+        assert_eq!(controlled.session_attempt, Some(1));
+        assert_eq!(
+            controlled.session_lease_owner.as_deref(),
+            Some("controlled-owner")
+        );
+        assert_eq!(
+            controlled.session_brief_digest.as_deref().unwrap(),
+            "a".repeat(64)
+        );
     }
 
     #[test]
@@ -701,6 +759,9 @@ mod tests {
             session_id: None,
             session_agent_kind: None,
             session_attempt: None,
+            session_lease_owner: None,
+            session_brief_event_id: None,
+            session_brief_digest: None,
             failure_reason: None,
             created_ts: "2026-09-04T00:00:00Z".into(),
             updated_ts: "2026-09-04T00:00:00Z".into(),
