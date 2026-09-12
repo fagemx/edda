@@ -1,0 +1,154 @@
+{
+  "rows": [
+    {
+      "pilot": "a",
+      "reason": "Requested low observed high; worker profile checks failed before paid coding prompts.",
+      "completedArmReceipts": 9,
+      "workerReceipts": 27,
+      "prepReportedUSD": 0.0016771079999999999,
+      "workerReportedUSD": 0,
+      "requests": 2,
+      "arms": [
+        {
+          "label": "r1-serial-fork",
+          "passed": false,
+          "seconds": 8.19,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r1-parallel-brief",
+          "passed": false,
+          "seconds": 6.192,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r1-parallel-fork",
+          "passed": false,
+          "seconds": 6.311,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r1-serial-brief",
+          "passed": false,
+          "seconds": 8.164,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r2-serial-brief",
+          "passed": false,
+          "seconds": 8.181,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r2-parallel-fork",
+          "passed": false,
+          "seconds": 6.312,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r2-parallel-brief",
+          "passed": false,
+          "seconds": 6.437,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r2-serial-fork",
+          "passed": false,
+          "seconds": 8.378,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r3-serial-fork",
+          "passed": false,
+          "seconds": 8.226,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        }
+      ]
+    },
+    {
+      "pilot": "b",
+      "reason": "Overblocking recoverable tool errors suppressed repair; one scope drift; matrix stopped for policy correction.",
+      "completedArmReceipts": 3,
+      "workerReceipts": 9,
+      "prepReportedUSD": 0.0016391760000000002,
+      "workerReportedUSD": 0.030985727999999994,
+      "requests": 43,
+      "arms": [
+        {
+          "label": "r1-serial-fork",
+          "passed": true,
+          "seconds": 58.101,
+          "codeAcceptancePassed": true,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r1-parallel-brief",
+          "passed": false,
+          "seconds": 52.649,
+          "codeAcceptancePassed": false,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r1-parallel-fork",
+          "passed": false,
+          "seconds": 144.349,
+          "codeAcceptancePassed": true,
+          "scopeViolations": 1
+        }
+      ]
+    },
+    {
+      "pilot": "c",
+      "reason": "Seed background reads failed, so context was incomplete; timings excluded from primary.",
+      "completedArmReceipts": 3,
+      "workerReceipts": 9,
+      "prepReportedUSD": 0.0006977279999999999,
+      "workerReportedUSD": 0.023385383999999995,
+      "requests": 34,
+      "arms": [
+        {
+          "label": "r1-serial-fork",
+          "passed": true,
+          "seconds": 63.619,
+          "codeAcceptancePassed": true,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r1-parallel-brief",
+          "passed": true,
+          "seconds": 33.405,
+          "codeAcceptancePassed": true,
+          "scopeViolations": 0
+        },
+        {
+          "label": "r1-parallel-fork",
+          "passed": true,
+          "seconds": 30.215,
+          "codeAcceptancePassed": true,
+          "scopeViolations": 0
+        }
+      ]
+    },
+    {
+      "pilot": "d",
+      "reason": "Interrupted preparation with no completed results/preparation receipt; usage unavailable.",
+      "completedArmReceipts": 0,
+      "workerReceipts": 0,
+      "prepReportedUSD": null,
+      "workerReportedUSD": 0,
+      "requests": 0,
+      "arms": []
+    }
+  ],
+  "reportedUSD": 0.05838512399999999,
+  "notice": "Incomplete preparation d has no usage receipt. Totals cover reported completed model messages only, not independently reconciled billing."
+}

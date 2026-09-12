@@ -1,0 +1,306 @@
+{
+  "version": 1,
+  "model": "deepseek/deepseek-v4.1-flash",
+  "thinking": "high",
+  "base": "691988e18c391202a26fe29db18969c3570fd388",
+  "contractV1Digest": "1dd4e9edf8c98fe8568a972439b8d646e4859c2b3ea9750d0cd15e6861852eb7",
+  "contractV2Digest": "0ed28922e836d51160737ccb1309556f0479b383ab4c2bf66d8f99247e37ef6d",
+  "acceptanceV2Digest": "4a9651e2833e0e458eb7593631fff8c56ff44eefc7bf8c9c0c8164ff07bfded7",
+  "sourceDigest": "c79184a42ee30eb44339c731fc64f831edca369e7eac56c2b65efc3a3157d958",
+  "policy": "Only fork_read/fork_submit; up to four validated submissions inside one model turn; 240s timeout. No provider retries. Isolated coding prototype, not a security sandbox.",
+  "dependencyLimit": "v2 measures stale-checkpoint/current-contract correctness and an imposed verified-release barrier. Contract already names the interface; this does not establish that the source artifact was necessary for correctness.",
+  "pins": [
+    {
+      "filename": "fork-smoke-stress.mjs",
+      "digest": "fc7a5f2933af2eec015f28fa274b570bacf0e887cbf3a432f99e60f73dd599db"
+    },
+    {
+      "filename": "fork-bundle-tools.mjs",
+      "digest": "d888bbb13f3c2fe38c9f9807d555fa7280944fb0aa93a8f692c728c7950b2df9"
+    },
+    {
+      "filename": "fork-smoke-runtime.mjs",
+      "digest": "dba75e9e33c12135f068d61561ea53b16334073319eee0961536a97a85b4860e"
+    },
+    {
+      "filename": "cli.js",
+      "digest": "e6d7fcf36a239cf3746e67ddf4222081ac01a601b85a3ee688bdfe9c161d754c"
+    },
+    {
+      "filename": "session-manager.js",
+      "digest": "ccace64949db25379a43971ecea750c1b7ec6344e1bc31b9d5fe596ac2f1c9f3"
+    },
+    {
+      "filename": "package.json",
+      "digest": "f1738e4b42203e5f22bcb513f13fb2fb224f1e98d1f129ff042f87048665a94c"
+    }
+  ],
+  "rows": [
+    {
+      "label": "six-fork",
+      "inherited": true,
+      "dependency": false,
+      "passed": true,
+      "elapsedSeconds": 40.607,
+      "integrationSeconds": 2.57,
+      "workers": 6,
+      "workersPassed": 6,
+      "firstSubmissionPassed": 6,
+      "submissions": 6,
+      "requests": 18,
+      "toolCalls": 12,
+      "toolErrors": 0,
+      "totalTokens": 212490,
+      "reportedUSD": 0.023357681999999998,
+      "input": 57695,
+      "output": 23851,
+      "cacheRead": 130944,
+      "cacheWrite": 0,
+      "scopeViolations": 0,
+      "errors": [],
+      "sampledPeakWorkerRssMiB": 617.3984375,
+      "sampledMaxConcurrentWorkers": 6,
+      "dependencyReceipt": null,
+      "validations": [
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        },
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        }
+      ],
+      "sessions": [
+        "1995c933-961a-4533-9f47-871b15f97f0e",
+        "e35610c3-79a9-4a63-a95b-224c8d1898a6",
+        "86e03f17-9282-4fb5-a691-153e4dc81fe9",
+        "d5941ceb-e51a-4b29-9c63-e607615d0339",
+        "22dc0ca2-2e44-490c-8598-f39d398cc369",
+        "280e4b90-0abd-4dad-b596-ca897221d1d4"
+      ]
+    },
+    {
+      "label": "six-brief",
+      "inherited": false,
+      "dependency": false,
+      "passed": true,
+      "elapsedSeconds": 38.129,
+      "integrationSeconds": 2.594,
+      "workers": 6,
+      "workersPassed": 6,
+      "firstSubmissionPassed": 6,
+      "submissions": 6,
+      "requests": 18,
+      "toolCalls": 12,
+      "toolErrors": 0,
+      "totalTokens": 65096,
+      "reportedUSD": 0.013447607999999998,
+      "input": 12420,
+      "output": 19140,
+      "cacheRead": 33536,
+      "cacheWrite": 0,
+      "scopeViolations": 0,
+      "errors": [],
+      "sampledPeakWorkerRssMiB": 650.63671875,
+      "sampledMaxConcurrentWorkers": 6,
+      "dependencyReceipt": null,
+      "validations": [
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        },
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        }
+      ],
+      "sessions": [
+        "01a095fd-3d71-7738-b76d-6fa29327e28f",
+        "01a095fd-426b-70bc-afeb-54f3325e71e3",
+        "01a095fd-4763-745f-b432-a009f893390c",
+        "01a095fd-4c5b-7239-9187-c67b361d8998",
+        "01a095fd-5155-72a1-b60c-5d4969e1ebb7",
+        "01a095fd-5657-74fb-ae4b-69824af30f5a"
+      ]
+    },
+    {
+      "label": "six-brief-repeat",
+      "inherited": false,
+      "dependency": false,
+      "passed": true,
+      "elapsedSeconds": 33.877,
+      "integrationSeconds": 2.771,
+      "workers": 6,
+      "workersPassed": 6,
+      "firstSubmissionPassed": 6,
+      "submissions": 6,
+      "requests": 18,
+      "toolCalls": 12,
+      "toolErrors": 0,
+      "totalTokens": 61210,
+      "reportedUSD": 0.012132252,
+      "input": 11690,
+      "output": 17136,
+      "cacheRead": 32384,
+      "cacheWrite": 0,
+      "scopeViolations": 0,
+      "errors": [],
+      "sampledPeakWorkerRssMiB": 668.15234375,
+      "sampledMaxConcurrentWorkers": 6,
+      "dependencyReceipt": null,
+      "validations": [
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        },
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        }
+      ],
+      "sessions": [
+        "01a095fd-d279-775b-84a2-58054082db26",
+        "01a095fd-d780-77f5-9f6b-a8c96c40f6c2",
+        "01a095fd-dc9f-716c-92da-84795a3105f4",
+        "01a095fd-e1ba-7248-b48e-5b6a1a7931b8",
+        "01a095fd-e6d5-7706-a7a3-235380abe4b1",
+        "01a095fd-ebed-7579-a0ff-a5f9ebfa370c"
+      ]
+    },
+    {
+      "label": "six-fork-repeat",
+      "inherited": true,
+      "dependency": false,
+      "passed": true,
+      "elapsedSeconds": 39.367,
+      "integrationSeconds": 2.723,
+      "workers": 6,
+      "workersPassed": 6,
+      "firstSubmissionPassed": 6,
+      "submissions": 6,
+      "requests": 18,
+      "toolCalls": 12,
+      "toolErrors": 0,
+      "totalTokens": 202465,
+      "reportedUSD": 0.02027619,
+      "input": 57629,
+      "output": 18756,
+      "cacheRead": 126080,
+      "cacheWrite": 0,
+      "scopeViolations": 0,
+      "errors": [],
+      "sampledPeakWorkerRssMiB": 651.30859375,
+      "sampledMaxConcurrentWorkers": 6,
+      "dependencyReceipt": null,
+      "validations": [
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        },
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        }
+      ],
+      "sessions": [
+        "333533ac-d0ae-45ea-874e-629e8b6cf743",
+        "c6283363-6284-41fb-99a6-a91c7bd7293e",
+        "9ab458c7-638e-4993-937c-e3f19566f077",
+        "237a01a1-2945-48ca-845a-d13d7b04f79a",
+        "541d3aca-0628-4d20-b727-76a3401d1021",
+        "9d44c909-cc5d-4e07-baad-3620b263d3db"
+      ]
+    },
+    {
+      "label": "interface-v2-fork",
+      "inherited": true,
+      "dependency": true,
+      "passed": true,
+      "elapsedSeconds": 43.03,
+      "integrationSeconds": 1.385,
+      "workers": 3,
+      "workersPassed": 3,
+      "firstSubmissionPassed": 3,
+      "submissions": 3,
+      "requests": 9,
+      "toolCalls": 6,
+      "toolErrors": 0,
+      "totalTokens": 101870,
+      "reportedUSD": 0.009761232,
+      "input": 29568,
+      "output": 8558,
+      "cacheRead": 63744,
+      "cacheWrite": 0,
+      "scopeViolations": 0,
+      "errors": [],
+      "sampledPeakWorkerRssMiB": 232.38671875,
+      "sampledMaxConcurrentWorkers": 2,
+      "dependencyReceipt": {
+        "releasedAt": 1789222930186,
+        "producerSettledAtRelease": false,
+        "artifactDigest": "1e2561b7cc0834b6dcff46fdc8797456518a720ab4bd9be8b29651f442e73771"
+      },
+      "validations": [
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        }
+      ],
+      "sessions": [
+        "fc557450-4568-435f-9bd9-795a6bedb350",
+        "ebca2f15-0e6f-4607-8955-8d7dd377023d",
+        "34f933ea-3bdd-4092-bd3f-7b684390dd82"
+      ]
+    },
+    {
+      "label": "interface-v2-brief",
+      "inherited": false,
+      "dependency": true,
+      "passed": true,
+      "elapsedSeconds": 47.5,
+      "integrationSeconds": 1.323,
+      "workers": 3,
+      "workersPassed": 3,
+      "firstSubmissionPassed": 3,
+      "submissions": 3,
+      "requests": 9,
+      "toolCalls": 6,
+      "toolErrors": 0,
+      "totalTokens": 44075,
+      "reportedUSD": 0.009516522,
+      "input": 6543,
+      "output": 14108,
+      "cacheRead": 23424,
+      "cacheWrite": 0,
+      "scopeViolations": 0,
+      "errors": [],
+      "sampledPeakWorkerRssMiB": 240.52734375,
+      "sampledMaxConcurrentWorkers": 2,
+      "dependencyReceipt": {
+        "releasedAt": 1789222971517,
+        "producerSettledAtRelease": false,
+        "artifactDigest": "db05f23551709950f41e2260e916d3a24a8d2f0241dc7bb50345c39d335678fa"
+      },
+      "validations": [
+        {
+          "passed": true,
+          "output": "{\"passed\":true,\"checks\":138,\"bundle\":\"all\"}"
+        }
+      ],
+      "sessions": [
+        "01a095ff-990c-7290-9880-934a7eef67b4",
+        "01a095ff-9e28-77ab-b74b-ca649a1a2553",
+        "01a095ff-ef82-7182-9683-2929cd3d0048"
+      ]
+    }
+  ],
+  "totalReportedUSD": 0.088491486,
+  "limitations": [
+    "Custom tool/validation workflow and fanout change together; no isolated causal speedup claim.",
+    "Six workers produce two full deliveries; primary three workers produce one.",
+    "Inherited preparation is reused from the primary experiment and reported there.",
+    "RSS is sampled, not exact peak; generated code acceptance is not sandboxed.",
+    "v2 measures stale-checkpoint/current-contract correctness and an imposed verified-release barrier. Contract already names the interface; this does not establish that the source artifact was necessary for correctness."
+  ]
+}
