@@ -18,7 +18,7 @@ export function createHandoff(dir, sessionId, instanceId) {
       !Number.isSafeInteger(data.settledEpoch) || data.settledEpoch < 0 || data.settledEpoch > data.workEpoch ||
       !data.reportIds || typeof data.reportIds !== 'object' || Array.isArray(data.reportIds)) throw problem('Invalid persisted handoff state');
     if (data.latestReport) {
-      const { reportId, instanceId: reportInstance, workEpoch, recordedAt, ...value } = data.latestReport;
+      const { reportId, instanceId: reportInstance, workEpoch, recordedAt, supervisorScopeDigest, ...value } = data.latestReport;
       normalizeReport(value);
       if (reportInstance !== data.instanceId || value.manifestRevision !== data.manifestRevision || workEpoch > data.workEpoch) throw problem('Invalid persisted handoff report binding');
     }
@@ -27,6 +27,8 @@ export function createHandoff(dir, sessionId, instanceId) {
   const commit = (next) => { writeJson(path, next); data = next; };
   return {
     currentRevision: () => current() ? data.manifestRevision : null,
+    outboundEvidence: () => data?.latestReport ? { report: data.latestReport,
+      runId: data.manifest.runId, planRef: data.manifest.planRef } : null,
     prepare(value, expectedRevision, runtime) {
       if (runtime.state !== 'idle') throw problem('Handoff preparation requires an idle instance', 409);
       const manifest = normalizeManifest(value);
@@ -44,7 +46,7 @@ export function createHandoff(dir, sessionId, instanceId) {
       if (name === 'agent_start') commit({ ...data, workEpoch: data.workEpoch + 1 });
       if (name === 'agent_settled') commit({ ...data, settledEpoch: data.workEpoch });
     },
-    report(id, value) {
+    report(id, value, supervisorScopeDigest = null) {
       id = validateId(id);
       const report = normalizeReport(value);
       if (!current()) throw problem('No handoff bound to this instance; prepare or explicitly rebind first', 409);
@@ -61,7 +63,7 @@ export function createHandoff(dir, sessionId, instanceId) {
       const recordedAt = now();
       const receipt = { reportId: id, sessionId, instanceId, manifestRevision: data.manifestRevision,
         workEpoch: data.workEpoch, recordedAt, status: 'recorded', acceptance: 'unverified' };
-      commit({ ...data, latestReport: { ...report, reportId: id, instanceId, workEpoch: data.workEpoch, recordedAt },
+      commit({ ...data, latestReport: { ...report, reportId: id, instanceId, workEpoch: data.workEpoch, recordedAt, supervisorScopeDigest },
         reportIds: { ...data.reportIds, [id]: { fingerprint, receipt } } });
       return receipt;
     },

@@ -7,6 +7,9 @@ import { enroll, watch, checkpoint, reply, managementBrief } from './supervision
 import { composeHandoff } from './compose.mjs';
 import { followDependencies, dependencyStatus, unfollowDependencies, doctor } from './dependency-client.mjs';
 import { adoptSession } from './adoption.mjs';
+import { listInbox, readInbox, acknowledgeInbox, recordAuthorization, revokeAuthorization, respondInbox } from './inbox-manager.mjs';
+import { wakeCapability } from './inbox-store.mjs';
+import { readBoundedFile } from './compose-sources.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs list
@@ -31,6 +34,14 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs dependencies SESSION_ID
   node integrations/pi/cli.mjs check-dependencies SESSION_ID
   node integrations/pi/cli.mjs unfollow SESSION_ID
+  node integrations/pi/cli.mjs inbox [--consumer codex] [--limit 20] [--after EVENT_ID]
+  node integrations/pi/cli.mjs inbox-read EVENT_ID [--consumer codex] [--budget-bytes 16384]
+  node integrations/pi/cli.mjs inbox-ack EVENT_ID [--consumer codex]
+  node integrations/pi/cli.mjs authorization-record EVENT_ID --record FILE [--consumer codex]
+  node integrations/pi/cli.mjs authorization-revoke RECORD_ID [--consumer codex]
+  node integrations/pi/cli.mjs inbox-respond EVENT_ID --message TEXT [--authorization RECORD_ID] [--consumer codex]
+  node integrations/pi/cli.mjs inbox-respond EVENT_ID --message-file PATH [--authorization RECORD_ID]
+  node integrations/pi/cli.mjs inbox-wake
 
 JSON stdout; diagnostics stderr. EDDA_PI_CHANNEL_DIR overrides the private root.
 Supervision commands are tools for an authorized controller, not a decision engine.
@@ -60,13 +71,28 @@ async function main(args) {
     doctor: [], follow: ['--project', '--tasks', '--scope', '--notify', '--max-notifications'],
     adopt: ['--task', '--project', '--include', '--context', '--scope', '--notify', '--max-notifications', '--preview', '--expected'],
     dependencies: [], 'check-dependencies': [], unfollow: [],
+    inbox: ['--consumer', '--limit', '--after'], 'inbox-read': ['--consumer', '--budget-bytes'], 'inbox-ack': ['--consumer'],
+    'authorization-record': ['--record', '--consumer'], 'authorization-revoke': ['--consumer'],
+    'inbox-respond': ['--message', '--message-file', '--authorization', '--consumer'], 'inbox-wake': [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
-  const counts = command === 'doctor' ? [0, 1] : [['list', 'watch', 'compose'].includes(command) ? 0 : 1];
+  const counts = command === 'doctor' ? [0, 1] : [['list', 'watch', 'compose', 'inbox', 'inbox-wake'].includes(command) ? 0 : 1];
   if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
+  if (command === 'inbox') result = listInbox(root, { consumer: options['--consumer'], limit: options['--limit'], after: options['--after'] });
+  if (command === 'inbox-read') result = await readInbox(root, sessionId, { consumer: options['--consumer'], budget: options['--budget-bytes'] });
+  if (command === 'inbox-ack') result = acknowledgeInbox(root, sessionId, options['--consumer']);
+  if (command === 'inbox-wake') result = wakeCapability();
+  if (command === 'authorization-record') result = await recordAuthorization(root, sessionId,
+    JSON.parse((await readBoundedFile(options['--record'])).text), options['--consumer']);
+  if (command === 'authorization-revoke') result = revokeAuthorization(root, sessionId, options['--consumer']);
+  if (command === 'inbox-respond') {
+    if (Boolean(options['--message']) === Boolean(options['--message-file'])) throw new Error('Supply exactly one of --message or --message-file');
+    result = await respondInbox(root, sessionId, { message: options['--message'] || (await readBoundedFile(options['--message-file'])).text,
+      authorizationId: options['--authorization'], consumer: options['--consumer'] });
+  }
   if (command === 'doctor') result = await doctor(root, sessionId);
   if (command === 'adopt') result = await adoptSession(root, sessionId, { id: options['--task'], project: options['--project'],
     include: options['--include']?.split(',').map((s) => s.trim()), contextFile: options['--context'], scope: options['--scope'],
@@ -108,7 +134,7 @@ async function main(args) {
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable', 'needs_reload', 'needs_enrollment', 'not_registered',
-    'ambiguous_session', 'invalid_selector', 'offline', 'busy', 'source_changed', 'needs_expected_revision', 'adoption_incomplete'].includes(result?.status)) process.exitCode = 2;
+    'ambiguous_session', 'invalid_selector', 'offline', 'busy', 'source_changed', 'needs_expected_revision', 'adoption_incomplete', 'unsupported'].includes(result?.status)) process.exitCode = 2;
 }
 
 main(process.argv.slice(2)).catch((error) => {

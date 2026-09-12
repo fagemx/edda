@@ -73,10 +73,85 @@ means setup succeeded, not work started; notify mode reports `workStarted: null`
 until its separate message receipt is inspected. Without `--notify`, adoption
 configures observation only. Use an explicit `send` for an authorized work instruction.
 
-The receiver does not yet push decision requests into a manager inbox or wake an
-idle Codex thread. `conversation` reads replies on demand; `brief` reads structured
-reports when prepared. Dependency alerts wake the receiving Pi only. Manager inbox
-delivery and reverse wake routing remain a separate, necessary follow-up.
+The receiver now persists stopping/decision events in a local manager inbox (below).
+It does not wake an idle Codex thread. `conversation` still reads replies on demand;
+`brief` reads structured reports when prepared. Dependency alerts wake Pi only.
+
+## Manager inbox: observe, read and respond
+
+Pi publishes a decision event when it records `waiting_decision`; other structured
+stopping reports are also retained. Without a structured report, settlement saves
+an unread-activity event with at most 2400 UTF-8 bytes of the final public assistant
+text. No approval is inferred from prose and no private reasoning is captured.
+Workers do not need to fill metadata or stop for another approval to continue work.
+
+```powershell
+node integrations/pi/cli.mjs inbox
+node integrations/pi/cli.mjs inbox-read EVENT_ID
+node integrations/pi/cli.mjs inbox-ack EVENT_ID
+node integrations/pi/cli.mjs inbox-respond EVENT_ID --message "The existing task scope is approved; proceed with the specified next step."
+```
+
+The index is bounded (`--limit 1..50`, default 20); use `--after EVENT_ID` for the
+next page. Pages are observation snapshots, not a streaming delivery cursor; start
+from the beginning when polling again. `--consumer NAME` separates each manager's
+read acknowledgements. All local consumers share the same inbox; names are labels,
+not authentication or assignment. Ack means read, not approval or resolution;
+unanswered questions and historical responses remain available across restarts.
+`inbox-read --budget-bytes 32768` can expand one event without replaying a transcript.
+
+An explicit response uses one deterministic message ID per event. It checks the
+original idle instance and current work/scope before sending; old questions cannot
+silently send into a new run. Its intent precedes delivery and uncertainty never
+causes a blind resend. Inspect `inbox-read` for the actual message receipt. A
+started/settled message proves processing began, never independent task acceptance.
+The ordinary `send` command remains available for a fresh authorized instruction.
+
+### Optional reuse of an existing authorization
+
+This is manager evidence, not an additional permission gate. A manager can save a
+reference to an already-approved exact action/resource using a JSON file:
+
+```json
+{
+  "requestedAction": "fixture_continue",
+  "resource": "offline-only",
+  "source": { "uri": "fixture://operator", "revision": "approved-v1" },
+  "note": "This action is already approved within the existing scope."
+}
+```
+
+```powershell
+node integrations/pi/cli.mjs authorization-record EVENT_ID --record approval-reference.json
+node integrations/pi/cli.mjs inbox-respond EVENT_ID --authorization RECORD_ID --message "Proceed with the already-approved step."
+node integrations/pi/cli.mjs authorization-revoke RECORD_ID
+```
+
+Replace fixture values with the request's exact action/resource and actual evidence
+reference. A later matching request under the same session/run/manifest/scope shows
+the saved reference as a candidate. The receiver cannot create it through its report
+tool, and matching never sends a response automatically. References are manager
+declarations, not independently verified grants; their contents are not fetched or
+executed. Missing/mismatched/revoked optional evidence produces a warning and is
+omitted from the explicit response, not a new request for permission.
+
+### Delivery limits and failures
+
+`inbox-wake` currently returns `unsupported` with `notified: false`: this package
+has no configured adapter to the existing Codex desktop host. It starts no process,
+model or schedule. An active manager can read the durable inbox; persistence is not
+proof that an idle manager was notified. Host wake routing is still required for
+unattended supervision.
+
+Inbox telemetry is a side channel. Storage/notification errors appear in session
+status but do not reject valid handoff reports, handoff updates or ordinary channel
+messages. Persisted events, read acknowledgements, response intents and authorization
+records live in the private registry and are not automatically deleted. A pending
+publication is replayed idempotently on startup/heartbeat; the latest durable report
+can also be recovered. If storage failed before anything was persisted, an observation
+may be unavailable after a crash; no successful delivery is claimed. Hard-link atomic
+publication requires a filesystem supporting hard links; unsupported storage reports
+an error and original work continues.
 
 ## Select dependencies directly: follow, inspect, pause
 
@@ -435,6 +510,7 @@ node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/p
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --supervise
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff-budget
+node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --inbox
 node integrations/pi/dependency-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js C:/Users/fagem/.cargo/bin/edda.exe
 ```
 
