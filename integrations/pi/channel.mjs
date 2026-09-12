@@ -4,6 +4,13 @@ import { openStore, digest, validateSession, validateId } from './store.mjs';
 import { createHandoff } from './handoff.mjs';
 import { createDependencyObserver } from './dependency-observer.mjs';
 import { readEnrollment } from './supervision.mjs';
+import { createInboxProducer } from './inbox-producer.mjs';
+import { inboxStore, inboxId, messageId } from './inbox-store.mjs';
+import { assertCurrentEvent } from './inbox-binding.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const integrationVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
 const terminal = new Set(['settled', 'failed', 'unknown']);
 const now = () => new Date().toISOString();
@@ -39,6 +46,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const store = openStore(root, sessionId, owner);
   let handoff;
   let dependencies;
+  let inbox;
   try { handoff = createHandoff(store.dir, sessionId, instanceId); }
   catch (error) { store.release(); throw error; }
   let closed = false;
@@ -82,21 +90,27 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
-      capabilities: ['send', 'receipts', 'handoff', 'dependencies', ...(getConversation ? ['conversation'] : [])] }),
+      integration: { version: integrationVersion, modulePath: fileURLToPath(import.meta.url), releaseId: process.env.EDDA_PI_RELEASE_ID || null },
+      capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
+      inbox: inbox?.status() }),
     get dependencies() { return dependencies; },
     handoffContext: (budget) => handoff.context(channel.snapshot(), budget),
     reportHandoff(id, value) {
       if (closed || storageError) throw fail('Channel unavailable', 503);
-      return handoff.report(id, value);
+      inbox.reconcile();
+      const p = readEnrollment(root, sessionId);
+      const receipt = handoff.report(id, value, p?.enabled && typeof p.scope === 'string' ? digest(p.scope) : null);
+      inbox.reconcile();
+      return receipt;
     },
     event(name, data = {}) {
       if (closed) return;
-      if (name === 'agent_start') { busy = true; lastStopReason = null; }
+      if (name === 'agent_start') { busy = true; lastStopReason = null; inbox.begin(); }
       if (name === 'ui_prompt_start') waiting = true;
       if (name === 'ui_prompt_end') waiting = false;
       if (name === 'tool_execution_start') tools.set(data.toolCallId, data.toolName);
       if (name === 'tool_execution_end') tools.delete(data.toolCallId);
-      if (name === 'assistant_end') lastStopReason = data.stopReason;
+      if (name === 'assistant_end') { lastStopReason = data.stopReason; inbox.assistant(data.text); }
       state.lastEvent = name;
       state.lastProgressAt = now();
       recompute();
@@ -117,6 +131,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
         if (r.instanceId === instanceId && r.status === 'started') update(r, ['error', 'aborted'].includes(lastStopReason) ? 'failed' : 'settled');
       }
       channel.event('agent_settled');
+      inbox.settled();
     },
     async close() {
       if (closed) return;
@@ -174,6 +189,15 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       if (req.headers.origin || Buffer.byteLength(auth) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw fail('Unauthorized', 401);
       if (req.headers['x-edda-instance'] !== instanceId) throw fail('Wrong session instance', 409);
       if (req.method === 'GET' && req.url === '/status') return reply(200, channel.snapshot());
+      if (req.method === 'POST' && req.url === '/inbox/respond') {
+        if (req.headers['content-type'] !== 'application/json') throw fail('Expected application/json', 415);
+        const body = await jsonBody(req), records = inboxStore(root);
+        const event = records.read('events', inboxId(body.eventId));
+        if (!event) throw fail('Inbox event not found', 404);
+        if (validateId(body.id) !== messageId(body.eventId)) throw fail('Inbox response must use its event message identity', 409);
+        assertCurrentEvent(event.data, channel.snapshot(), channel.handoffContext(32768), readEnrollment(root, sessionId));
+        return reply(200, submitMessage(body, true));
+      }
       if (req.method === 'GET' && req.url === '/dependencies') return reply(200, dependencies.status());
       if (req.method === 'POST' && req.url?.startsWith('/dependencies')) {
         if (closed || storageError) throw fail('Channel unavailable', 503);
@@ -192,6 +216,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
         if (closed || storageError) throw fail('Channel unavailable', 503);
         if (req.headers['content-type'] !== 'application/json') throw fail('Expected application/json', 415);
         const body = await jsonBody(req);
+        inbox.reconcile();
         handoff.prepare(body.manifest, body.expectedRevision, channel.snapshot());
         return reply(200, channel.handoffContext());
       }
@@ -217,6 +242,14 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   server.timeout = 5000;
   let heartbeat;
   try {
+    try {
+      inbox = createInboxProducer({ root, sessionId, instanceId, evidence: () => handoff.outboundEvidence(),
+        context: () => channel.handoffContext(32768), policy: () => readEnrollment(root, sessionId) });
+    } catch (error) {
+      // Telemetry setup never disables the original channel or task execution.
+      inbox = { status: () => ({ status: 'storage_error', error: error.message, wake: { status: 'unsupported', notified: false } }),
+        begin() {}, assistant() {}, settled() {}, reconcile() {} };
+    }
     dependencies = createDependencyObserver({ dir: store.dir, sessionId, instanceId,
       policy: () => readEnrollment(root, sessionId), runtime: () => channel.snapshot(),
       manifestRevision: () => handoff.currentRevision(), send: (body) => submitMessage(body, true),
@@ -229,7 +262,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     store.owner(owner);
     save();
     heartbeat = setInterval(() => {
-      try { save(); }
+      try { save(); inbox.reconcile(); }
       catch { storageError = true; recompute(); }
     }, heartbeatMs);
     heartbeat.unref();

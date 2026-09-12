@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import extension from './extension.mjs';
 import { listSessions, requestSession, getReceipt } from './client.mjs';
+import { listInbox, readInbox } from './inbox-manager.mjs';
 
 test('Pi lifecycle, tool spans, queued messages, UI waits, settlement and session replacement', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'edda-extension-test-'));
@@ -50,8 +51,14 @@ test('Pi lifecycle, tool spans, queued messages, UI waits, settlement and sessio
   assert.equal((await getReceipt(root, sid, id)).status, 'unconfirmed');
   await emit('agent_start');
   await emit('message_start', { message: { role: 'user', content: [{ type: 'text', text: delivered[0].text }] } });
-  await emit('message_end', { message: { role: 'assistant', stopReason: 'stop' } });
+  await emit('message_end', { message: { role: 'assistant', stopReason: 'stop', content: [
+    { type: 'thinking', thinking: 'PRIVATE_REASONING_MUST_NOT_LEAK' }, { type: 'text', text: 'Public stopping reason' },
+  ] } });
   await emit('agent_settled');
+  const inbox = listInbox(root);
+  const detail = await readInbox(root, inbox.events.at(-1).eventId);
+  assert.equal(detail.event.excerpt.text, 'Public stopping reason');
+  assert.ok(!JSON.stringify(detail).includes('PRIVATE_REASONING_MUST_NOT_LEAK'));
   assert.equal((await getReceipt(root, sid, id)).status, 'settled');
   const prior = sid;
   await emit('session_shutdown');
