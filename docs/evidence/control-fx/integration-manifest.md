@@ -164,7 +164,8 @@ Carry modes:
 | `crates/edda-cli/src/main.rs` | keep main's module/command set; add `cmd_control`, `cmd_control_effects`, `#[cfg(test)] control_effect_pipeline_tests`, and the `Control` command/registration |
 | `crates/edda-cli/src/cmd_init.rs` | keep main's file (both-host skill scaffolding + orchestration projection test); add `("task-prepare", …)` to `SKILLS` |
 | `crates/edda-cli/src/cmd_review/mod.rs` | keep main's PR1164 launcher/persistence/warning changes; add CE's `claim` module, `review_comments_argv`/`review_lines`/`review_union` exports, `pub(crate) mod github` |
-| `crates/edda-cli/src/cmd_dispatch.rs` | keep main's doc, `--task-id` ACP guard, claim-guard-before-turn, codex persistence options; add CE's `--brief-event-id`/`--brief-digest`, `claim_guard_outcome`, and ACP preflight handoff |
+| `crates/edda-cli/src/cmd_dispatch.rs` | keep main's doc, `--task-id` ACP guard, claim-guard-before-turn, codex persistence options; add CE's `--brief-event-id`/`--brief-digest` and ACP preflight handoff. The carried claim-outcome helper and main's `claim_guard_refusal` are relocated into `claim_guard.rs` so the file holds main's 2106-line ratchet without contortion |
+| `crates/edda-cli/src/claim_guard.rs` | CE version plus `dispatch_claim_outcome` and `claim_guard_refusal` relocated from `cmd_dispatch.rs` |
 | `COMPATIBILITY.md` | keep main's text; recompute `main.rs` line citations after adding the `Control` variant |
 | `docs/reference/ledger-event-spec.md` | see A.6 (frozen source is main plus these rows) |
 
