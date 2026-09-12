@@ -41,5 +41,8 @@ Final review verdict and installation evidence are recorded on Edda task #174.
 - [x] Verify projection/privacy, branch/cursor correctness, legacy identity,
   stale/busy replies and deduplication. Exercise actual Pi question/answer loop
   with a deterministic offline provider.
-- [ ] Obtain independent review, fix frozen-surface findings, enroll the two
-  operator-selected sessions and enable a host heartbeat for ongoing supervision.
+- [x] Obtain independent review and fix frozen-surface findings: completion must
+  use the latest head; explicit pause must work when the session is unreachable.
+
+Deployment and final local review receipts (two selected enrollments and host
+heartbeat activation) are recorded durably in Edda task #177 and session notes.

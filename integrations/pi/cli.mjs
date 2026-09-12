@@ -17,6 +17,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs watch
   node integrations/pi/cli.mjs reply SESSION_ID --to CURSOR --message TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor CURSOR --action observed|working|waiting_user|complete|paused --note TEXT
+  node integrations/pi/cli.mjs checkpoint SESSION_ID --action paused --note TEXT
 
 JSON stdout; diagnostics stderr. EDDA_PI_CHANNEL_DIR overrides the private root.
 Supervision commands are tools for an authorized controller, not a decision engine.

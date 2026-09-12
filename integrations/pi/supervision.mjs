@@ -46,12 +46,20 @@ export async function watch(root) {
 export async function checkpoint(root, id, { cursor, action, note }) {
   if (!['observed', 'working', 'waiting_user', 'complete', 'paused'].includes(action)) throw new Error('Invalid checkpoint action');
   if (typeof note !== 'string' || !note.trim() || note.length > 4000) throw new Error('Checkpoint needs a bounded evidence note');
-  if (typeof cursor !== 'string' || !cursor || cursor.length > 200) throw new Error('Checkpoint requires an observed conversation cursor');
+  if (action !== 'paused' && (typeof cursor !== 'string' || !cursor || cursor.length > 200)) throw new Error('Checkpoint requires an observed conversation cursor');
   return locked(root, id, async () => {
   const value = record(root, id);
+  if (action === 'paused') {
+    // Cancellation must remain available when the runtime/history is gone.
+    // Keep the last verified cursor instead of accepting a new unverified one.
+    const paused = { ...value, action, note, enabled: false, updatedAt: now() };
+    writeJson(recordPath(root, id), paused);
+    return paused;
+  }
   // Verify the cursor belongs to the currently inspectable branch.
   const view = await inspectSession(root, id, { after: cursor, limit: 1 });
   if (action === 'complete' && (!view.state.live || view.state.state !== 'idle')) throw new Error('Completion checkpoint requires a live idle session and evidence note');
+  if (action === 'complete' && view.conversation.headCursor !== cursor) throw new Error('New unread activity prevents completion; inspect the latest head');
   const next = { ...value, cursor, action, note, updatedAt: now(),
     enabled: !['complete', 'paused'].includes(action) };
   writeJson(recordPath(root, id), next);

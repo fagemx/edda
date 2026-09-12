@@ -140,12 +140,15 @@ cursor refuse. Interrupted attempts without a receipt stay unknown, never replay
 
 Checkpoints remember the cursor and evidence note; actions are `observed`,
 `working`, `waiting_user`, `complete` and `paused`. The last two disable enrollment.
-`complete` requires a live idle session but the supervisor must still verify task
+`complete` requires a live idle session and the current conversation head (new
+unread activity refuses completion), but the supervisor must still verify task
 acceptance evidence. `waiting_user` keeps the session enrolled without repeatedly
 raising the same already-read question. A dropped lifecycle lock requires manual
 inspection; no recovery path silently deletes controller intent.
 
-To stop managing a session, use a `paused` checkpoint at an observed cursor. The
+To stop managing a session, use `checkpoint SESSION_ID --action paused --note
+"Operator requested pause"`. No cursor or reachable runtime is required for
+pausing; the last verified cursor is preserved. The
 supervision records live in the private registry, not in the project ledger or
 Git; enrollment is a local controller policy, not new project/task authority.
 

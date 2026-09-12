@@ -37,6 +37,25 @@ test('supervisor reads exact reply, sends once per reviewed cursor, refuses busy
   const [later] = await watch(root);
   assert.equal(later.conversation.entries.length, 0);
   assert.equal(later.supervision.action, 'waiting_user');
-  await checkpoint(root, sid, { cursor: 'b', action: 'complete', note: 'Operator ended this test task.' });
+  entries.push(projectEntry({ type: 'message', id: 'c', parentId: 'b', message: { role: 'user', content: 'Verification failed; wait before completion.' } }));
+  await assert.rejects(checkpoint(root, sid, { cursor: 'b', action: 'complete', note: 'Stale completion decision.' }), /unread activity/);
+  assert.equal((await watch(root))[0].conversation.entries[0].id, 'c');
+  await checkpoint(root, sid, { cursor: 'c', action: 'complete', note: 'Operator ended this synthetic test after observing the latest instruction.' });
+  assert.deepEqual(await watch(root), []);
+});
+
+test('explicit pause works after an unpersisted session disappears, preserving its checkpoint', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'edda-pause-test-'));
+  const entries = [projectEntry({ type: 'message', id: 'a', parentId: null, message: { role: 'assistant', content: 'Waiting' } })];
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: root,
+    deliver() {}, getConversation: (options) => pageConversation(entries, options) });
+  t.after(async () => { await channel.close(); await rm(root, { recursive: true, force: true }); });
+  await enroll(root, channel.sessionId, 'Synthetic local-only task');
+  await checkpoint(root, channel.sessionId, { cursor: 'a', action: 'observed', note: 'Read waiting response.' });
+  await channel.close();
+  assert.equal((await watch(root))[0].assessment, 'inspection_failed_do_not_send');
+  const paused = await checkpoint(root, channel.sessionId, { action: 'paused', note: 'Operator requested monitoring stop.' });
+  assert.equal(paused.enabled, false);
+  assert.equal(paused.cursor, 'a');
   assert.deepEqual(await watch(root), []);
 });
