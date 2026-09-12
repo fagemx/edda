@@ -938,11 +938,6 @@ fn concurrent_apply_has_one_effective_transition() {
 }
 
 #[cfg(unix)]
-fn receipt_action_commitment(token: &str) -> String {
-    format!("sha256:{}", edda_core::hash::sha256_hex(token.as_bytes()))
-}
-
-#[cfg(unix)]
 fn execution_brief_input() -> ExecutionBriefInputV1 {
     ExecutionBriefInputV1 {
         brief_version: 1,
