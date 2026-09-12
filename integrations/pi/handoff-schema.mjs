@@ -31,12 +31,13 @@ export function normalizeManifest(value) {
   object(value, ['version', 'runId', 'role', 'goal', 'planRef', 'doneWhen', 'scope'], 'manifest');
   if (value.version !== 1) throw problem('Unsupported manifest version');
   if (!['controller', 'worker'].includes(value.role)) throw problem('Invalid manifest role');
-  object(value.scope, ['allowed', 'excluded', 'reserved', 'authorityRefs'], 'scope');
+  object(value.scope, ['allowed', 'excluded', 'reserved', 'authorityRefs', 'taskPaths'], 'scope');
   const result = { version: 1, runId: text(value.runId, 'runId', 128), role: value.role,
     goal: text(value.goal, 'goal'), planRef: reference(value.planRef, 'planRef'),
     doneWhen: shortList(value.doneWhen, 'doneWhen'), scope: {
       allowed: shortList(value.scope.allowed, 'allowed'), excluded: shortList(value.scope.excluded, 'excluded'),
       reserved: shortList(value.scope.reserved, 'reserved'), authorityRefs: refs(value.scope.authorityRefs, 'authorityRefs'),
+      ...(value.scope.taskPaths === undefined ? {} : { taskPaths: shortList(value.scope.taskPaths, 'taskPaths') }),
     } };
   if (!result.doneWhen.length || !result.scope.allowed.length || !result.scope.authorityRefs.length) throw problem('Manifest needs completion criteria, allowed scope and authority source references');
   if (Buffer.byteLength(JSON.stringify(result)) > 8192) throw problem('Manifest exceeds 8192 bytes; supply a bounded management brief', 413);

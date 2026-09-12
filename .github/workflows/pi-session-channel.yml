@@ -18,4 +18,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs integrations/pi/handoff.test.mjs
+      - run: node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs integrations/pi/handoff.test.mjs integrations/pi/compose.test.mjs

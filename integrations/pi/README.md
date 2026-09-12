@@ -178,9 +178,9 @@ node integrations/pi/cli.mjs brief SESSION_ID --budget-bytes 16384
 The manifest includes `runId`, `role` (controller/worker), `goal`, `doneWhen`,
 `planRef` with a revision, and declared `scope.allowed/excluded/reserved` plus
 `authorityRefs`. It is capped at 8 KiB. Source references are retained verbatim,
-not fetched or resolved into grants. Plan-to-manifest extraction is manual in
-this slice; reading every plan and automatically joining task/authority records
-is deferred to the canonical Edda service integration.
+not fetched or resolved into grants. `compose` can now populate task facts and
+extract explicitly marked management metadata. Semantic interpretation of
+arbitrary prose and authority resolution remain outside this integration.
 
 Preparation requires an idle live Pi instance. A changed manifest requires
 `--expected CURRENT_MANIFEST_REVISION`; reload/resume also requires explicitly
@@ -238,6 +238,60 @@ Existing loaded extensions need `/reload` at idle for the new handoff capability
 Their previous bidirectional conversation functions remain usable; `watch` shows
 `handoff_unavailable` instead of silently replaying history on their behalf.
 
+## Compose from existing Edda tasks
+
+This adapter is JavaScript; the task engine remains Rust. `compose` executes only
+the installed `edda task show ID --json` with a supplied project directory and
+argument-safe process execution. It never changes a task, launches a session or
+prepares a Pi automatically.
+
+```powershell
+node integrations/pi/cli.mjs compose --project C:/ai_agent/edda --task 17 --output handoff.json
+node integrations/pi/cli.mjs compose --project C:/ai_agent/edda --task 17 --context management.md --output handoff.json
+node integrations/pi/cli.mjs prepare SESSION_ID --manifest handoff.json
+```
+
+Replace the example project/task with your intended source. The separate prepare
+step selects the destination session. `--edda-bin PATH` (or `EDDA_BIN`) selects a
+native executable when it is not on PATH; no shell or command-string fallback is
+used. Task IDs outside JavaScript's safe integer range are refused rather than
+silently rounded. Task engine transitions and numeric contracts remain Rust-owned.
+
+Task identity, goal/title, path facts, dependencies and plan/work-unit references
+come from Edda. The remaining metadata is JSON with exactly `role`, `doneWhen`
+and `scope` (allowed/excluded/reserved/authorityRefs), or one top-level fenced
+`edda-management` block containing that JSON. See
+[management-context.md](./fixtures/management-context.md) for the format.
+Documentation examples nested inside another code fence do not count.
+
+Without `--context`, the adapter reads a regular UTF-8 file named by the task's
+`brief_ref` only when its resolved path stays inside the project. A missing or
+inline brief, an external path, or a URL does not trigger broader discovery or
+network access. `--context FILE` is an explicit file selection and can refer to
+a file elsewhere. Each source is limited to 256 KiB; full composition previews
+are bounded to 32 KiB. Ambiguous blocks, malformed input and absent mandatory
+fields produce `needs_context` (exit 2) or a read/validation error (exit 1).
+Ordinary prose is never interpreted as authority or completion criteria.
+
+Complete results print `status: ready` and a validated manifest. `--output`
+creates a **new** manifest file only for ready results; an existing file is never
+overwritten. Without this option, ready output is returned as JSON without a
+manifest file. Missing data does not create a partial output file.
+
+`scope.taskPaths` preserves Edda's original path facts separately from declared
+allowed actions. An empty list means no path declaration was supplied, not
+unrestricted permission. Excessive path lists remain a context gap; they are not
+silently shortened. Role is supplied explicitly, not inferred from an assignee's
+name. A ready composition is readable context, not an authorization verdict.
+
+Source task JSON, the selected metadata file and a bundle of their references are
+saved by content digest in the private `sources/` cache. `planRef` points to that
+immutable bundle so the initial inputs remain inspectable after the task changes.
+The run ID is scoped by canonical source directory and task creation event; this
+is a local view identity, not a new global Edda project/task ID. Recomposition
+reads a fresh snapshot but never silently rebinds a running handoff. Snapshots
+remain local and are not automatically deleted or published.
+
 ## Storage, identity and recovery
 
 Registry and receipts live under `~/.edda-pi-sessions`, outside Git. To isolate
@@ -276,7 +330,7 @@ durability and filesystem corruption recovery are not guaranteed.
 ## Verify
 
 ```powershell
-node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs integrations/pi/handoff.test.mjs
+node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs integrations/pi/handoff.test.mjs integrations/pi/compose.test.mjs
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --reject
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --supervise

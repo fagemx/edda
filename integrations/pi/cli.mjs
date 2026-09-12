@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { defaultRoot, recover, validateId } from './store.mjs';
 import { listSessions, requestSession, getReceipt, inspectSession, prepareHandoff } from './client.mjs';
 import { enroll, watch, checkpoint, reply, managementBrief } from './supervision.mjs';
+import { composeHandoff } from './compose.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs list
@@ -18,6 +19,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs watch --conversation
   node integrations/pi/cli.mjs prepare SESSION_ID --manifest FILE [--expected REVISION]
   node integrations/pi/cli.mjs brief SESSION_ID [--budget-bytes 16384]
+  node integrations/pi/cli.mjs compose --project PATH --task ID [--context FILE] [--output NEW_FILE] [--edda-bin PATH]
   node integrations/pi/cli.mjs reply SESSION_ID --to CURSOR --message TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor CURSOR --action observed|working|waiting_user|complete|paused --note TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --action paused --note TEXT
@@ -45,12 +47,16 @@ async function main(args) {
     receipt: ['--id'], recover: ['--instance'],
     conversation: ['--after', '--limit'], enroll: ['--scope'], watch: ['--conversation'],
     prepare: ['--manifest', '--expected'], brief: ['--budget-bytes'],
+    compose: ['--project', '--task', '--context', '--output', '--edda-bin'],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
-  if (positional.length !== (['list', 'watch'].includes(command) ? 0 : 1)) throw new Error('Use the exact session ID; see --help');
+  if (positional.length !== (['list', 'watch', 'compose'].includes(command) ? 0 : 1)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
+  if (command === 'compose') result = await composeHandoff({ project: options['--project'], id: options['--task'],
+    contextFile: options['--context'], output: options['--output'], root,
+    eddaCommand: options['--edda-bin'] ? { file: options['--edda-bin'], args: [] } : undefined });
   if (command === 'list') result = await listSessions(root);
   if (command === 'status') result = await requestSession(root, sessionId, '/status');
   if (command === 'receipt') result = await getReceipt(root, sessionId, validateId(options['--id']));
