@@ -95,9 +95,15 @@ pub fn authorship_tag(authority: &str) -> &'static str {
 /// Map an event_type string to its (family, level) classification.
 pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'static str>) {
     match event_type {
-        "note" | "checkpoint" | "continuity_capsule" => {
+        "note" | "checkpoint" | "continuity_capsule" | "execution_brief" => {
             (Some(event_family::SIGNAL), Some(event_level::INFO))
         }
+        "control_manifest" => (
+            Some(event_family::GOVERNANCE),
+            Some(event_level::GOVERNANCE),
+        ),
+        "control_intent" => (Some(event_family::SIGNAL), Some(event_level::TRACE)),
+        "control_receipt" => (Some(event_family::MILESTONE), Some(event_level::MILESTONE)),
         "cmd" => (Some(event_family::SIGNAL), Some(event_level::TRACE)),
         "commit" => (Some(event_family::MILESTONE), Some(event_level::MILESTONE)),
         "merge" => (Some(event_family::MILESTONE), Some(event_level::MILESTONE)),

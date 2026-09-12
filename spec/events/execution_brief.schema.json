@@ -1,0 +1,386 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "execution_brief payload",
+  "description": "Locally accepted immutable ExecutionBriefV1 record.",
+  "type": "object",
+  "properties": {
+    "trust": { "const": "locally_accepted" },
+    "execution_brief": {
+      "type": "object",
+      "properties": {
+        "record_version": { "const": 1 },
+        "trust": { "const": "locally_accepted" },
+        "authority": {
+          "type": "object",
+          "properties": {
+            "principal_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "session_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "authority_event_id": { "type": "string", "pattern": "^evt_[a-z0-9]+$", "maxLength": 68 }
+          },
+          "required": ["principal_id", "session_id", "authority_event_id"],
+          "additionalProperties": false
+        },
+        "brief_event_id": { "type": "string", "pattern": "^evt_[a-z0-9]+$", "maxLength": 68 },
+        "content_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "canonical_bytes_hex": { "type": "string", "pattern": "^[0-9a-f]+$", "maxLength": 524288 },
+        "brief": { "$ref": "#/$defs/brief" }
+      },
+      "required": [
+        "record_version",
+        "trust",
+        "authority",
+        "brief_event_id",
+        "content_digest",
+        "canonical_bytes_hex",
+        "brief"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": ["trust", "execution_brief"],
+  "additionalProperties": true,
+  "$defs": {
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "itemText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "longText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "pathText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "action": {
+      "type": "object",
+      "properties": {
+        "tool": { "enum": ["process", "read_file", "search"] },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        }
+      },
+      "required": ["tool", "argv"],
+      "additionalProperties": false
+    },
+    "probeResult": {
+      "type": "object",
+      "properties": {
+        "observed_shape": { "$ref": "#/$defs/itemText" },
+        "interpretation": { "$ref": "#/$defs/itemText" },
+        "next_probe_or_return": { "$ref": "#/$defs/itemText" }
+      },
+      "required": ["observed_shape", "interpretation", "next_probe_or_return"],
+      "additionalProperties": false
+    },
+    "probeCard": {
+      "type": "object",
+      "properties": {
+        "probe_id": { "type": "string", "pattern": "^probe_[a-z0-9]+$", "maxLength": 70 },
+        "claim_to_test": { "$ref": "#/$defs/longText" },
+        "why_it_matters": { "$ref": "#/$defs/longText" },
+        "input_or_location": { "$ref": "#/$defs/longText" },
+        "action": { "$ref": "#/$defs/action" },
+        "possible_results": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/probeResult" }
+        },
+        "evidence_required": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/itemText" }
+        },
+        "on_unknown": { "$ref": "#/$defs/longText" }
+      },
+      "required": [
+        "probe_id",
+        "claim_to_test",
+        "why_it_matters",
+        "input_or_location",
+        "action",
+        "possible_results",
+        "evidence_required",
+        "on_unknown"
+      ],
+      "additionalProperties": false
+    },
+    "implementationStep": {
+      "type": "object",
+      "properties": {
+        "step_id": { "type": "string", "pattern": "^step_[a-z0-9]+$", "maxLength": 69 },
+        "instruction": { "$ref": "#/$defs/longText" },
+        "action": { "$ref": "#/$defs/action" }
+      },
+      "required": ["step_id", "instruction"],
+      "additionalProperties": false
+    },
+    "validationCheck": {
+      "type": "object",
+      "properties": {
+        "check_id": { "type": "string", "pattern": "^check_[a-z0-9]+$", "maxLength": 70 },
+        "expectation": { "$ref": "#/$defs/itemText" },
+        "action": { "$ref": "#/$defs/action" },
+        "evidence_required": { "$ref": "#/$defs/itemText" }
+      },
+      "required": ["check_id", "expectation", "action", "evidence_required"],
+      "additionalProperties": false
+    },
+    "readReference": {
+      "type": "object",
+      "properties": {
+        "reference": { "$ref": "#/$defs/pathText" },
+        "purpose": { "$ref": "#/$defs/itemText" }
+      },
+      "required": ["reference", "purpose"],
+      "additionalProperties": false
+    },
+    "knownFact": {
+      "type": "object",
+      "properties": {
+        "statement": { "$ref": "#/$defs/longText" },
+        "provenance_kind": {
+          "enum": [
+            "issue",
+            "task",
+            "capsule",
+            "repository_text",
+            "tool_output",
+            "controller_observation"
+          ]
+        },
+        "provenance_ref": { "$ref": "#/$defs/pathText" }
+      },
+      "required": ["statement", "provenance_kind", "provenance_ref"],
+      "additionalProperties": false
+    },
+    "allowedDecision": {
+      "type": "object",
+      "properties": {
+        "decision": { "$ref": "#/$defs/itemText" },
+        "boundary": { "$ref": "#/$defs/itemText" }
+      },
+      "required": ["decision", "boundary"],
+      "additionalProperties": false
+    },
+    "recipeParameter": {
+      "type": "object",
+      "properties": {
+        "name": { "$ref": "#/$defs/shortText" },
+        "value": { "$ref": "#/$defs/itemText" }
+      },
+      "required": ["name", "value"],
+      "additionalProperties": false
+    },
+    "brief": {
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "runtime_profile": { "const": "flash" },
+              "procedure": {
+                "properties": { "kind": { "const": "controller_authored" } },
+                "required": ["kind"]
+              }
+            },
+            "required": ["runtime_profile", "procedure"]
+          },
+          "then": {
+            "properties": {
+              "procedure": {
+                "anyOf": [
+                  {
+                    "required": ["probe_cards"],
+                    "properties": { "probe_cards": { "minItems": 1 } }
+                  },
+                  {
+                    "required": ["implementation_steps"],
+                    "properties": { "implementation_steps": { "minItems": 1 } }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "brief_version": { "const": 1 },
+        "brief_id": { "type": "string", "pattern": "^brief_[a-z0-9]+$", "maxLength": 70 },
+        "brief_event_id": { "type": "string", "pattern": "^evt_[a-z0-9]+$", "maxLength": 68 },
+        "content_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "task_ref": { "type": "integer", "minimum": 1 },
+        "runtime_profile": { "enum": ["strong", "flash"] },
+        "intent": { "enum": ["investigate", "fix", "implement", "refactor", "test", "document"] },
+        "objective": { "$ref": "#/$defs/longText" },
+        "basis": {
+          "type": "object",
+          "properties": {
+            "portable_repo_id": { "type": "string", "pattern": "^repo_[0-9a-f]{64}$" },
+            "base_full_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "issue_spec_refs": {
+              "type": "array",
+              "maxItems": 64,
+              "items": { "$ref": "#/$defs/itemText" }
+            }
+          },
+          "required": ["base_full_sha"],
+          "additionalProperties": false
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "allowed_paths": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": { "$ref": "#/$defs/pathText" }
+            },
+            "out_of_scope": {
+              "type": "array",
+              "maxItems": 64,
+              "items": { "$ref": "#/$defs/pathText" }
+            }
+          },
+          "required": ["allowed_paths"],
+          "additionalProperties": false
+        },
+        "read_order": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/readReference" }
+        },
+        "known_facts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/knownFact" }
+        },
+        "allowed_decisions": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/allowedDecision" }
+        },
+        "return_for_decision": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/itemText" }
+        },
+        "procedure": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "controller_authored" },
+                "authored_by": { "$ref": "#/$defs/shortText" },
+                "principles": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": { "$ref": "#/$defs/itemText" }
+                },
+                "probe_cards": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": { "$ref": "#/$defs/probeCard" }
+                },
+                "implementation_steps": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": { "$ref": "#/$defs/implementationStep" }
+                },
+                "validation": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": { "$ref": "#/$defs/validationCheck" }
+                }
+              },
+              "required": ["kind", "authored_by"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": { "const": "product_recipe" },
+                "recipe_id": { "type": "string", "pattern": "^recipe_[a-z0-9]+$", "maxLength": 71 },
+                "recipe_version": { "type": "integer", "minimum": 1 },
+                "parameters": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": { "$ref": "#/$defs/recipeParameter" }
+                }
+              },
+              "required": ["kind", "recipe_id", "recipe_version"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "outcome_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "string", "pattern": "^[A-Z0-9_]+$", "maxLength": 64 },
+              "result_class": { "enum": ["success", "needs_decision", "inconclusive", "failure"] }
+            },
+            "required": ["code", "result_class"],
+            "additionalProperties": false
+          }
+        },
+        "receipt_schema": {
+          "type": "object",
+          "properties": {
+            "receipt_version": { "const": 1 },
+            "required_fields": {
+              "type": "array",
+              "maxItems": 9,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "brief_identity",
+                  "task_identity",
+                  "outcome_code",
+                  "observations",
+                  "changed_paths",
+                  "validation_ran",
+                  "validation_read",
+                  "unknowns",
+                  "recommended_next_action"
+                ]
+              }
+            }
+          },
+          "required": ["receipt_version", "required_fields"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "brief_version",
+        "brief_id",
+        "brief_event_id",
+        "content_digest",
+        "runtime_profile",
+        "intent",
+        "objective",
+        "basis",
+        "scope",
+        "procedure",
+        "outcome_codes",
+        "receipt_schema"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

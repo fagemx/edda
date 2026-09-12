@@ -1002,7 +1002,7 @@ pub struct TaskCreatedParams<'a> {
 }
 
 /// Build a finalized task.* event with the shared envelope fields.
-fn build_task_event(
+pub(crate) fn build_task_event(
     branch: &str,
     parent_hash: Option<&str>,
     event_type: &str,
@@ -1075,45 +1075,11 @@ pub fn new_task_started_event(
     )
 }
 
-/// Create a new `task.session` event (ACP session id recorded for resume).
-pub fn new_task_session_event(
-    branch: &str,
-    parent_hash: Option<&str>,
-    task_id: u64,
-    acp_session_id: &str,
-) -> anyhow::Result<Event> {
-    build_task_event(
-        branch,
-        parent_hash,
-        "task.session",
-        serde_json::json!({
-            "task_id": task_id,
-            "acp_session_id": acp_session_id,
-        }),
-    )
-}
-
-/// Create a new host-neutral `task.session` event.
-pub fn new_task_host_session_event(
-    branch: &str,
-    parent_hash: Option<&str>,
-    task_id: u64,
-    agent_kind: &str,
-    session_id: &str,
-    attempt: u32,
-) -> anyhow::Result<Event> {
-    build_task_event(
-        branch,
-        parent_hash,
-        "task.session",
-        serde_json::json!({
-            "task_id": task_id,
-            "agent_kind": agent_kind,
-            "session_id": session_id,
-            "attempt": attempt,
-        }),
-    )
-}
+pub use crate::task_session_event::{
+    new_task_host_session_event, new_task_host_session_event_with_execution_brief,
+    new_task_session_event, new_task_session_event_with_execution_brief,
+    ControlledTaskSessionParams,
+};
 
 /// Create a new `task.done` event. A completion without a receipt does not
 /// exist: an empty/blank receipt is an error, not a default.
@@ -1138,6 +1104,8 @@ pub fn new_task_done_event(
         }),
     )
 }
+
+pub use crate::task_done_event::{new_controlled_task_done_event, ControlledTaskDoneParams};
 
 /// Create a new `task.failed` event.
 pub fn new_task_failed_event(
@@ -2137,6 +2105,24 @@ mod tests {
         assert_eq!(event.payload["agent_kind"], "codex");
         assert_eq!(event.payload["session_id"], "thread-123");
         assert_eq!(event.payload["attempt"], 2);
+
+        let controlled = new_task_host_session_event_with_execution_brief(
+            "main",
+            None,
+            7,
+            &ControlledTaskSessionParams {
+                agent_kind: "codex",
+                session_id: "thread-456",
+                attempt: 2,
+                lease_owner: "controlled-owner",
+                brief_event_id: "evt_brief",
+                brief_digest: &"a".repeat(64),
+            },
+        )
+        .unwrap();
+        assert_eq!(controlled.payload["brief_event_id"], "evt_brief");
+        assert_eq!(controlled.payload["lease_owner"], "controlled-owner");
+        assert_eq!(controlled.payload["brief_digest"], "a".repeat(64));
     }
 
     #[test]

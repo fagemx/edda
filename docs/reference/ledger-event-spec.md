@@ -69,6 +69,10 @@ and registry must change in the same patch when a new producer is added.
 | `note` | Layer 1 v1 | [Readable text, role and tags; optional structured decision or session digest](../../spec/events/note.schema.json) |
 | `checkpoint` | Layer 1 v1 | [Hypotheses, rejected hypotheses with reasons, open questions and next action](../../spec/events/checkpoint.schema.json) |
 | `continuity_capsule` | Layer 1 v1 | [Versioned data-only continuation capsule with immutable canonical bytes and origin identity](../../spec/events/continuity_capsule.schema.json) |
+| `execution_brief` | unstable | [Locally accepted typed execution brief with immutable canonical runnable bytes, event identity, and digest](../../spec/events/execution_brief.schema.json) |
+| `control_manifest` | unstable | [Strong-profile compiled control DAG and policies, accepted brief identities, and a local authority seal](../../spec/events/control_manifest.schema.json) |
+| `control_intent` | unstable | [Durable intent for a token-authorized, side-effect-free local state transition](../../spec/events/control_intent.schema.json) |
+| `control_receipt` | unstable | [Result of a local control intent, advancing the compare-and-swap state version](../../spec/events/control_receipt.schema.json) |
 | `decision_ratify` | Layer 1 v1 | [Operator ratification of a decision key](../../spec/events/decision_ratify.schema.json) |
 | `decision_import` | Layer 1 v1 | [Decision plus source project and source event provenance](../../spec/events/decision_import.schema.json) |
 | `cmd` | Layer 1 v1 | [argv, cwd, exit code, duration and stdout/stderr blob references](../../spec/events/cmd.schema.json) |
@@ -90,7 +94,7 @@ and registry must change in the same patch when a new producer is added.
 | `device_revoke` | unstable | [Device name or revoke-all flag](../../spec/events/device_revoke.schema.json) |
 | `task.created` | unstable | [Task ID, title, dependencies and optional routing/scope](../../spec/events/task.created.schema.json) |
 | `task.started` | unstable | [Task ID, lease TTL and attempt](../../spec/events/task.started.schema.json) |
-| `task.session` | unstable | [Legacy ACP session or host-neutral session ID with agent kind and attempt](../../spec/events/task.session.schema.json) |
+| `task.session` | unstable | [Legacy ACP or host-neutral session identity; controlled sessions also bind the accepted brief event ID and digest](../../spec/events/task.session.schema.json) |
 | `task.done` | unstable | [Task ID, nonblank receipt and evidence paths](../../spec/events/task.done.schema.json) |
 | `task.failed` | unstable | [Task ID and failure reason](../../spec/events/task.failed.schema.json) |
 | `task.requeued` | unstable | [Task ID and next attempt](../../spec/events/task.requeued.schema.json) |
