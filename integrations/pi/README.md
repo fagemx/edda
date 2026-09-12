@@ -119,12 +119,17 @@ read the actual reply and verify its claimed result.
 ```powershell
 node integrations/pi/cli.mjs enroll SESSION_ID --scope "Continue the original assigned task. Preserve its budget, review rules and approval boundaries."
 node integrations/pi/cli.mjs watch
+node integrations/pi/cli.mjs brief SESSION_ID
+node integrations/pi/cli.mjs conversation SESSION_ID --limit 3
 node integrations/pi/cli.mjs reply SESSION_ID --to OBSERVED_CURSOR --message "Concrete response to the latest question, within the approved scope."
 node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor OBSERVED_CURSOR --action working --note "Observed the requested focused test run; task not yet accepted."
 ```
 
-`watch` is a single read of enrolled sessions plus their unread conversation;
-it does not run an LLM or start a polling daemon. A host scheduler (for example a
+`watch` is a single read of enrolled sessions and compact handoff attention indexes.
+It omits full manifests, scope text, reports and conversations. Use `brief` for
+one selected session's bounded management context, or `watch --conversation` for
+the previous explicit conversation diagnostic view. It does not run an LLM or
+start a polling daemon. A host scheduler (for example a
 Codex thread heartbeat) calls it periodically. The supervising agent reads the
 stored scope and latest replies, resolves routine questions within that scope,
 and escalates explicitly withheld authority, new spending or scope changes.
@@ -151,6 +156,81 @@ To stop managing a session, use `checkpoint SESSION_ID --action paused --note
 pausing; the last verified cursor is preserved. The
 supervision records live in the private registry, not in the project ledger or
 Git; enrollment is a local controller policy, not new project/task authority.
+
+## Management handoff MVP
+
+The next small layer is a prework management manifest plus structured reports.
+It separates what a **supervisor** needs from a controller's full implementation
+brief. It does not implement automatic judgments, Flash/strong-model routing,
+new authority, a second Edda task state machine or a monitoring scheduler.
+Codex-to-Codex messages should continue using native session tools; this package
+is the Pi transport adapter and local observational prototype.
+
+Prepare a bounded JSON manifest from the already-authorized plan, using
+[management-manifest.json](./fixtures/management-manifest.json) as a shape example
+(the example itself grants no real-world authority). Then run:
+
+```powershell
+node integrations/pi/cli.mjs prepare SESSION_ID --manifest path/to/management.json
+node integrations/pi/cli.mjs brief SESSION_ID --budget-bytes 16384
+```
+
+The manifest includes `runId`, `role` (controller/worker), `goal`, `doneWhen`,
+`planRef` with a revision, and declared `scope.allowed/excluded/reserved` plus
+`authorityRefs`. It is capped at 8 KiB. Source references are retained verbatim,
+not fetched or resolved into grants. Plan-to-manifest extraction is manual in
+this slice; reading every plan and automatically joining task/authority records
+is deferred to the canonical Edda service integration.
+
+Preparation requires an idle live Pi instance. A changed manifest requires
+`--expected CURRENT_MANIFEST_REVISION`; reload/resume also requires explicitly
+rebinding with that revision. Old reports are not reused as current progress.
+The content digest is stable for identical manifests and does not claim a
+cryptographic authorization signature.
+
+Newly loaded Pi extensions expose:
+
+- `edda_handoff`: read the prepared brief and its current manifest revision.
+- `edda_report`: report a milestone or stopping reason against that revision.
+
+Only prepared sessions receive a short context reminder, once per manifest
+revision. Other sessions continue normally. Reporting failure affects management
+visibility; it does not stop the worker's task, create a retry, call another model
+or mark an Edda task done.
+
+Reports carry `reportedState`, `stage`, `summary`, `nextStep`, `evidence` and
+`dependencies`. A `waiting_decision` report also needs a concrete `decision` with
+question, requested action/resource and recommendation. `waiting_dependency`
+needs references; a `completed` claim needs evidence. Neither can change the
+manifest or write verified acceptance. Tool call identity, current Pi instance
+and a runtime work epoch bind each report; duplicate IDs cannot change content.
+
+After new work starts, previous-epoch reports are no longer current. If Pi settles
+without a current stopping report (or only says `working`), attention is
+`missing_report`. Waiting decisions/dependencies, failed/paused reports and
+`completion_pending` are separately visible. No transcript keyword inference is
+used; the reports remain worker claims, and `acceptance` remains `unverified`.
+
+`brief` composes the full required manifest + latest current report + observed
+runtime + local supervisor enrollment scope, if present. It never reads a
+transcript. The default budget is 16 KiB of compact JSON (maximum 32 KiB); byte
+size is not a model-token guarantee, and pretty CLI formatting adds whitespace.
+If required fields cannot fit, the result is `needs_context` with the required
+size; constraints/evidence are never silently truncated. `watch` remains an
+index: call `brief` only for the session that needs attention.
+Non-ready `brief` results (including missing preparation, stale binding and
+insufficient budget) still print JSON and exit 2, so a caller cannot treat them
+as a ready decision context based on command success alone.
+
+Persistence keeps the current manifest/report plus up to 1,000 deduplication
+receipts in a private atomic file. It is not a full report-history archive or
+Edda ledger. Original plan/evidence references and Pi's own transcript remain
+the audit sources. Full role/authority resolution and semantic progress scoring
+belong to later slices; this MVP deliberately does not infer them.
+
+Existing loaded extensions need `/reload` at idle for the new handoff capability.
+Their previous bidirectional conversation functions remain usable; `watch` shows
+`handoff_unavailable` instead of silently replaying history on their behalf.
 
 ## Storage, identity and recovery
 
@@ -190,10 +270,11 @@ durability and filesystem corruption recovery are not guaranteed.
 ## Verify
 
 ```powershell
-node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs
+node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs integrations/pi/handoff.test.mjs
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --reject
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --supervise
+node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff
 ```
 
 The smoke test starts an isolated actual Pi with only this extension and a

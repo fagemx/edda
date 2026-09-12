@@ -45,6 +45,21 @@ export async function inspectSession(root, sessionId, options = {}) {
     state.state === 'waiting_user' ? 'structured_user_prompt' : state.live ? 'runtime_active_not_task_completion' : 'offline_inspect_only' };
 }
 
+export async function managementContext(root, sessionId, budget = 16384) {
+  const state = await requestSession(root, sessionId, '/status');
+  if (!state.capabilities?.includes('handoff')) return { state,
+    handoff: { status: 'unavailable', attention: 'handoff_unavailable', reason: 'Reload the extension to enable structured handoffs' } };
+  const handoff = await requestSession(root, sessionId, `/handoff?budget=${encodeURIComponent(budget)}`,
+    undefined, 2500, state.instanceId);
+  return { state, handoff };
+}
+
+export async function prepareHandoff(root, sessionId, manifest, expectedRevision = null) {
+  const state = await requestSession(root, sessionId, '/status');
+  if (!state.capabilities?.includes('handoff')) throw new Error('Handoff unavailable; reload the extension first');
+  return requestSession(root, sessionId, '/handoff/manifest', { manifest, expectedRevision }, 2500, state.instanceId);
+}
+
 export async function listSessions(root = defaultRoot()) {
   return Promise.all(registry(root).map(async ({ state, owner }) => {
     const sessionId = owner?.sessionId || state.sessionId;

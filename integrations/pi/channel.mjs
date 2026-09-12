@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { openStore, digest, validateSession, validateId } from './store.mjs';
+import { createHandoff } from './handoff.mjs';
 
 const terminal = new Set(['settled', 'failed', 'unknown']);
 const now = () => new Date().toISOString();
@@ -33,6 +34,9 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const token = randomBytes(32).toString('hex');
   const owner = { version: 1, sessionId, instanceId, pid: process.pid, token, port: null };
   const store = openStore(root, sessionId, owner);
+  let handoff;
+  try { handoff = createHandoff(store.dir, sessionId, instanceId); }
+  catch (error) { store.release(); throw error; }
   let closed = false;
   let storageError = false;
   let busy = false;
@@ -74,7 +78,12 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
-      capabilities: ['send', 'receipts', ...(getConversation ? ['conversation'] : [])] }),
+      capabilities: ['send', 'receipts', 'handoff', ...(getConversation ? ['conversation'] : [])] }),
+    handoffContext: (budget) => handoff.context(channel.snapshot(), budget),
+    reportHandoff(id, value) {
+      if (closed || storageError) throw fail('Channel unavailable', 503);
+      return handoff.report(id, value);
+    },
     event(name, data = {}) {
       if (closed) return;
       if (name === 'agent_start') { busy = true; lastStopReason = null; }
@@ -87,6 +96,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       state.lastProgressAt = now();
       recompute();
       save();
+      handoff.event(name);
     },
     messageStarted(text) {
       if (closed || typeof text !== 'string') return;
@@ -132,6 +142,17 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       if (req.headers.origin || Buffer.byteLength(auth) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw fail('Unauthorized', 401);
       if (req.headers['x-edda-instance'] !== instanceId) throw fail('Wrong session instance', 409);
       if (req.method === 'GET' && req.url === '/status') return reply(200, channel.snapshot());
+      if (req.method === 'GET' && req.url?.startsWith('/handoff?')) {
+        const params = new URL(req.url, 'http://127.0.0.1').searchParams;
+        return reply(200, channel.handoffContext(params.get('budget') || 16384));
+      }
+      if (req.method === 'POST' && req.url === '/handoff/manifest') {
+        if (closed || storageError) throw fail('Channel unavailable', 503);
+        if (req.headers['content-type'] !== 'application/json') throw fail('Expected application/json', 415);
+        const body = await jsonBody(req);
+        handoff.prepare(body.manifest, body.expectedRevision, channel.snapshot());
+        return reply(200, channel.handoffContext());
+      }
       if (req.method === 'GET' && req.url?.startsWith('/conversation?') && getConversation) {
         const params = new URL(req.url, 'http://127.0.0.1').searchParams;
         return reply(200, { ...getConversation({ after: params.get('after') || undefined, limit: params.get('limit') || 20 }),

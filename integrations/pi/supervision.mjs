@@ -1,7 +1,8 @@
 import { mkdirSync, readdirSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { digest, privateRoot, readJson, writeJson, validateSession } from './store.mjs';
-import { inspectSession, requestSession, getReceipt } from './client.mjs';
+import { inspectSession, requestSession, getReceipt, managementContext } from './client.mjs';
+import { fitContext } from './handoff-schema.mjs';
 
 const folder = (root) => join(root, 'supervision');
 const recordPath = (root, id) => join(folder(root), `${digest(validateSession(id))}.json`);
@@ -30,18 +31,35 @@ export async function enroll(root, id, scope) {
   return value;
   });
 }
-export async function watch(root) {
+export async function watch(root, { withConversation = false } = {}) {
   if (!existsSync(folder(root))) return [];
   const records = readdirSync(folder(root)).filter((name) => /^[0-9a-f]{64}\.json$/.test(name))
     .map((name) => readJson(join(folder(root), name))).filter((r) => r.enabled);
   return Promise.all(records.map(async (r) => {
+    const supervision = withConversation ? r : { sessionId: r.sessionId, cwd: r.cwd, enabled: r.enabled,
+      action: r.action, cursor: r.cursor, requiresBriefBeforeDecision: true };
     try {
+      if (!withConversation) {
+        const view = await managementContext(root, r.sessionId);
+        const h = view.handoff;
+        return { supervision, state: view.state, handoff: { status: h.status, attention: h.attention,
+          runId: h.manifest?.runId, manifestRevision: h.manifestRevision, reportedState: h.report?.reportedState,
+          stage: h.report?.stage, reportId: h.report?.reportId }, assessment: h.attention };
+      }
       const view = await inspectSession(root, r.sessionId, { after: r.cursor || undefined, limit: 20 });
-      return { supervision: r, ...view };
+      return { supervision, ...view };
     } catch (error) {
-      return { supervision: r, assessment: 'inspection_failed_do_not_send', error: error.message };
+      return { supervision, assessment: 'inspection_failed_do_not_send', error: error.message };
     }
   }));
+}
+
+export async function managementBrief(root, id, budget = 16384) {
+  const view = await managementContext(root, id, 32768);
+  const policy = readJson(recordPath(root, id));
+  return fitContext({ ...view.handoff, sessionId: id, instanceId: view.state.instanceId,
+    runtimeState: view.state.state, supervisorScope: policy?.scope || null,
+    scopeNotice: 'supervisorScope is the local enrollment policy; manifest scope is declared controller context. Neither is resolved into a new grant here.' }, budget);
 }
 export async function checkpoint(root, id, { cursor, action, note }) {
   if (!['observed', 'working', 'waiting_user', 'complete', 'paused'].includes(action)) throw new Error('Invalid checkpoint action');

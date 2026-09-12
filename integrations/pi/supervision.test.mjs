@@ -18,7 +18,7 @@ test('supervisor reads exact reply, sends once per reviewed cursor, refuses busy
   t.after(async () => { await channel.close(); await rm(root, { recursive: true, force: true }); });
   const sid = channel.sessionId;
   await enroll(root, sid, 'Continue original task; no new spend or database permissions');
-  const [view] = await watch(root);
+  const [view] = await watch(root, { withConversation: true });
   assert.equal(view.conversation.entries[0].text, 'Please specify the next action');
   assert.equal(view.conversation.source, 'pi_runtime');
   assert.equal(view.assessment, 'read_reply_before_deciding');
@@ -34,12 +34,12 @@ test('supervisor reads exact reply, sends once per reviewed cursor, refuses busy
   await assert.rejects(reply(root, sid, { to: 'b', message: 'continue' }), /idle/);
   channel.settled();
   await checkpoint(root, sid, { cursor: 'b', action: 'waiting_user', note: 'Separate migration approval remains pending.' });
-  const [later] = await watch(root);
+  const [later] = await watch(root, { withConversation: true });
   assert.equal(later.conversation.entries.length, 0);
   assert.equal(later.supervision.action, 'waiting_user');
   entries.push(projectEntry({ type: 'message', id: 'c', parentId: 'b', message: { role: 'user', content: 'Verification failed; wait before completion.' } }));
   await assert.rejects(checkpoint(root, sid, { cursor: 'b', action: 'complete', note: 'Stale completion decision.' }), /unread activity/);
-  assert.equal((await watch(root))[0].conversation.entries[0].id, 'c');
+  assert.equal((await watch(root, { withConversation: true }))[0].conversation.entries[0].id, 'c');
   await checkpoint(root, sid, { cursor: 'c', action: 'complete', note: 'Operator ended this synthetic test after observing the latest instruction.' });
   assert.deepEqual(await watch(root), []);
 });

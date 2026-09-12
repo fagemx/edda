@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "runId": "offline-handoff-demo",
+  "role": "controller",
+  "goal": "Demonstrate a bounded controller handoff without model or database costs",
+  "planRef": { "uri": "fixture://handoff-plan", "revision": "v1" },
+  "doneWhen": ["A waiting-decision report is visible", "A completion claim remains unverified"],
+  "scope": {
+    "allowed": ["Report synthetic fixture progress"],
+    "excluded": ["Real database changes", "External model calls"],
+    "reserved": ["Any real-world action"],
+    "authorityRefs": [{ "uri": "fixture://operator", "revision": "demo-only" }]
+  }
+}

@@ -18,6 +18,7 @@ test('Pi lifecycle, tool spans, queued messages, UI waits, settlement and sessio
   const ctx = { cwd: root, sessionManager: { getSessionId: () => sid }, isIdle: () => true,
     ui: { setStatus() {}, notify: (...args) => notices.push(args) } };
   const pi = { registerFlag() {}, getFlag: () => 'test-worker',
+    registerTool() {},
     registerCommand() {}, on: (name, fn) => events.set(name, fn),
     sendUserMessage: (text, options) => delivered.push({ text, options }) };
   extension(pi);
