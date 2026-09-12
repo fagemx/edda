@@ -22,6 +22,21 @@ fn initialize(repo: &Path) {
     drop(Ledger::open_or_init(repo).expect("initialize ledger"));
 }
 
+#[cfg(unix)]
+fn git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn configure_key(repo: &Path, key: &str) {
     std::fs::write(
         repo.join(".edda/config.json"),
@@ -272,6 +287,62 @@ fn read_only_verbs_leave_existing_repository_and_store_bytes_unchanged() {
     assert_eq!(snapshot(store.path()), before_store);
 }
 
+#[cfg(unix)]
+#[test]
+fn legal_unix_nonportable_git_names_are_omitted_without_blocking_save() {
+    let repo = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init"]);
+    git(repo.path(), &["config", "user.email", "test@example.com"]);
+    git(repo.path(), &["config", "user.name", "Test"]);
+    std::fs::write(repo.path().join(".gitignore"), ".edda/\n").unwrap();
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-m", "base"]);
+    initialize(repo.path());
+    configure_key(repo.path(), "security/legal-unix-names");
+    std::fs::write(repo.path().join("legal:colon.txt"), "colon\n").unwrap();
+    std::fs::write(repo.path().join(r"legal\backslash.txt"), "backslash\n").unwrap();
+    let input = files.path().join("input.json");
+    std::fs::write(
+        &input,
+        br#"{"capsule_version":1,"state":{"next_action":"continue"}}"#,
+    )
+    .unwrap();
+
+    let saved = json(&run(
+        repo.path(),
+        store.path(),
+        &[
+            "continuity",
+            "save",
+            "--file",
+            input.to_str().unwrap(),
+            "--json",
+        ],
+    ));
+    let shown = json(&run(
+        repo.path(),
+        store.path(),
+        &[
+            "continuity",
+            "show",
+            saved["capsule_id"].as_str().unwrap(),
+            "--json",
+        ],
+    ));
+    assert_eq!(shown["capsule"]["git"]["tree_dirty"], true);
+    assert_eq!(
+        shown["capsule"]["git"]["dirty_paths"],
+        serde_json::json!([])
+    );
+    assert_eq!(shown["capsule"]["git"]["dirty_paths_truncated"], true);
+    assert_eq!(
+        Ledger::open(repo.path()).unwrap().count_events().unwrap(),
+        1
+    );
+}
+
 #[test]
 fn nonportable_dirty_paths_are_refused_before_append() {
     let repo = tempfile::tempdir().unwrap();
@@ -318,6 +389,7 @@ fn nonportable_dirty_paths_are_refused_before_append() {
         r"..\outside",
         r"dir\..\outside",
         r"dir\file",
+        "name:part",
         "C:/outside",
         "dir//file",
     ] {

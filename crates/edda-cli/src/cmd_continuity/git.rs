@@ -1,12 +1,11 @@
-use edda_core::continuity::CapsuleGitV1;
+use edda_core::continuity::{is_valid_portable_dirty_path, CapsuleGitV1};
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 const MAX_GIT_TEXT: usize = 4 * 1024;
 const MAX_STATUS_BYTES: usize = 256 * 1024;
 const MAX_DIRTY_PATHS: usize = 64;
-const MAX_PATH_CHARS: usize = 512;
 
 pub fn gather_git_metadata(checkout: &Path) -> CapsuleGitV1 {
     if git_text(checkout, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
@@ -63,34 +62,24 @@ fn parse_status_paths(status: &[u8]) -> (Vec<String>, bool) {
             omitted = true;
             continue;
         };
-        let Some(path) = record.get(3..).and_then(parse_path) else {
-            omitted = true;
-            continue;
-        };
-        paths.push(path);
+        retain_path(record.get(3..), &mut paths, &mut omitted);
         if status_code.iter().any(|byte| matches!(*byte, b'R' | b'C')) {
-            match records.next().and_then(parse_path) {
-                Some(source_path) => paths.push(source_path),
-                None => omitted = true,
-            }
+            retain_path(records.next(), &mut paths, &mut omitted);
         }
     }
     (paths, omitted)
 }
 
+fn retain_path(raw: Option<&[u8]>, paths: &mut Vec<String>, omitted: &mut bool) {
+    match raw.and_then(parse_path) {
+        Some(path) => paths.push(path),
+        None => *omitted = true,
+    }
+}
+
 fn parse_path(raw: &[u8]) -> Option<String> {
     let value = String::from_utf8(raw.to_vec()).ok()?;
-    if value.is_empty()
-        || value.chars().count() > MAX_PATH_CHARS
-        || value.chars().any(char::is_control)
-        || Path::new(&value).is_absolute()
-        || !Path::new(&value)
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-    {
-        return None;
-    }
-    Some(value)
+    is_valid_portable_dirty_path(&value).then_some(value)
 }
 
 fn git_text(checkout: &Path, args: &[&str]) -> Option<String> {
@@ -150,18 +139,49 @@ mod tests {
     }
 
     #[test]
-    fn parses_rename_pair_without_treating_source_as_status() {
+    fn preserves_portable_unicode_slash_and_trailing_directory_paths() {
+        let (paths, omitted) = parse_status_paths(
+            " M src/界.rs\0?? nested/file.rs\0?? untracked-directory/\0".as_bytes(),
+        );
         assert_eq!(
-            parse_status_paths(b"R  new/name.rs\0old/name.rs\0"),
-            (
-                vec!["new/name.rs".to_string(), "old/name.rs".to_string()],
-                false
-            )
+            paths,
+            ["src/界.rs", "nested/file.rs", "untracked-directory/"]
+        );
+        assert!(!omitted);
+        assert!(paths.iter().all(|path| is_valid_portable_dirty_path(path)));
+    }
+
+    #[test]
+    fn raw_status_omits_every_nonportable_path_and_preserves_dirty_truth() {
+        let oversized = "a".repeat(513);
+        let mut status = b"?? name:colon\0?? dir\\file\0?? /absolute\0?? ./dot\0?? ../parent\0?? dir//file\0?? control\nname\0?? ".to_vec();
+        status.extend_from_slice(&[0xff, 0]);
+        status.extend_from_slice(b"?? ");
+        status.extend_from_slice(oversized.as_bytes());
+        status.push(0);
+
+        assert_eq!(parse_status_paths(&status), (Vec::new(), true));
+        assert_eq!(
+            status_metadata(Some((status, false))),
+            (Some(true), Vec::new(), true)
         );
     }
 
     #[test]
-    fn rejects_traversal_status_path() {
-        assert_eq!(parse_status_paths(b"?? ../secret\0"), (Vec::new(), true));
+    fn rename_and_copy_consume_both_sides_when_either_is_omitted() {
+        assert_eq!(
+            parse_status_paths(
+                b"R  rejected:new.rs\0old/valid.rs\0 M after-rename.rs\0C  copied/valid.rs\0rejected\\source.rs\0?? tail/\0"
+            ),
+            (
+                vec![
+                    "old/valid.rs".to_string(),
+                    "after-rename.rs".to_string(),
+                    "copied/valid.rs".to_string(),
+                    "tail/".to_string(),
+                ],
+                true
+            )
+        );
     }
 }

@@ -223,7 +223,7 @@ fn validate_git(git: &CapsuleGitV1) -> anyhow::Result<()> {
         anyhow::bail!("git.dirty_paths exceeds {MAX_DIRTY_PATHS} entries");
     }
     for path in &git.dirty_paths {
-        if path.chars().count() > MAX_PATH_CHARS || !safe_portable_dirty_path(path) {
+        if !is_valid_portable_dirty_path(path) {
             anyhow::bail!("git.dirty_paths contains an unsafe or oversized path");
         }
     }
@@ -309,9 +309,11 @@ fn safe_relative_slash_path(value: &str) -> bool {
     !value.contains('\\') && safe_relative_path(value)
 }
 
-fn safe_portable_dirty_path(value: &str) -> bool {
+/// Whether a Git status path fits the portable capsule dirty-path grammar.
+pub fn is_valid_portable_dirty_path(value: &str) -> bool {
     let path = value.strip_suffix('/').unwrap_or(value);
-    !path.is_empty()
+    value.chars().count() <= MAX_PATH_CHARS
+        && !path.is_empty()
         && !value.chars().any(char::is_control)
         && !value.contains(['\\', ':'])
         && !value.starts_with('/')
@@ -356,6 +358,7 @@ mod tests {
             r"..\outside",
             r"dir\file",
             r"dir\..\outside",
+            "name:part",
             "C:/outside",
             "/absolute",
             "dir//file",

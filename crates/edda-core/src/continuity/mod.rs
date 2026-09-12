@@ -5,7 +5,8 @@ mod validate;
 pub use bundle::*;
 pub use types::*;
 pub use validate::{
-    validate_capsule, validate_input_secrets, validate_portable_repo_id, validate_raw_secrets,
+    is_valid_portable_dirty_path, validate_capsule, validate_input_secrets,
+    validate_portable_repo_id, validate_raw_secrets,
 };
 
 use crate::event::finalize_event;
