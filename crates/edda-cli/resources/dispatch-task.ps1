@@ -87,7 +87,7 @@ try {
   $m.state = 'running'
   Write-Manifest $m
   $outFile = [IO.FileStream]::new($c.log, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite, 1, $true)
-  $errFile = [IO.FileStream]::new(($c.log + '.err'), [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite, 1, $true)
+  $errFile = [IO.FileStream]::new($c.error_log, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite, 1, $true)
   $outCopy = $p.StandardOutput.BaseStream.CopyToAsync($outFile)
   $errCopy = $p.StandardError.BaseStream.CopyToAsync($errFile)
   if (-not $p.WaitForExit([int]($c.timeout * 1000))) {

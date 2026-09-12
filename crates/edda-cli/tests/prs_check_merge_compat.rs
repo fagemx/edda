@@ -165,7 +165,6 @@ fn write_gh_stub(bin: &Path) -> PathBuf {
     {
         let script = r#"@echo off
 echo %*>>"%GH_FIXTURE_DIR%\calls.txt"
-if not "%GH_REPO%"=="fagemx/edda" ( echo GH_REPO not forwarded 1>&2 & exit /b 9 )
 if "%1 %2"=="pr view" ( type "%GH_FIXTURE_DIR%\pr-%3.json" & exit /b 0 )
 if "%1 %2"=="pr list" ( type "%GH_FIXTURE_DIR%\open.json" & exit /b 0 )
 if "%1 %2"=="pr checks" ( exit /b 0 )
@@ -187,7 +186,6 @@ exit /b 0
         use std::os::unix::fs::PermissionsExt;
         let script = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$GH_FIXTURE_DIR/calls.txt"
-[ "$GH_REPO" = 'fagemx/edda' ] || { echo 'GH_REPO not forwarded' >&2; exit 9; }
 case "$1 $2" in
   'pr view') cat "$GH_FIXTURE_DIR/pr-$3.json" ;;
   'pr list') cat "$GH_FIXTURE_DIR/open.json" ;;
@@ -286,7 +284,7 @@ fn legacy_scalar_flags_cannot_bypass_the_canonical_union() {
     let calls = fixture.calls().replace('"', "");
     assert!(
         calls.contains(&format!(
-            "api --paginate repos/{{owner}}/{{repo}}/issues/{PR}/comments"
+            "api --paginate repos/fagemx/edda/issues/{PR}/comments"
         )),
         "the canonical trusted-comment reader was bypassed: {calls}"
     );
@@ -299,7 +297,7 @@ fn live_merge_uses_the_canonical_pinned_squash_argv_and_receipt() {
     assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
     let calls = fixture.calls().replace('"', "");
     let expected = format!(
-        "pr merge {PR} --squash --match-head-commit {HEAD} --subject fix(edda-cli): converge the compatibility command (#{PR}) --body-file -"
+        "pr merge {PR} --squash --match-head-commit {HEAD} --subject fix(edda-cli): converge the compatibility command (#{PR}) --body-file - --repo fagemx/edda"
     );
     assert!(calls.lines().any(|line| line == expected), "calls={calls}");
     let body = std::fs::read_to_string(fixture.fixtures.join("merge-body.txt"))

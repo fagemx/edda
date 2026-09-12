@@ -15,6 +15,8 @@ mod cmd_conduct;
 mod cmd_config;
 mod cmd_context;
 mod cmd_continuity;
+mod cmd_control;
+mod cmd_control_effects;
 mod cmd_controls;
 mod cmd_dispatch;
 mod cmd_dispatch_acp;
@@ -59,6 +61,8 @@ mod cmd_user;
 mod cmd_verdict;
 mod cmd_verify;
 mod cmd_watch;
+#[cfg(test)]
+mod control_effect_pipeline_tests;
 mod detached_dispatch;
 mod dispatch_claim;
 mod fleet;
@@ -173,6 +177,11 @@ enum Command {
     Task {
         #[command(subcommand)]
         cmd: cmd_task::TaskCmd,
+    },
+    /// Durable local control manifests, state, actions, and receipts
+    Control {
+        #[command(subcommand)]
+        cmd: cmd_control::ControlCmd,
     },
     /// Issue a verdict on a gated subject (approve/reject) — GH-519
     Verdict {
@@ -1181,6 +1190,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             dry_run,
         } => cmd_sync::execute(&repo_root, from.as_deref(), from_mirror.as_deref(), dry_run),
         Command::Task { cmd } => cmd_task::execute(cmd, &repo_root),
+        Command::Control { cmd } => cmd_control::execute(cmd, &repo_root),
         Command::Verdict { cmd } => cmd_verdict::run(cmd, &repo_root),
         Command::Reconcile { args } => cmd_reconcile::run(&repo_root, args),
         Command::Claim {

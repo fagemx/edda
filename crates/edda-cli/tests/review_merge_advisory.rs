@@ -185,7 +185,6 @@ fn stub(bin: &Path) -> PathBuf {
     {
         let bat = r#"@echo off
 echo %*>>"%GH_FIXTURE_DIR%\calls.txt"
-if not "%GH_REPO%"=="fagemx/edda" ( echo GH_REPO not forwarded 1>&2 & exit /b 9 )
 if "%1 %2"=="pr view" ( type "%GH_FIXTURE_DIR%\pr-%3.json" & exit /b 0 )
 if "%1 %2"=="pr list" ( type "%GH_FIXTURE_DIR%\open.json" & exit /b 0 )
 if "%1 %2"=="pr checks" goto checks
@@ -210,7 +209,6 @@ exit /b 0
         use std::os::unix::fs::PermissionsExt;
         let sh = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$GH_FIXTURE_DIR/calls.txt"
-[ "$GH_REPO" = 'fagemx/edda' ] || { echo 'GH_REPO not forwarded' >&2; exit 9; }
 case "$1 $2" in
   'pr view') cat "$GH_FIXTURE_DIR/pr-$3.json" ;;
   'pr list') cat "$GH_FIXTURE_DIR/open.json" ;;
@@ -272,7 +270,7 @@ fn a_dirty_neighbour_is_printed_and_does_not_refuse_the_green_subject() {
         .collect();
     assert_eq!(
         check_calls,
-        [format!("pr checks {SUBJECT} --required")],
+        [format!("pr checks {SUBJECT} --required --repo fagemx/edda")],
         "plain success must be the sole Green authority and skip the diagnostic"
     );
 }
@@ -376,8 +374,10 @@ fn required_check_diagnostics_refuse_every_observed_shape_without_squashing() {
         assert_eq!(
             check_calls,
             [
-                format!("pr checks {SUBJECT} --required"),
-                format!("pr checks {SUBJECT} --required --json name,state,bucket"),
+                format!("pr checks {SUBJECT} --required --repo fagemx/edda"),
+                format!(
+                    "pr checks {SUBJECT} --required --json name,state,bucket --repo fagemx/edda"
+                ),
             ],
             "{label}: required-check argv did not preserve the exact PR and field order"
         );

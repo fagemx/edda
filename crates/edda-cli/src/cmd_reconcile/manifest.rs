@@ -130,6 +130,8 @@ pub(super) fn validate_scheduler_manifest(
         max_attempts: manifest.max_attempts,
         lease_ttl_s: manifest.lease_ttl_s,
         codex_bin,
+        brief_event_id: None,
+        brief_digest: None,
     };
     Ok(LoadedSchedulerManifest {
         #[cfg(any(windows, test))]

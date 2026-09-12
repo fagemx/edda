@@ -6,22 +6,131 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Output};
 
-/// Set `GH_REPO` for one `gh` invocation from `EDDA_REPO`, when present.
-///
-/// The verbs that replaced the review shell (GH-1105) keep that shell's
-/// `repo=${EDDA_REPO:-…}` door: a caller outside any checkout of the target
-/// repository names it once, and every `gh` call — including the
-/// `{owner}/{repo}` REST templates — resolves against it, exactly as
-/// `gh --repo` would. `gh` itself honors `GH_REPO`; unset means ordinary
-/// cwd resolution, so running from a checkout keeps working untouched.
+/// A validated GitHub repository selector. Controlled calls construct this
+/// from the same canonical remote identity whose digest the manifest binds;
+/// ordinary review calls retain the explicit `EDDA_REPO=owner/repo` door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitHubRepository {
+    owner: String,
+    name: String,
+}
+
+impl GitHubRepository {
+    pub(crate) fn full_name(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+
+    pub(crate) fn for_control_compile(checkout: &Path, expected_portable: &str) -> Result<Self> {
+        let paths = edda_ledger::EddaPaths::discover(checkout);
+        let identity = edda_store::continuity::derive_portable_repository_identity(
+            checkout,
+            &paths.config_json,
+        )?;
+        anyhow::ensure!(
+            identity.portable_repo_id.as_deref() == Some(expected_portable),
+            "portable repository binding changed"
+        );
+        let hint = edda_store::continuity::derive_portable_repository_remote_hint(checkout)
+            .context("portable repository does not have a GitHub remote selector")?;
+        let name = hint
+            .strip_prefix("github.com/")
+            .context("portable repository is not hosted on github.com")?;
+        Self::parse(name)
+    }
+
+    pub(crate) fn for_control(
+        checkout: &Path,
+        expected_portable: &str,
+        expected_repository: &str,
+    ) -> Result<Self> {
+        let observed = Self::for_control_compile(checkout, expected_portable)?;
+        anyhow::ensure!(
+            observed.full_name() == expected_repository,
+            "canonical GitHub repository binding changed"
+        );
+        Ok(observed)
+    }
+
+    pub(crate) fn from_checkout(checkout: &Path) -> Result<Self> {
+        let hint = edda_store::continuity::derive_portable_repository_remote_hint(checkout)
+            .context("cannot derive an explicit GitHub repository selector")?;
+        let name = hint
+            .strip_prefix("github.com/")
+            .context("repository remote is not hosted on github.com")?;
+        Self::parse(name)
+    }
+
+    fn from_context(checkout: &Path) -> Result<Self> {
+        if let Some(value) = std::env::var_os("EDDA_REPO").filter(|value| !value.is_empty()) {
+            return Self::parse(&value.to_string_lossy());
+        }
+        Self::from_checkout(checkout)
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        let normalized = value.to_ascii_lowercase();
+        edda_core::guided_execution::validate_canonical_github_repository(
+            &normalized,
+            "GitHub repository selector",
+        )?;
+        let (owner, name) = normalized
+            .split_once('/')
+            .context("GitHub repository selector must contain owner/repo")?;
+        Ok(Self {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        })
+    }
+
+    fn concrete_api_arg(&self, value: &str) -> Result<String> {
+        if !value.starts_with("repos/") {
+            return Ok(value.to_owned());
+        }
+        let expanded = value
+            .replace("{owner}", &self.owner)
+            .replace("{repo}", &self.name);
+        anyhow::ensure!(
+            expanded.starts_with(&format!("repos/{}/{}/", self.owner, self.name)),
+            "GitHub API path is outside the validated repository"
+        );
+        Ok(expanded)
+    }
+}
+
+/// Production controlled GitHub transport. Its executable and repository
+/// selectors cannot be redirected by the environment. Tests inject an
+/// explicit binary into this value instead of weakening this constructor.
+#[derive(Debug, Clone)]
+pub(crate) struct ControlledGitHubTransport {
+    binary: std::path::PathBuf,
+}
+
+impl ControlledGitHubTransport {
+    pub(crate) fn production() -> Result<Self> {
+        for variable in ["EDDA_GH_BIN", "GH_REPO", "EDDA_REPO", "GH_HOST"] {
+            anyhow::ensure!(
+                std::env::var_os(variable).is_none(),
+                "controlled GitHub transport refuses environment override {variable}"
+            );
+        }
+        Ok(Self {
+            binary: "gh".into(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn injected(binary: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            binary: binary.into(),
+        }
+    }
+
+    fn command(&self, repo: &Path, selected: &GitHubRepository, args: &[&str]) -> Result<Command> {
+        command_for_binary(&self.binary, repo, selected, args)
+    }
+}
+
 /// The `gh` this verb runs: `EDDA_GH_BIN` when set, otherwise `gh` from PATH.
-///
-/// The override is the dispatch path's own seam (`claim_guard::run_gh`,
-/// GH-782), read here for the same reason it exists there: it is what makes a
-/// hermetic process-level test of a verb possible. A stub on PATH is not, on
-/// Windows, because a bare name reaches CreateProcess' own search — which
-/// finds a PE and not the batch shim a test can write — while every other host
-/// executable this crate runs goes through `evidence::process::executable`.
 /// An empty value names no binary, so it counts as unset.
 fn gh_bin() -> std::path::PathBuf {
     std::env::var_os("EDDA_GH_BIN")
@@ -30,20 +139,54 @@ fn gh_bin() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("gh"))
 }
 
-fn command(repo: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(gh_bin());
-    command.args(args).current_dir(repo);
-    if let Some(name) = std::env::var_os("EDDA_REPO") {
-        command.env("GH_REPO", name);
-    }
+fn command_for_binary(
+    binary: &Path,
+    repo: &Path,
+    selected: &GitHubRepository,
+    args: &[&str],
+) -> Result<Command> {
+    let mut command = Command::new(binary);
     command
+        .current_dir(repo)
+        .env_remove("EDDA_GH_BIN")
+        .env_remove("GH_REPO")
+        .env_remove("EDDA_REPO")
+        .env_remove("GH_HOST");
+    if args.first() == Some(&"api") {
+        let expanded = args
+            .iter()
+            .map(|value| selected.concrete_api_arg(value))
+            .collect::<Result<Vec<_>>>()?;
+        command.args(expanded);
+    } else {
+        command.args(args).args(["--repo", &selected.full_name()]);
+    }
+    Ok(command)
+}
+
+fn command_for(repo: &Path, selected: &GitHubRepository, args: &[&str]) -> Result<Command> {
+    command_for_binary(&gh_bin(), repo, selected, args)
+}
+
+fn command(repo: &Path, args: &[&str]) -> Result<Command> {
+    command_for(repo, &GitHubRepository::from_context(repo)?, args)
 }
 
 /// Capture one `gh` invocation through the shared binary/repository seam.
-/// Callers that need to interpret an exit status or stdout shape use this
-/// rather than rebuilding a `Command` and losing `EDDA_GH_BIN` / `EDDA_REPO`.
 pub(crate) fn gh_capture(repo: &Path, args: &[&str]) -> Result<Output> {
-    command(repo, args).output().context("run gh")
+    command(repo, args)?.output().context("run gh")
+}
+
+/// Capture a call bound to an already validated repository. Inherited
+/// repository/host selectors are always removed from the child environment.
+pub(crate) fn gh_capture_for(
+    repo: &Path,
+    selected: &GitHubRepository,
+    args: &[&str],
+) -> Result<Output> {
+    command_for(repo, selected, args)?
+        .output()
+        .context("run gh")
 }
 
 /// One row from the structured reread used only to diagnose a refused plain
@@ -201,11 +344,57 @@ pub(crate) fn required_checks(repo: &Path, pr: u64) -> RequiredChecks {
 }
 
 pub(crate) fn gh(repo: &Path, args: &[&str]) -> Result<Value> {
-    let output = gh_capture(repo, args)?;
+    let selected = GitHubRepository::from_context(repo)?;
+    gh_for(repo, &selected, args)
+}
+
+pub(crate) fn gh_for(repo: &Path, selected: &GitHubRepository, args: &[&str]) -> Result<Value> {
+    let output = gh_capture_for(repo, selected, args)?;
+    parse_gh_json(output)
+}
+
+pub(crate) fn controlled_gh_capture_for(
+    transport: &ControlledGitHubTransport,
+    repo: &Path,
+    selected: &GitHubRepository,
+    args: &[&str],
+) -> Result<Output> {
+    transport
+        .command(repo, selected, args)?
+        .output()
+        .context("run controlled gh")
+}
+
+pub(crate) fn controlled_gh_for(
+    transport: &ControlledGitHubTransport,
+    repo: &Path,
+    selected: &GitHubRepository,
+    args: &[&str],
+) -> Result<Value> {
+    parse_gh_json(controlled_gh_capture_for(transport, repo, selected, args)?)
+}
+
+fn parse_gh_json(output: Output) -> Result<Value> {
     if !output.status.success() {
-        bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
+        bail!("GitHub request failed with exit {:?}", output.status.code());
     }
-    Ok(serde_json::from_slice(&output.stdout)?)
+    serde_json::from_slice(&output.stdout).context("GitHub response is not one JSON value")
+}
+
+pub(crate) fn authenticated_login(
+    transport: &ControlledGitHubTransport,
+    repo: &Path,
+    selected: &GitHubRepository,
+) -> Result<String> {
+    let user = controlled_gh_for(transport, repo, selected, &["api", "user"])?;
+    let login = user["login"]
+        .as_str()
+        .context("authenticated GitHub user omits canonical login")?;
+    edda_core::guided_execution::validate_canonical_github_login(
+        login,
+        "authenticated GitHub user.login",
+    )?;
+    Ok(login.to_owned())
 }
 
 /// Run `gh` for a write whose stdout is not JSON — a label edit, a comment
@@ -215,7 +404,7 @@ pub(crate) fn gh(repo: &Path, args: &[&str]) -> Result<Value> {
 pub(crate) fn gh_write(repo: &Path, args: &[&str]) -> Result<()> {
     let output = gh_capture(repo, args)?;
     if !output.status.success() {
-        bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
+        bail!("GitHub write failed with exit {:?}", output.status.code());
     }
     Ok(())
 }
@@ -225,7 +414,7 @@ pub(crate) fn gh_write(repo: &Path, args: &[&str]) -> Result<()> {
 /// temporary file is staged and no cleanup can race the call.
 pub(crate) fn gh_write_stdin(repo: &Path, args: &[&str], stdin: &str) -> Result<()> {
     use std::io::Write;
-    let mut child = command(repo, args)
+    let mut child = command(repo, args)?
         .stdin(std::process::Stdio::piped())
         .spawn()
         .context("run gh")?;
@@ -237,7 +426,7 @@ pub(crate) fn gh_write_stdin(repo: &Path, args: &[&str], stdin: &str) -> Result<
         .context("write gh stdin")?;
     let output = child.wait_with_output().context("run gh")?;
     if !output.status.success() {
-        bail!("gh: {}", String::from_utf8_lossy(&output.stderr));
+        bail!("GitHub write failed with exit {:?}", output.status.code());
     }
     Ok(())
 }
@@ -247,6 +436,67 @@ pub(crate) fn gh_write_stdin(repo: &Path, args: &[&str], stdin: &str) -> Result<
 /// review`'s own diffing. `edda review deliver`'s moved-head check only
 /// ever compares this string; it has no need to make the commit locally
 /// resolvable.
+#[derive(Debug, Clone)]
+pub(crate) struct PrDeliverySubject {
+    pub head_sha: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub base_sha: String,
+    pub state: String,
+}
+
+pub(crate) fn pr_delivery_subject_for(
+    transport: &ControlledGitHubTransport,
+    repo: &Path,
+    selected: &GitHubRepository,
+    number: u64,
+) -> Result<PrDeliverySubject> {
+    let value = controlled_gh_for(
+        transport,
+        repo,
+        selected,
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "headRefOid,headRefName,baseRefName,baseRefOid,state",
+        ],
+    )?;
+    let subject = PrDeliverySubject {
+        head_sha: value["headRefOid"]
+            .as_str()
+            .context("PR head missing")?
+            .to_owned(),
+        head_ref: value["headRefName"]
+            .as_str()
+            .context("PR head ref missing")?
+            .to_owned(),
+        base_ref: value["baseRefName"]
+            .as_str()
+            .context("PR base ref missing")?
+            .to_owned(),
+        base_sha: value["baseRefOid"]
+            .as_str()
+            .context("PR base SHA missing")?
+            .to_owned(),
+        state: value["state"]
+            .as_str()
+            .context("PR state missing")?
+            .to_owned(),
+    };
+    for (sha, field) in [
+        (&subject.head_sha, "PR head"),
+        (&subject.base_sha, "PR base"),
+    ] {
+        anyhow::ensure!(
+            sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "invalid {field} SHA"
+        );
+    }
+    Ok(subject)
+}
+
 pub(crate) fn pr_head(repo: &Path, number: u64) -> Result<String> {
     let value = gh(
         repo,
@@ -438,6 +688,63 @@ mod tests {
     use crate::cmd_review::git::testrepo;
 
     #[test]
+    fn every_command_uses_the_validated_repo_and_removes_ambient_selectors() {
+        let selected = GitHubRepository::parse("owner/repo").unwrap();
+        let command = command_for(
+            Path::new("."),
+            &selected,
+            &["pr", "view", "7", "--json", "headRefOid"],
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--repo", "owner/repo"]));
+        let env = command
+            .get_envs()
+            .map(|(key, value)| (key.to_string_lossy().into_owned(), value))
+            .collect::<Vec<_>>();
+        for key in ["GH_REPO", "EDDA_REPO", "GH_HOST"] {
+            assert!(env
+                .iter()
+                .any(|(actual, value)| actual == key && value.is_none()));
+        }
+
+        let api = command_for(
+            Path::new("."),
+            &selected,
+            &["api", "repos/{owner}/{repo}/issues/7"],
+        )
+        .unwrap();
+        let args = api
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args, ["api", "repos/owner/repo/issues/7"]);
+
+        let fields = command_for(
+            Path::new("."),
+            &selected,
+            &[
+                "api",
+                "--method",
+                "POST",
+                "repos/{owner}/{repo}/git/tags",
+                "-f",
+                "message={owner}/{repo}",
+            ],
+        )
+        .unwrap();
+        let args = fields
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.contains(&"repos/owner/repo/git/tags".to_string()));
+        assert!(args.contains(&"message={owner}/{repo}".to_string()));
+    }
+
+    #[test]
     fn required_check_argv_pins_the_pr_and_diagnostic_fields() {
         assert_eq!(
             required_checks_argv(4242),
@@ -504,6 +811,79 @@ mod tests {
         ] {
             assert!(matches!(result, RequiredChecks::Indeterminate(_)));
         }
+    }
+
+    #[test]
+    fn controlled_transport_refuses_every_environment_override() {
+        let _injected_test_transport = ControlledGitHubTransport::injected("gh");
+        let _lock = crate::claim_guard::GH_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for variable in ["EDDA_GH_BIN", "GH_REPO", "EDDA_REPO", "GH_HOST"] {
+            let previous = std::env::var_os(variable);
+            std::env::set_var(variable, "attacker/override");
+            let error = ControlledGitHubTransport::production().unwrap_err();
+            assert!(error.to_string().contains(variable), "{error}");
+            match previous {
+                Some(value) => std::env::set_var(variable, value),
+                None => std::env::remove_var(variable),
+            }
+        }
+    }
+
+    #[test]
+    fn configured_portable_key_cannot_hide_a_changed_control_remote() {
+        let root = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ]);
+        std::fs::create_dir_all(root.path().join(".edda")).unwrap();
+        std::fs::write(
+            root.path().join(".edda/config.json"),
+            r#"{"portable_repo_key":"stable/key"}"#,
+        )
+        .unwrap();
+        let paths = edda_ledger::EddaPaths::discover(root.path());
+        let portable = edda_store::continuity::derive_portable_repository_identity(
+            root.path(),
+            &paths.config_json,
+        )
+        .unwrap()
+        .portable_repo_id
+        .unwrap();
+        assert_eq!(
+            GitHubRepository::for_control(root.path(), &portable, "owner/repo")
+                .unwrap()
+                .full_name(),
+            "owner/repo"
+        );
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/attacker/foreign.git",
+        ]);
+        let error = GitHubRepository::for_control(root.path(), &portable, "owner/repo")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("binding changed"), "{error}");
     }
 
     #[test]

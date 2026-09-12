@@ -1,4 +1,5 @@
 use anyhow::Context;
+use edda_ledger::task_actions::CONTROLLED_TASK_LEASE_PREFIX;
 use edda_ledger::tasks::{TaskStatus, TaskView};
 use edda_ledger::{Ledger, TaskLease};
 use std::path::{Path, PathBuf};
@@ -62,6 +63,12 @@ pub(super) fn plan_actions(
     // only then deletes, so a failed delete leaves one behind — waits out the
     // lease instead of being retried on the next pass. Bounded by the TTL, and
     // the alternative is a second reconciler dispatching a claimed task.
+    let is_controlled = |view: &TaskView| {
+        view.session_brief_event_id.is_some()
+            || view.session_brief_digest.is_some()
+            || lease_for(view.task_id)
+                .is_some_and(|lease| lease.owner.starts_with(CONTROLLED_TASK_LEASE_PREFIX))
+    };
     let is_live = |view: &TaskView| {
         matches!(
             view.status,
@@ -69,6 +76,11 @@ pub(super) fn plan_actions(
         ) && lease_for(view.task_id)
             .is_some_and(|lease| lease.attempt >= view.attempts && lease.expires_at.as_str() > now)
     };
+    // A crashed controlled process keeps its scope guarded until a controller
+    // decides what to do, but an expired lease no longer consumes a worker
+    // slot. Unrelated work may continue; overlapping work may not.
+    let is_controlled_running =
+        |view: &TaskView| view.status == TaskStatus::Running && is_controlled(view);
     let mut occupied: Vec<Vec<String>> = live_claims
         .iter()
         .filter(|paths| !paths.is_empty())
@@ -77,14 +89,24 @@ pub(super) fn plan_actions(
     occupied.extend(
         ordered
             .iter()
-            .filter(|view| is_live(view))
+            .filter(|view| is_live(view) || is_controlled_running(view))
             .map(|view| occupied_scope(&view.scope_paths)),
     );
     let mut slots = max_workers.saturating_sub(ordered.iter().filter(|view| is_live(view)).count());
     let mut actions = Vec::new();
 
     for view in ordered {
-        if is_live(view) {
+        // Reconcile owns Codex attempts. ACP targets have their own task-bound
+        // transport and claim lifecycle; dispatching them through Codex would
+        // create a competing session authority.
+        if view
+            .agent_kind
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("acp:"))
+        {
+            continue;
+        }
+        if is_live(view) || is_controlled(view) {
             continue;
         }
         match view.status {
@@ -504,6 +526,7 @@ fn append_claimed_truth(
     Ok(Some(RunnerPlan {
         task: entry.task.clone(),
         attempt,
+        lease_owner: entry.owner.clone(),
         worktree,
     }))
 }
