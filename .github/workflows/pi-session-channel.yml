@@ -1,0 +1,21 @@
+name: Pi session channel
+on:
+  pull_request:
+    paths: ['integrations/pi/**', '.github/workflows/pi-session-channel.yml']
+  push:
+    branches: [main]
+    paths: ['integrations/pi/**', '.github/workflows/pi-session-channel.yml']
+  workflow_dispatch:
+jobs:
+  channel:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs integrations/pi/handoff.test.mjs integrations/pi/compose.test.mjs
