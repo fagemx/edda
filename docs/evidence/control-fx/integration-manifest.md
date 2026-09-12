@@ -167,6 +167,7 @@ Carry modes:
 | `crates/edda-cli/src/cmd_dispatch.rs` | keep main's doc, `--task-id` ACP guard, claim-guard-before-turn, codex persistence options; add CE's `--brief-event-id`/`--brief-digest` and ACP preflight handoff. The carried claim-outcome helper and main's `claim_guard_refusal` are relocated into `claim_guard.rs` so the file holds main's 2106-line ratchet without contortion |
 | `crates/edda-cli/src/claim_guard.rs` | CE version plus `dispatch_claim_outcome` and `claim_guard_refusal` relocated from `cmd_dispatch.rs` |
 | `COMPATIBILITY.md` | keep main's text; recompute `main.rs` line citations after adding the `Control` variant |
+| `docs/reference/cli.md` | closure path the GH-650 coverage check requires: add the `edda control` section and the `dispatch --brief-event-id/--brief-digest` rows; main's other content kept |
 | `docs/reference/ledger-event-spec.md` | see A.6 (frozen source is main plus these rows) |
 
 ## C. Continuity preservation (critical) — additive only
