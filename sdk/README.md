@@ -23,7 +23,7 @@ sdk/
 | Canon/hash (TS + Py) | implemented, independently; verify all golden fixtures |
 | Transports (MCP/HTTP) | implemented; MCP writes, HTTP read-only, typed timeout/cancel |
 | Contract tests | both languages + cross-language equivalence runner (task/receipt/claim/verify included) |
-| Spec pin | pinned: `04b58b1e8efbc589417cd44120e2611fecf89229` (sdk/SPEC_PIN.json) |
+| Spec pin | pinned: `a7eaba2cff93e59ceb96d786bbc9f1b4c83dacc2` (sdk/SPEC_PIN.json) |
 | Publication | packages are publishable; **the publish itself needs the operator's registry accounts** — see below |
 
 See `SDK_HANDOFF.md` at the repo root for open controller decisions.

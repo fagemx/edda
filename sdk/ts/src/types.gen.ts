@@ -141,6 +141,48 @@ export interface CommitPayload {
   [k: string]: unknown;
 }
 
+/** Event type `continuity_capsule` — stability: stable-v1 (source: crates/edda-core/src/continuity/mod.rs). */
+export interface ContinuityCapsulePayload {
+  "data_authority": "data_only";
+  "continuity": {
+    "record_version": 1;
+    "data_authority": "data_only";
+    "origin": {
+      "capsule_id": string;
+      "event_id": string;
+      "portable_repo_id"?: string;
+      [k: string]: unknown;
+    };
+    "capsule_sha256": string;
+    "capsule_bytes_hex": string;
+    "capsule": {
+      "capsule_version": 1;
+      "capsule_id": string;
+      "created_at": string;
+      "source": Record<string, unknown>;
+      "repository": Record<string, unknown>;
+      "state": {
+        "title": string;
+        "summary": string;
+        "goal": string;
+        "current": string;
+        "hypotheses": Array<unknown>;
+        "rejected": Array<unknown>;
+        "open_questions": Array<unknown>;
+        "next_action": string;
+        [k: string]: unknown;
+      };
+      "git": Record<string, unknown>;
+      "references": Record<string, unknown>;
+      "truncation"?: Array<unknown>;
+      [k: string]: unknown;
+    };
+    "imported": boolean;
+    [k: string]: unknown;
+  };
+  [k: string]: unknown;
+}
+
 /** Event type `cycle_telemetry` — stability: unstable (source: crates/edda-core/src/event.rs). */
 export type CycleTelemetryPayload = unknown;
 
@@ -537,7 +579,7 @@ export interface VerdictRecordedPayload {
 // ── Stability-partitioned unions (contract §3) ──
 
 /** Layer 1 stable event payload union (registry stability "stable-v1"). */
-export type Layer1Payload = BranchCreatePayload | BranchSwitchPayload | CheckpointPayload | CmdPayload | CommitPayload | DecisionImportPayload | DecisionRatifyPayload | MergePayload | NotePayload | RebuildPayload;
+export type Layer1Payload = BranchCreatePayload | BranchSwitchPayload | CheckpointPayload | CmdPayload | CommitPayload | ContinuityCapsulePayload | DecisionImportPayload | DecisionRatifyPayload | MergePayload | NotePayload | RebuildPayload;
 
 /** Layer 2 experimental payload union (registry stability "unstable") — may change in any release. */
 export type Layer2Payload = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | ReviewVerdictPayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload;

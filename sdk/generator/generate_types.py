@@ -33,6 +33,8 @@ class Generator:
         if schema is True or schema is None or schema is False or schema == {}:
             return "object"
         assert isinstance(schema, dict)
+        if "const" in schema:
+            return "Literal[" + repr(schema["const"]) + "]"
         if "anyOf" in schema:
             return " | ".join(self.type_for(part, hint) for part in schema["anyOf"])
         if "oneOf" in schema:

@@ -1,5 +1,6 @@
 pub mod blob_meta;
 pub mod blob_store;
+pub mod continuity;
 pub mod device_token;
 pub mod domain;
 pub mod ledger;
@@ -19,6 +20,7 @@ pub use blob_store::{
     blob_put_classified, blob_put_if_large, blob_remove, blob_size, BlobInfo,
     SNAPSHOT_BLOB_THRESHOLD,
 };
+pub use continuity::{CapsuleEntryV1, ContinuityReadbackError, ImportDisposition, ImportResultV1};
 pub use domain::{
     BundleRow, ChainEntryView, DayCount, DecideSnapshotRow, DependencyEdge, DetectedPattern,
     DeviceTokenRow, DomainCount, ExecutionLinked, ImportParams, OutcomeMetrics,

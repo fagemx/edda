@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type {
+  ContinuityCapsulePayload,
   DecisionImportPayload,
   IngestionPayload,
   NotePayload,
@@ -42,6 +43,11 @@ test("generated enum fields accept their literal members", () => {
   assert.equal(noScope, null);
   const noteScope: NonNullable<NotePayload["decision"]>["scope"] = "global";
   assert.equal(noteScope, "global");
+  // JSON Schema const values stay exact literals at every nesting level.
+  const authority: ContinuityCapsulePayload["data_authority"] = "data_only";
+  const recordVersion: ContinuityCapsulePayload["continuity"]["record_version"] = 1;
+  const capsuleVersion: ContinuityCapsulePayload["continuity"]["capsule"]["capsule_version"] = 1;
+  assert.deepEqual([authority, recordVersion, capsuleVersion], ["data_only", 1, 1]);
 });
 
 // Non-members are rejected — this is the assertion that fails the build if
@@ -51,6 +57,10 @@ test("generated enum fields accept their literal members", () => {
 const badTriggerType: IngestionPayload["triggerType"] = "not-a-trigger";
 // @ts-expect-error non-member rejected through the anyOf union
 const badScope: DecisionImportPayload["decision"]["scope"] = "region";
+// @ts-expect-error JSON Schema const rejects a different string
+const badAuthority: ContinuityCapsulePayload["data_authority"] = "instructions";
+// @ts-expect-error JSON Schema const rejects a different number
+const badRecordVersion: ContinuityCapsulePayload["continuity"]["record_version"] = 2;
 
 // Requiredness is preserved: omitting the required enum field must fail to
 // compile even though the interface carries an index signature.
