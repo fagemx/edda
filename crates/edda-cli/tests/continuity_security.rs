@@ -332,10 +332,7 @@ fn legal_unix_nonportable_git_names_are_omitted_without_blocking_save() {
         ],
     ));
     assert_eq!(shown["capsule"]["git"]["tree_dirty"], true);
-    assert_eq!(
-        shown["capsule"]["git"]["dirty_paths"],
-        serde_json::json!([])
-    );
+    assert!(shown["capsule"]["git"].get("dirty_paths").is_none());
     assert_eq!(shown["capsule"]["git"]["dirty_paths_truncated"], true);
     assert_eq!(
         Ledger::open(repo.path()).unwrap().count_events().unwrap(),
