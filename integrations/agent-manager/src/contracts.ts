@@ -1,3 +1,6 @@
+export const MAX_MESSAGE_BYTES = 12 * 1024;
+// JSON escaping can expand each control character to six ASCII bytes.
+export const MAX_BODY_BYTES = 96 * 1024;
 export type RuntimeState = 'running' | 'executing_tool' | 'idle' | 'waiting_user' | 'stopped' | 'unavailable' | 'unknown';
 export type MessageMode = 'followUp' | 'steer';
 export type OperationStatus = 'prepared' | 'unconfirmed' | 'accepted' | 'queued' | 'started' | 'settled' | 'failed' | 'unknown';
@@ -50,6 +53,7 @@ export interface Overview {
 }
 export interface AdapterReceipt { status: OperationStatus; instanceId: string; sessionId: string; id: string }
 export interface PiAdapter {
+  validateMessage?(request: SendRequest): void;
   observe(binding: AgentBinding): Promise<AgentObservation>;
   conversation(binding: AgentBinding, after?: string): Promise<Omit<ConversationView, 'agentId' | 'selectionRevision'>>;
   send(binding: AgentBinding, request: SendRequest): Promise<AdapterReceipt>;

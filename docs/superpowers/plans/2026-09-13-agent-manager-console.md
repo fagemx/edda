@@ -50,7 +50,8 @@ screens. No fake percentages, theatrical charts, or generated statistics.
 `POST /api/agents/:id/messages`, `GET /api/operations/:id`.
 All API responses require the gateway bearer. A send is an append/steer message,
 not a stale-question approval; basis cursor is provenance only. Expected instance
-and selection revision guard recipient identity. Body max24KiB/message max12KiB.
+and selection revision guard recipient identity. Body max96KiB/message max12KiB
+(shared constants allow JSON escaping without rejecting a valid maximum message).
 Errors use `{error:{code,message}}`, never raw legacy exceptions or credentials.
 
 The independent verifier audited the baseline before implementation. Its proposed

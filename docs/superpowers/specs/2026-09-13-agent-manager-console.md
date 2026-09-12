@@ -56,7 +56,9 @@ must use the existing inbox epoch/identity contract.
 
 Every send carries a client-generated UUID, selection revision and freshly viewed
 instance ID. Server rechecks the actual instance, then commits an intent before
-sending through Pi. Same UUID/same payload returns the original operation; changed
+sending through Pi. Adapter-specific encoded-frame limits are checked before
+committing intent (JSON escaping can exceed a channel's frame bound even within
+the text limit). Same UUID/same payload returns the original operation; changed
 payload conflicts. A crash/timeout leaves unknown evidence; restart and refresh
 query receipts but never resend. HTTP success/queued/started/settled are execution
 states, not product acceptance. UI retains uncertain messages and their original

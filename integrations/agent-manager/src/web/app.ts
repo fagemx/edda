@@ -1,4 +1,5 @@
 import type { AgentView, ConversationView, MessageMode, OperationStatus, OperationView, Overview, PublicEntry, RuntimeState, SendRequest } from '../contracts.js';
+import { MAX_MESSAGE_BYTES } from '../contracts.js';
 
 // Everything from the gateway and browser storage is rendered as text, never HTML.
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] {
@@ -205,14 +206,24 @@ function renderConversation(): void {
   const signature = JSON.stringify([...entries.values()]);
   if (signature !== conversationSignature) {
     const pane = get('conversation'); const atEnd = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 70; const oldScroll = pane.scrollTop;
-    pane.replaceChildren(...(entries.size ? [...entries.values()].map(entry => {
-      const tool = entry.kind === 'tool_result'; const item = element(tool ? 'details' : 'article', '', `entry ${tool ? 'tool' : entry.role === 'user' ? 'user' : 'assistant'}`);
-      const label = tool ? `工具結果：${entry.toolName ?? '未命名'}${entry.toolError ? '（錯誤）' : ''}` : entry.role === 'user' ? '操作訊息' : '代理回覆';
-      const meta = element(tool ? 'summary' : 'div', '', 'entry-meta'); meta.append(element('span', label, 'entry-role'), element('time', time(entry.timestamp)));
+    const opened = new Set([...pane.querySelectorAll<HTMLDetailsElement>('details[data-tool-group][open]')].map(item => item.dataset.toolGroup));
+    const nodes: HTMLElement[] = []; let group: HTMLDetailsElement | null = null; let count = 0;
+    for (const entry of entries.values()) {
+      if (entry.kind === 'tool_result') {
+        if (!group) { group = element('details', '', 'entry tool'); group.dataset.toolGroup = entry.id; group.open = opened.has(entry.id); group.append(element('summary', '', 'entry-meta')); nodes.push(group); count = 0; }
+        count++; group.querySelector('summary')!.textContent = `工具活動（${count} 筆）`;
+        group.append(element('p', `${entry.toolName ?? '工具'}${entry.toolError ? '：回報錯誤' : '：已返回'} · ${time(entry.timestamp)}`, 'muted'));
+        continue;
+      }
+      if (!entry.text.trim()) continue;
+      group = null;
+      const item = element('article', '', `entry ${entry.role === 'user' ? 'user' : 'assistant'}`);
+      const meta = element('div', '', 'entry-meta'); meta.append(element('span', entry.role === 'user' ? '操作訊息' : '代理回覆', 'entry-role'), element('time', time(entry.timestamp)));
       item.append(meta, element('div', entry.text, 'entry-body'));
       if (entry.truncated) item.append(element('p', '此則內容已截短。', 'entry-truncated'));
-      return item;
-    }) : [element('p', '尚無公開對話。可在下方開始新訊息。', 'empty')]));
+      nodes.push(item);
+    }
+    pane.replaceChildren(...(nodes.length ? nodes : [element('p', '尚無公開對話。可在下方開始新訊息。', 'empty')]));
     pane.scrollTop = atEnd ? pane.scrollHeight : oldScroll; conversationSignature = signature;
   }
   get('conversation-meta').textContent = conversation ? `觀測 ${time(conversation.observedAt)}` : '讀取中';
@@ -223,14 +234,16 @@ function renderCompose(): void {
   const agent = selectedAgent(); if (!agent) return;
   const draft = draftFor(agent.id); const pending = draft.pending; const message = get<HTMLTextAreaElement>('message');
   const viewMatches = conversation?.agentId === agent.id && conversation.instanceId === agent.instanceId && conversation.selectionRevision === agent.selectionRevision;
-  const canSend = connected && storageWorks && !!token && agent.capabilities.send && !agent.stale && agent.source === 'live' && !!agent.instanceId && viewMatches && conversation?.source === 'live';
-  const tooLong = new TextEncoder().encode(draft.message).length > 12 * 1024;
+  // Old heartbeat metadata is advisory when an authenticated current conversation
+  // confirms the same instance; the server checks that instance again on send.
+  const canSend = connected && storageWorks && !!token && agent.capabilities.send && agent.source === 'live' && !!agent.instanceId && viewMatches && conversation?.source === 'live';
+  const tooLong = new TextEncoder().encode(draft.message).length > MAX_MESSAGE_BYTES;
   message.disabled = !!pending;
   get<HTMLSelectElement>('mode').disabled = !!pending;
   get<HTMLButtonElement>('send').disabled = !canSend || !!pending || sending.has(agent.id) || !draft.message.trim() || tooLong;
   get('mode-help').textContent = draft.mode === 'steer' ? '在下一個安全處理點優先讀取這則指示；不會強制終止正在執行的工具。' : '目前工作結束後，再處理這則訊息。';
   get('draft-status').textContent = pending ? '原始訊息與收據識別碼已保留' : !storageWorks ? '草稿僅暫存於本頁' : draft.message ? '草稿已保存在此瀏覽器' : '草稿依收件人自動保存';
-  get('message-size').textContent = tooLong ? '訊息超過 12 KiB，請縮短內容' : `${new TextEncoder().encode(draft.message).length.toLocaleString('zh-TW')} / 12,288 bytes`;
+  get('message-size').textContent = tooLong ? '訊息超過 12 KiB，請縮短內容' : `${new TextEncoder().encode(draft.message).length.toLocaleString('zh-TW')} / ${MAX_MESSAGE_BYTES.toLocaleString('zh-TW')} bytes`;
   if (!pending && !canSend) notice('send-notice', !storageWorks ? '請先恢復瀏覽器儲存功能。' : !connected ? '工作台連線中斷，草稿已保留。' : '等待此代理的最新對話與可傳送狀態。');
   else notice('send-notice', '');
   get('pending').hidden = !pending;
@@ -279,6 +292,10 @@ async function refreshOverview(): Promise<void> {
     if (selectedId && after && (!before || before.instanceId !== after.instanceId || before.selectionRevision !== after.selectionRevision)) selectAgentAfterIdentityChange();
     if (selectedId && !after) { generation++; conversation = null; entries.clear(); notice('global-notice', '原收件人已移出選取清單；其草稿與待確認請求仍保留。請選擇其他代理。'); }
     renderProjects(); renderAgent(); renderRail();
+    if (!selectedId && result.agents.length) {
+      const first = result.agents.find(a => a.projectId === result.projects[0]?.id && a.role === 'manager') ?? result.agents[0];
+      if (first) selectAgent(first.id);
+    }
   } catch (error) {
     connected = false; get('connection-status').textContent = '連線中斷';
     notice('global-notice', `${errorText(error)} 現有畫面為上次觀測，草稿與原始送出請求已保留。`);

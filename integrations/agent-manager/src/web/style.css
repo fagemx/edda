@@ -101,6 +101,9 @@ h3 {
   padding:12px 0
 }
 .topbar {
+  position:sticky;
+  top:0;
+  z-index:5;
   height:76px;
   border-bottom:1px solid var(--line);
   background:var(--paper);
@@ -152,6 +155,11 @@ h3 {
   min-height:calc(100vh - 76px)
 }
 .sidebar {
+  position:sticky;
+  top:76px;
+  align-self:start;
+  max-height:calc(100dvh - 76px);
+  overflow:auto;
   padding:26px 18px;
   border-right:1px solid var(--line)
 }
@@ -492,6 +500,9 @@ select {
   border-left:1px solid var(--line);
   min-width:0
 }
+@media(min-width:1151px) {
+  .activity-rail {position:sticky;top:76px;align-self:start;max-height:calc(100dvh - 76px);overflow:auto}
+}
 .activity-rail section+section {
   border-top:1px solid var(--line);
   padding-top:21px;
@@ -685,6 +696,9 @@ select {
 }
 .sidebar {
   border-right:0;
+  position:static;
+  max-height:none;
+  overflow:visible;
   border-bottom:1px solid var(--line);
   padding:15px 12px
 }
