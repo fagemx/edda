@@ -14,6 +14,7 @@ mod cmd_commit;
 mod cmd_conduct;
 mod cmd_config;
 mod cmd_context;
+mod cmd_continuity;
 mod cmd_controls;
 mod cmd_dispatch;
 mod cmd_dispatch_acp;
@@ -108,6 +109,11 @@ enum Command {
     Checkpoint {
         #[command(flatten)]
         args: cmd_checkpoint::CheckpointArgs,
+    },
+    /// Save, inspect, and transport bounded continuation capsules
+    Continuity {
+        #[command(subcommand)]
+        cmd: cmd_continuity::ContinuityCmd,
     },
     /// Record a decision — agent-authored, unratified until `edda ratify` (shortcut for `bridge claude decide`)
     Decide {
@@ -1146,6 +1152,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Actor { cmd } => cmd_actor::run(cmd, &repo_root),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
         Command::Checkpoint { args } => cmd_checkpoint::execute(&repo_root, args),
+        Command::Continuity { cmd } => cmd_continuity::run(cmd, &repo_root, &cwd),
         Command::Decide {
             decision,
             reason,

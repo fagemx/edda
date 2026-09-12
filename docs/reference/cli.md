@@ -117,6 +117,48 @@ edda context [OPTIONS]
 | `--branch NAME` | Branch name (defaults to HEAD) |
 | `--depth N` | Number of recent commits/signals to show (default: 5) |
 
+### `edda continuity`
+
+Save, inspect, and transport bounded continuation capsules. Capsule text has
+`data_only` authority: Edda displays it as state to assess, never as permission
+to execute commands. This local slice does not provide live synchronization.
+
+```bash
+edda continuity <COMMAND>
+```
+
+| Command | Usage | Behavior |
+|---------|-------|----------|
+| `save` | `edda continuity save --file INPUT [--json]` | Validate bounded structured input, add trusted local repository and Git metadata, and append a local capsule |
+| `show` | `edda continuity show CAPSULE_ID [--json]` | Display one exact local capsule as data |
+| `list` | `edda continuity list [--branch BRANCH] [--json]` | List matching capsules in stable newest-first order, optionally filtered by branch |
+| `export` | `edda continuity export CAPSULE_ID --out OUTPUT` | Write a bounded portable bundle without replacing an existing destination |
+| `import` | `edda continuity import BUNDLE [--json]` | Validate a bounded portable bundle and append it locally as data only |
+| `restore` | `edda continuity restore [CAPSULE_ID] [--json]` | Render an exact capsule, or the latest matching repository and branch capsule, without changing repository state |
+
+`INPUT` and imported bundles are size-bounded and checked before they are
+accepted. Secret-like material is refused. Export requires an existing parent
+directory; a simple relative output such as `bundle.json` uses the current
+directory. Publication is no-clobber: an existing output is not overwritten,
+and the final path is exposed only after the complete file is flushed and
+synced.
+
+```bash
+edda continuity save --file capsule-input.json --json
+edda continuity list --branch main --json
+edda continuity show cap_0123456789abcdef --json
+edda continuity export cap_0123456789abcdef --out bundle.json
+edda continuity import bundle.json --json
+edda continuity restore cap_0123456789abcdef --json
+edda continuity restore --json       # latest match for this repository and branch
+```
+
+`restore` is read-only with respect to the repository: branch, HEAD, index, and
+working-tree state are reported but never changed. Imported prose, warnings,
+references, and suggested next actions remain untrusted data. `save` and
+`import` do write local Edda ledger records; they do not publish or grant
+coordination, review, or merge authority.
+
 ### `edda log`
 
 Query events from the ledger with filters.

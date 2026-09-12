@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "continuity_capsule payload",
+  "description": "Layer 1 v1 data-only portable continuity record.",
+  "type": "object",
+  "properties": {
+    "data_authority": {
+      "const": "data_only"
+    },
+    "continuity": {
+      "type": "object",
+      "properties": {
+        "record_version": {
+          "const": 1
+        },
+        "data_authority": {
+          "const": "data_only"
+        },
+        "origin": {
+          "type": "object",
+          "properties": {
+            "capsule_id": {
+              "type": "string"
+            },
+            "event_id": {
+              "type": "string"
+            },
+            "portable_repo_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "capsule_id",
+            "event_id"
+          ],
+          "additionalProperties": true
+        },
+        "capsule_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "capsule_bytes_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$"
+        },
+        "capsule": {
+          "type": "object",
+          "properties": {
+            "capsule_version": {
+              "const": 1
+            },
+            "capsule_id": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "source": {
+              "type": "object"
+            },
+            "repository": {
+              "type": "object"
+            },
+            "state": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "goal": {
+                  "type": "string"
+                },
+                "current": {
+                  "type": "string"
+                },
+                "hypotheses": {
+                  "type": "array"
+                },
+                "rejected": {
+                  "type": "array"
+                },
+                "open_questions": {
+                  "type": "array"
+                },
+                "next_action": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "title",
+                "summary",
+                "goal",
+                "current",
+                "hypotheses",
+                "rejected",
+                "open_questions",
+                "next_action"
+              ],
+              "additionalProperties": true
+            },
+            "git": {
+              "type": "object"
+            },
+            "references": {
+              "type": "object"
+            },
+            "truncation": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "capsule_version",
+            "capsule_id",
+            "created_at",
+            "source",
+            "repository",
+            "state",
+            "git",
+            "references"
+          ],
+          "additionalProperties": true
+        },
+        "imported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "record_version",
+        "data_authority",
+        "origin",
+        "capsule_sha256",
+        "capsule_bytes_hex",
+        "capsule",
+        "imported"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "data_authority",
+    "continuity"
+  ],
+  "additionalProperties": true
+}

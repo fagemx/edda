@@ -184,6 +184,70 @@ CommitPayload = TypedDict(
     total=False,
 )
 
+ContinuityCapsulePayloadContinuityOrigin = TypedDict(
+    'ContinuityCapsulePayloadContinuityOrigin',
+    {
+        'capsule_id': Required[str],
+        'event_id': Required[str],
+        'portable_repo_id': NotRequired[str],
+    },
+    total=False,
+)
+
+ContinuityCapsulePayloadContinuityCapsuleState = TypedDict(
+    'ContinuityCapsulePayloadContinuityCapsuleState',
+    {
+        'title': Required[str],
+        'summary': Required[str],
+        'goal': Required[str],
+        'current': Required[str],
+        'hypotheses': Required[list[object]],
+        'rejected': Required[list[object]],
+        'open_questions': Required[list[object]],
+        'next_action': Required[str],
+    },
+    total=False,
+)
+
+ContinuityCapsulePayloadContinuityCapsule = TypedDict(
+    'ContinuityCapsulePayloadContinuityCapsule',
+    {
+        'capsule_version': Required[Literal[1]],
+        'capsule_id': Required[str],
+        'created_at': Required[str],
+        'source': Required[dict[str, object]],
+        'repository': Required[dict[str, object]],
+        'state': Required[ContinuityCapsulePayloadContinuityCapsuleState],
+        'git': Required[dict[str, object]],
+        'references': Required[dict[str, object]],
+        'truncation': NotRequired[list[object]],
+    },
+    total=False,
+)
+
+ContinuityCapsulePayloadContinuity = TypedDict(
+    'ContinuityCapsulePayloadContinuity',
+    {
+        'record_version': Required[Literal[1]],
+        'data_authority': Required[Literal['data_only']],
+        'origin': Required[ContinuityCapsulePayloadContinuityOrigin],
+        'capsule_sha256': Required[str],
+        'capsule_bytes_hex': Required[str],
+        'capsule': Required[ContinuityCapsulePayloadContinuityCapsule],
+        'imported': Required[bool],
+    },
+    total=False,
+)
+
+ContinuityCapsulePayload = TypedDict(
+    'ContinuityCapsulePayload',
+    {
+        'data_authority': Required[Literal['data_only']],
+        'continuity': Required[ContinuityCapsulePayloadContinuity],
+    },
+    total=False,
+)
+
 CycleTelemetryPayloadOperationsItemTokenUsage = TypedDict(
     'CycleTelemetryPayloadOperationsItemTokenUsage',
     {
@@ -801,5 +865,5 @@ VerdictRecordedPayload = TypedDict(
 )
 
 # Stability-partitioned unions (client contract §3).
-Layer1Payload: TypeAlias = BranchCreatePayload | BranchSwitchPayload | CheckpointPayload | CmdPayload | CommitPayload | DecisionImportPayload | DecisionRatifyPayload | MergePayload | NotePayload | RebuildPayload
+Layer1Payload: TypeAlias = BranchCreatePayload | BranchSwitchPayload | CheckpointPayload | CmdPayload | CommitPayload | ContinuityCapsulePayload | DecisionImportPayload | DecisionRatifyPayload | MergePayload | NotePayload | RebuildPayload
 Layer2Payload: TypeAlias = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | ReviewVerdictPayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload

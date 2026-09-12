@@ -1,3 +1,4 @@
+pub mod continuity;
 pub mod fleet;
 pub mod heartbeat;
 pub mod registry;
