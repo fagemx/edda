@@ -141,6 +141,175 @@ export interface CommitPayload {
   [k: string]: unknown;
 }
 
+/** Event type `control_intent` — stability: unstable (source: crates/edda-ledger/src/control_projection.rs). */
+export interface ControlIntentPayload {
+  "control_intent": {
+    "intent_version": 1;
+    "control_id": string;
+    "step_id": string;
+    "action_id": string;
+    "observed_state_version": number /* integer */;
+    "action_token": /** Commitment to the exact opaque token that authorized this durable intent; recovery requires that same token. */  string;
+    "action_kind": "complete" | "needs_decision";
+    "target": {
+      "kind": "control";
+      "control_id": string;
+    } | {
+      "kind": "task";
+      "task_key": string;
+      "attempt": number /* integer */;
+    } | {
+      "kind": "pull_request";
+      "number": number /* integer */;
+      "head_sha": string;
+    };
+    "created_at": string;
+    "seal": string;
+  };
+  [k: string]: unknown;
+}
+
+/** Event type `control_manifest` — stability: unstable (source: crates/edda-ledger/src/control_projection.rs). */
+export interface ControlManifestPayload {
+  "control_manifest": {
+    "record_version": 1;
+    "manifest_event_id": string;
+    "manifest_digest": string;
+    "canonical_bytes_hex": string;
+    "manifest": {
+      "control_version": 1;
+      "manifest_version": number /* integer */;
+      "control_id": string;
+      "program_id": string;
+      "command_profile": "strong";
+      "goal": string;
+      "exclusions"?: Array<string>;
+      "basis": {
+        "portable_repo_id"?: string;
+        "github_repository"?: string;
+        "base_full_sha": string;
+        "references"?: Array<string>;
+      };
+      "tasks"?: Array<{
+        "task_key": string;
+        "task_id"?: number /* integer */;
+        "depends_on"?: Array<string>;
+        "exact_input_sha": string;
+        "brief": {
+          "brief_id": string;
+          "brief_event_id": string;
+          "content_digest": string;
+        };
+        "allowed_outcome_codes": [string, ...Array<string>];
+        "runtime_profile": "strong" | "flash";
+        "model_target": string;
+        "owned_paths": [string, ...Array<string>];
+        "build_lane"?: string;
+        "issue_binding"?: string;
+        "local_only": boolean;
+        "execution_host_affinity": string;
+        "required_delivery": "local_only" | "commit" | "branch" | "pull_request";
+      }>;
+      "capacity": {
+        "max_workers": number /* integer */;
+        "verifier_capacity": number /* integer */;
+      };
+      "admission_policy": {
+        "allowed_issue_stage_labels"?: Array<string>;
+        "forbidden_hold_labels"?: Array<string>;
+        "claim_identity": string;
+        "winner_readback_required": boolean;
+        "existing_claim_check_required": boolean;
+        "delivery_pr_check_required": boolean;
+      };
+      "routes"?: Array<{
+        "task_key": string;
+        "outcome_code": string;
+        "next_action": "admit_and_claim_issue" | "prepare_attempt" | "dispatch_task" | "wait_for_workers" | "bind_delivery" | "claim_verification" | "request_verification" | "route_known_fix" | "merge_delegated" | "complete" | "needs_decision" | "control_error";
+      }>;
+      "retry_cost_policy": {
+        "per_action_preflight_cost_microusd": number /* integer */;
+        "per_action_incremental_cap_microusd": number /* integer */;
+        "aggregate_stop_microusd": number /* integer */;
+        "missing_cost_needs_decision": boolean;
+        "retry_cap": number /* integer */;
+      };
+      "review_policy": {
+        "verifier_identity": string;
+        "verifier_profile": string;
+        "frozen_surface_source": string;
+        "one_live_claim_per_pr_head": boolean;
+      };
+      "merge_policy": {
+        "required": boolean;
+        "pr_number"?: number /* integer */;
+        "expected_head_sha"?: string;
+        "expected_base_sha"?: string;
+        "eligibility_product_verb": string;
+      };
+      "return_for_decision"?: Array<string>;
+      "completion_condition": "local_preparation_only" | "verification_succeeded" | "delegated_merge_succeeded";
+    };
+    "authority": {
+      "capability_id": string;
+      "principal_id": string;
+      "session_id": string;
+      "command_profile": "strong";
+      "local_project_id": string;
+      "portable_repo_id"?: string;
+      "github_repository"?: string;
+      "permitted_action": "control_compile" | "control_adjudicate";
+      "expires_at": string;
+      "seal": /** HMAC over authority, manifest identity/digest/version, and the complete adjudication provenance when present. */  string;
+    };
+    "adjudication"?: {
+      "adjudication_version": 1;
+      "reason_code": string;
+      "evidence": Array<string>;
+      "prior_state_version": number /* integer */;
+      "prior_manifest_digest": string;
+    };
+  };
+  [k: string]: unknown;
+}
+
+/** Event type `control_receipt` — stability: unstable (source: crates/edda-ledger/src/control_projection.rs). */
+export interface ControlReceiptPayload {
+  "control_receipt": {
+    "receipt_version": 1;
+    "control_id": string;
+    "step_id": string;
+    "action_id": string;
+    "intent_event_id": string;
+    "observed_state_version": number /* integer */;
+    "action_token": /** Commitment to the exact opaque token presented for the applied transition; it must equal the durable intent commitment. */  string;
+    "action_kind": "complete" | "needs_decision";
+    "target": {
+      "kind": "control";
+      "control_id": string;
+    } | {
+      "kind": "task";
+      "task_key": string;
+      "attempt": number /* integer */;
+    } | {
+      "kind": "pull_request";
+      "number": number /* integer */;
+      "head_sha": string;
+    };
+    "product_result": string;
+    "dispatch_handle"?: string;
+    "event_ids"?: Array<string>;
+    "external_identity"?: string;
+    "cost_microusd"?: number /* integer */;
+    "elapsed_ms"?: number /* integer */;
+    "next_state": "needs_decision" | "completed";
+    "next_wake": string;
+    "recorded_at": string;
+    "seal": string;
+  };
+  [k: string]: unknown;
+}
+
 /** Event type `continuity_capsule` — stability: stable-v1 (source: crates/edda-core/src/continuity/mod.rs). */
 export interface ContinuityCapsulePayload {
   "data_authority": "data_only";
@@ -242,7 +411,258 @@ export interface DevicePairPayload {
 }
 
 /** Event type `device_revoke` — stability: unstable (source: crates/edda-cli/src/cmd_pair.rs). */
-export type DeviceRevokePayload = unknown | unknown;
+export type DeviceRevokePayload = ({
+  "device_name"?: string;
+  "revoke_all"?: boolean;
+  [k: string]: unknown;
+} & ({
+  "device_name": string;
+} | {
+  "revoke_all": boolean;
+}));
+
+/** Event type `execution_brief` — stability: unstable (source: crates/edda-core/src/guided_execution/event.rs). */
+export interface ExecutionBriefPayload {
+  "trust": "locally_accepted";
+  "execution_brief": {
+    "record_version": 1;
+    "trust": "locally_accepted";
+    "authority": {
+      "principal_id": string;
+      "session_id": string;
+      "authority_event_id": string;
+    };
+    "brief_event_id": string;
+    "content_digest": string;
+    "canonical_bytes_hex": string;
+    "brief": ({
+      "brief_version": 1;
+      "brief_id": string;
+      "brief_event_id": string;
+      "content_digest": string;
+      "task_ref"?: number /* integer */;
+      "runtime_profile": "strong" | "flash";
+      "intent": "investigate" | "fix" | "implement" | "refactor" | "test" | "document";
+      "objective": string;
+      "basis": {
+        "portable_repo_id"?: string;
+        "base_full_sha": string;
+        "issue_spec_refs"?: Array<string>;
+      };
+      "scope": {
+        "allowed_paths": [string, ...Array<string>];
+        "out_of_scope"?: Array<string>;
+      };
+      "read_order"?: Array<{
+        "reference": string;
+        "purpose": string;
+      }>;
+      "known_facts"?: Array<{
+        "statement": string;
+        "provenance_kind": "issue" | "task" | "capsule" | "repository_text" | "tool_output" | "controller_observation";
+        "provenance_ref": string;
+      }>;
+      "allowed_decisions"?: Array<{
+        "decision": string;
+        "boundary": string;
+      }>;
+      "return_for_decision"?: Array<string>;
+      "procedure": {
+        "kind": "controller_authored";
+        "authored_by": string;
+        "principles"?: Array<string>;
+        "probe_cards"?: Array<{
+          "probe_id": string;
+          "claim_to_test": string;
+          "why_it_matters": string;
+          "input_or_location": string;
+          "action": {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+          "possible_results": [{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }, ...Array<{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }>];
+          "evidence_required": Array<string>;
+          "on_unknown": string;
+        }>;
+        "implementation_steps"?: Array<{
+          "step_id": string;
+          "instruction": string;
+          "action"?: {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+        }>;
+        "validation"?: Array<{
+          "check_id": string;
+          "expectation": string;
+          "action": {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+          "evidence_required": string;
+        }>;
+      } | {
+        "kind": "product_recipe";
+        "recipe_id": string;
+        "recipe_version": number /* integer */;
+        "parameters"?: Array<{
+          "name": string;
+          "value": string;
+        }>;
+      };
+      "outcome_codes": [{
+        "code": string;
+        "result_class": "success" | "needs_decision" | "inconclusive" | "failure";
+      }, ...Array<{
+        "code": string;
+        "result_class": "success" | "needs_decision" | "inconclusive" | "failure";
+      }>];
+      "receipt_schema": {
+        "receipt_version": 1;
+        "required_fields": Array<"brief_identity" | "task_identity" | "outcome_code" | "observations" | "changed_paths" | "validation_ran" | "validation_read" | "unknowns" | "recommended_next_action">;
+      };
+    } & ({
+      "runtime_profile": "strong";
+    } | {
+      "runtime_profile": "flash";
+      "procedure": {
+        "kind": "product_recipe";
+        "recipe_id": string;
+        "recipe_version": number /* integer */;
+        "parameters"?: Array<{
+          "name": string;
+          "value": string;
+        }>;
+      };
+    } | {
+      "runtime_profile": "flash";
+      "procedure": {
+        "kind": "controller_authored";
+        "authored_by": string;
+        "principles"?: Array<string>;
+        "probe_cards": [{
+          "probe_id": string;
+          "claim_to_test": string;
+          "why_it_matters": string;
+          "input_or_location": string;
+          "action": {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+          "possible_results": [{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }, ...Array<{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }>];
+          "evidence_required": Array<string>;
+          "on_unknown": string;
+        }, ...Array<{
+          "probe_id": string;
+          "claim_to_test": string;
+          "why_it_matters": string;
+          "input_or_location": string;
+          "action": {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+          "possible_results": [{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }, ...Array<{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }>];
+          "evidence_required": Array<string>;
+          "on_unknown": string;
+        }>];
+        "implementation_steps"?: Array<{
+          "step_id": string;
+          "instruction": string;
+          "action"?: {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+        }>;
+        "validation"?: Array<{
+          "check_id": string;
+          "expectation": string;
+          "action": {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+          "evidence_required": string;
+        }>;
+      };
+    } | {
+      "runtime_profile": "flash";
+      "procedure": {
+        "kind": "controller_authored";
+        "authored_by": string;
+        "principles"?: Array<string>;
+        "probe_cards"?: Array<{
+          "probe_id": string;
+          "claim_to_test": string;
+          "why_it_matters": string;
+          "input_or_location": string;
+          "action": {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+          "possible_results": [{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }, ...Array<{
+            "observed_shape": string;
+            "interpretation": string;
+            "next_probe_or_return": string;
+          }>];
+          "evidence_required": Array<string>;
+          "on_unknown": string;
+        }>;
+        "implementation_steps": [{
+          "step_id": string;
+          "instruction": string;
+          "action"?: {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+        }, ...Array<{
+          "step_id": string;
+          "instruction": string;
+          "action"?: {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+        }>];
+        "validation"?: Array<{
+          "check_id": string;
+          "expectation": string;
+          "action": {
+            "tool": "process" | "read_file" | "search";
+            "argv": [string, ...Array<string>];
+          };
+          "evidence_required": string;
+        }>;
+      };
+    }));
+  };
+  [k: string]: unknown;
+}
 
 /** Event type `execution_event` — stability: unstable (source: crates/edda-core/src/event.rs). */
 export type ExecutionEventPayload = unknown;
@@ -327,7 +747,7 @@ export interface NotePayload {
     "tool_call_breakdown"?: {
       [k: string]: number /* integer */;
     };
-    "file_edit_counts"?: Array<Array<unknown>>;
+    "file_edit_counts"?: Array<[unknown, ...Array<unknown>]>;
     [k: string]: unknown;
   };
   "digest_watermark"?: {
@@ -525,6 +945,15 @@ export interface TaskDonePayload {
   "task_id": number /* integer */;
   "receipt": string;
   "evidence_paths": Array<string>;
+  "controlled_completion"?: {
+    "attempt": number /* integer */;
+    "lease_owner": string;
+    "session_id": string;
+    "agent_kind": string;
+    "brief_event_id": string;
+    "brief_digest": string;
+    "outcome_code": string;
+  };
   [k: string]: unknown;
 }
 
@@ -543,7 +972,50 @@ export interface TaskRequeuedPayload {
 }
 
 /** Event type `task.session` — stability: unstable (source: crates/edda-core/src/event.rs). */
-export type TaskSessionPayload = unknown | unknown;
+export type TaskSessionPayload = ({
+  "task_id": number /* integer */;
+  "acp_session_id"?: string;
+  "agent_kind"?: string;
+  "session_id"?: string;
+  "attempt"?: number /* integer */;
+  "brief_event_id"?: string;
+  "brief_digest"?: string;
+  "lease_owner"?: string;
+  [k: string]: unknown;
+} & ({
+  "acp_session_id": string;
+} | {
+  "agent_kind": string;
+  "session_id": string;
+  "attempt": number /* integer */;
+}) & ({
+  "brief_event_id"?: never;
+} | {
+  "brief_event_id": string;
+  "brief_digest": string;
+  "agent_kind": string;
+  "session_id": string;
+  "attempt": number /* integer */;
+  "lease_owner": string;
+}) & ({
+  "brief_digest"?: never;
+} | {
+  "brief_digest": string;
+  "brief_event_id": string;
+  "agent_kind": string;
+  "session_id": string;
+  "attempt": number /* integer */;
+  "lease_owner": string;
+}) & ({
+  "lease_owner"?: never;
+} | {
+  "lease_owner": string;
+  "brief_event_id": string;
+  "brief_digest": string;
+  "agent_kind": string;
+  "session_id": string;
+  "attempt": number /* integer */;
+}));
 
 /** Event type `task.started` — stability: unstable (source: crates/edda-core/src/event.rs). */
 export interface TaskStartedPayload {
@@ -582,4 +1054,4 @@ export interface VerdictRecordedPayload {
 export type Layer1Payload = BranchCreatePayload | BranchSwitchPayload | CheckpointPayload | CmdPayload | CommitPayload | ContinuityCapsulePayload | DecisionImportPayload | DecisionRatifyPayload | MergePayload | NotePayload | RebuildPayload;
 
 /** Layer 2 experimental payload union (registry stability "unstable") — may change in any release. */
-export type Layer2Payload = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | ReviewVerdictPayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload;
+export type Layer2Payload = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | ControlIntentPayload | ControlManifestPayload | ControlReceiptPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionBriefPayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | ReviewVerdictPayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload;

@@ -54,6 +54,24 @@
     "source": "crates/edda-core/src/event.rs"
   },
   {
+    "type": "control_intent",
+    "schema": "control_intent.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-ledger/src/control_projection.rs"
+  },
+  {
+    "type": "control_manifest",
+    "schema": "control_manifest.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-ledger/src/control_projection.rs"
+  },
+  {
+    "type": "control_receipt",
+    "schema": "control_receipt.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-ledger/src/control_projection.rs"
+  },
+  {
     "type": "continuity_capsule",
     "schema": "continuity_capsule.schema.json",
     "stability": "stable-v1",
@@ -94,6 +112,12 @@
     "schema": "device_revoke.schema.json",
     "stability": "unstable",
     "source": "crates/edda-cli/src/cmd_pair.rs"
+  },
+  {
+    "type": "execution_brief",
+    "schema": "execution_brief.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/guided_execution/event.rs"
   },
   {
     "type": "execution_event",

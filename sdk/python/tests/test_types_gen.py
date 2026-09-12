@@ -6,7 +6,7 @@
 # Required[object] / object | None instead of a literal union.
 
 import unittest
-from typing import Literal, NotRequired, Required, get_args, get_origin
+from typing import Literal, NoReturn, NotRequired, Required, get_args, get_origin
 
 from edda_sdk import types_gen as t
 
@@ -24,6 +24,26 @@ def _literal_args(tp):
     if get_origin(tp) is Literal:
         return get_args(tp)
     return None
+
+
+def _variants(tp):
+    """Return union members, or the one supplied type."""
+    members = get_args(tp)
+    return members if members else (tp,)
+
+
+def _matches_typed_dict(value, holder):
+    """Runtime presence/literal probe for generated discriminated variants."""
+    if not holder.__required_keys__.issubset(value):
+        return False
+    for key, annotation in holder.__annotations__.items():
+        _, inner = _unwrap(annotation)
+        if key in value and inner is NoReturn:
+            return False
+        literals = _literal_args(inner)
+        if key in value and literals is not None and value[key] not in literals:
+            return False
+    return True
 
 
 class GeneratedEnumTypesTests(unittest.TestCase):
@@ -109,6 +129,132 @@ class GeneratedEnumTypesTests(unittest.TestCase):
             self.assertEqual(
                 _literal_args(inner), expected, f"{holder.__name__}.{field}"
             )
+
+    def test_execution_brief_local_refs_and_literals_are_typed(self):
+        origin, inner = _unwrap(t.ExecutionBriefPayload.__annotations__["trust"])
+        self.assertIs(origin, Required)
+        self.assertEqual(_literal_args(inner), ("locally_accepted",))
+        profiles = set()
+        for brief in _variants(t.ExecutionBriefPayloadExecutionBriefBrief):
+            origin, inner = _unwrap(brief.__annotations__["runtime_profile"])
+            self.assertIs(origin, Required)
+            profiles.update(_literal_args(inner) or ())
+        self.assertEqual(profiles, {"strong", "flash"})
+
+    def test_task_session_dependent_requirements_are_discriminated(self):
+        variants = _variants(t.TaskSessionPayload)
+        self.assertEqual(len(variants), 3)
+        controlled = [
+            variant
+            for variant in variants
+            if "brief_event_id" in variant.__required_keys__
+        ]
+        self.assertEqual(len(controlled), 1)
+        self.assertTrue(
+            {
+                "task_id", "agent_kind", "session_id", "attempt",
+                "brief_event_id", "brief_digest", "lease_owner",
+            }.issubset(controlled[0].__required_keys__)
+        )
+        for variant in variants:
+            self.assertIn("task_id", variant.__required_keys__)
+            if variant is not controlled[0]:
+                for field in ("brief_event_id", "brief_digest", "lease_owner"):
+                    origin, inner = _unwrap(variant.__annotations__[field])
+                    self.assertIs(origin, NotRequired)
+                    self.assertIs(inner, NoReturn)
+
+        partial = {"task_id": 1, "brief_event_id": "evt_one"}
+        self.assertFalse(any(_matches_typed_dict(partial, item) for item in variants))
+        missing_session = {"task_id": 1}
+        self.assertFalse(any(_matches_typed_dict(missing_session, item) for item in variants))
+        complete = {
+            "task_id": 1,
+            "agent_kind": "acp:grok",
+            "session_id": "session-one",
+            "attempt": 1,
+            "brief_event_id": "evt_one",
+            "brief_digest": "a" * 64,
+            "lease_owner": "owner",
+        }
+        self.assertTrue(any(_matches_typed_dict(complete, item) for item in variants))
+
+    def test_flash_controller_requirement_is_a_discriminated_variant(self):
+        variants = _variants(t.ExecutionBriefPayloadExecutionBriefBrief)
+        flash_controllers = []
+        for variant in variants:
+            _, profile = _unwrap(variant.__annotations__["runtime_profile"])
+            if _literal_args(profile) != ("flash",):
+                continue
+            _, procedure = _unwrap(variant.__annotations__["procedure"])
+            if hasattr(procedure, "__required_keys__") and "authored_by" in procedure.__required_keys__:
+                flash_controllers.append(procedure)
+        self.assertEqual(len(flash_controllers), 2)
+        required_work = {
+            next(
+                field
+                for field in ("probe_cards", "implementation_steps")
+                if field in procedure.__required_keys__
+            )
+            for procedure in flash_controllers
+        }
+        self.assertEqual(required_work, {"probe_cards", "implementation_steps"})
+
+        empty = {
+            "runtime_profile": "flash",
+            "procedure": {"kind": "controller_authored", "authored_by": "controller"},
+        }
+        # Probe only the conditional keys: neither generated Flash/controller
+        # variant accepts the schema-invalid empty procedure.
+        self.assertFalse(
+            any(
+                _matches_typed_dict(empty["procedure"], procedure)
+                for procedure in flash_controllers
+            )
+        )
+
+    def test_attempt_bound_task_done_fields_are_typed(self):
+        for field, expected in [
+            ("attempt", int),
+            ("session_id", str),
+            ("brief_event_id", str),
+            ("brief_digest", str),
+            ("lease_owner", str),
+            ("outcome_code", str),
+        ]:
+            origin, inner = _unwrap(
+                t.TaskDonePayloadControlledCompletion.__annotations__[field]
+            )
+            self.assertIs(origin, Required)
+            self.assertIs(inner, expected)
+
+    def test_control_events_preserve_authority_provenance_and_commitments(self):
+        manifest = t.ControlManifestPayloadControlManifest
+        authority = t.ControlManifestPayloadControlManifestAuthority
+        adjudication = t.ControlManifestPayloadControlManifestAdjudication
+        intent = t.ControlIntentPayloadControlIntent
+        receipt = t.ControlReceiptPayloadControlReceipt
+
+        self.assertIn("authority", manifest.__required_keys__)
+        self.assertIn("adjudication", manifest.__optional_keys__)
+        for field in (
+            "reason_code", "evidence", "prior_state_version", "prior_manifest_digest"
+        ):
+            self.assertIn(field, adjudication.__required_keys__)
+        self.assertEqual(
+            _literal_args(_unwrap(authority.__annotations__["permitted_action"])[1]),
+            ("control_compile", "control_adjudicate"),
+        )
+        self.assertEqual(
+            _literal_args(_unwrap(intent.__annotations__["action_kind"])[1]),
+            ("complete", "needs_decision"),
+        )
+        self.assertEqual(
+            _literal_args(_unwrap(receipt.__annotations__["next_state"])[1]),
+            ("needs_decision", "completed"),
+        )
+        self.assertIn("action_token", intent.__required_keys__)
+        self.assertIn("action_token", receipt.__required_keys__)
 
     def test_no_enum_field_degrades_to_object(self):
         # Sweep every annotation that is or wraps a Literal: none may also

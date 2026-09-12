@@ -10,12 +10,58 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type {
   ContinuityCapsulePayload,
+  ControlIntentPayload,
+  ControlManifestPayload,
+  ControlReceiptPayload,
   DecisionImportPayload,
+  ExecutionBriefPayload,
   IngestionPayload,
   NotePayload,
   ReviewBundlePayload,
+  TaskDonePayload,
+  TaskSessionPayload,
   VerdictRecordedPayload,
 } from "../src/types.gen.js";
+
+test("generated control events preserve authority, provenance, and commitment types", () => {
+  type ManifestRecord = ControlManifestPayload["control_manifest"];
+  type Adjudication = NonNullable<ManifestRecord["adjudication"]>;
+  type IsOptional<T, K extends keyof T> = Record<string, never> extends Pick<T, K>
+    ? true
+    : false;
+
+  const authorityAction: ManifestRecord["authority"]["permitted_action"] = "control_adjudicate";
+  const intentAction: ControlIntentPayload["control_intent"]["action_kind"] = "needs_decision";
+  const receiptState: ControlReceiptPayload["control_receipt"]["next_state"] = "completed";
+  const evidence: Adjudication["evidence"] = ["receipt:evt_one"];
+  const priorStateRequired: IsOptional<Adjudication, "prior_state_version"> = false;
+  const priorDigestRequired: IsOptional<Adjudication, "prior_manifest_digest"> = false;
+  const intentCommitmentRequired: IsOptional<
+    ControlIntentPayload["control_intent"],
+    "action_token"
+  > = false;
+  const receiptCommitmentRequired: IsOptional<
+    ControlReceiptPayload["control_receipt"],
+    "action_token"
+  > = false;
+
+  assert.equal(authorityAction, "control_adjudicate");
+  assert.equal(intentAction, "needs_decision");
+  assert.equal(receiptState, "completed");
+  assert.deepEqual(evidence, ["receipt:evt_one"]);
+  assert.equal(priorStateRequired, false);
+  assert.equal(priorDigestRequired, false);
+  assert.equal(intentCommitmentRequired, false);
+  assert.equal(receiptCommitmentRequired, false);
+});
+
+// @ts-expect-error control actions remain the schema's literal union
+const badControlAction: ControlIntentPayload["control_intent"]["action_kind"] = "dispatch_task";
+// @ts-expect-error local S6a receipts cannot claim an external next state
+const badControlState: ControlReceiptPayload["control_receipt"]["next_state"] = "verifying";
+
+void badControlAction;
+void badControlState;
 
 test("generated enum fields accept their literal members", () => {
   // Bare enum, required: "auto" | "suggested" | "manual".
@@ -43,12 +89,94 @@ test("generated enum fields accept their literal members", () => {
   assert.equal(noScope, null);
   const noteScope: NonNullable<NotePayload["decision"]>["scope"] = "global";
   assert.equal(noteScope, "global");
+  // Local $ref + const/enum resolution in the execution-brief schema.
+  const runtimeProfile: ExecutionBriefPayload["execution_brief"]["brief"]["runtime_profile"] = "flash";
+  assert.equal(runtimeProfile, "flash");
   // JSON Schema const values stay exact literals at every nesting level.
   const authority: ContinuityCapsulePayload["data_authority"] = "data_only";
   const recordVersion: ContinuityCapsulePayload["continuity"]["record_version"] = 1;
   const capsuleVersion: ContinuityCapsulePayload["continuity"]["capsule"]["capsule_version"] = 1;
   assert.deepEqual([authority, recordVersion, capsuleVersion], ["data_only", 1, 1]);
 });
+
+// @ts-expect-error JSON Schema const rejects a different string
+const badAuthority: ContinuityCapsulePayload["data_authority"] = "instructions";
+// @ts-expect-error JSON Schema const rejects a different number
+const badRecordVersion: ContinuityCapsulePayload["continuity"]["record_version"] = 2;
+
+void badAuthority;
+void badRecordVersion;
+
+// Attempt-bound controlled task fields stay typed when a schema combines a
+// common object shape with anyOf/dependentRequired validation constraints.
+const briefEventId: TaskSessionPayload["brief_event_id"] = "evt_01";
+const sessionAttempt: TaskSessionPayload["attempt"] = 1;
+const doneAttempt: NonNullable<TaskDonePayload["controlled_completion"]>["attempt"] = 1;
+const hostSession: TaskSessionPayload = {
+  task_id: 1,
+  agent_kind: "acp:grok",
+  session_id: "session-one",
+  attempt: 1,
+};
+const controlledSession: TaskSessionPayload = {
+  ...hostSession,
+  brief_event_id: "evt_one",
+  brief_digest: "a".repeat(64),
+  lease_owner: "owner-one",
+};
+assert.equal(briefEventId, "evt_01");
+assert.equal(sessionAttempt, 1);
+assert.equal(doneAttempt, 1);
+assert.equal(controlledSession.lease_owner, "owner-one");
+
+// @ts-expect-error anyOf requires either ACP id or the host session triple
+const missingSessionShape: TaskSessionPayload = { task_id: 1 };
+// @ts-expect-error dependentRequired forbids a partial controlled binding
+const partialControlledSession: TaskSessionPayload = {
+  task_id: 1,
+  acp_session_id: "session-one",
+  brief_event_id: "evt_one",
+};
+// @ts-expect-error attempt is numeric, not an unknown generated fallback
+const badSessionAttempt: TaskSessionPayload["attempt"] = "first";
+
+type GeneratedBrief = ExecutionBriefPayload["execution_brief"]["brief"];
+const briefBase: Omit<GeneratedBrief, "runtime_profile" | "procedure"> = {
+  brief_version: 1 as const,
+  brief_id: "brief_one",
+  brief_event_id: "evt_one",
+  content_digest: "a".repeat(64),
+  intent: "fix" as const,
+  objective: "bounded fix",
+  basis: { base_full_sha: "b".repeat(40) },
+  scope: { allowed_paths: ["src/**"] },
+  outcome_codes: [{ code: "DONE", result_class: "success" }],
+  receipt_schema: { receipt_version: 1 as const, required_fields: [] },
+};
+// @ts-expect-error Flash/controller requires non-empty probe_cards or implementation_steps
+const emptyFlashProcedure: GeneratedBrief = {
+  ...briefBase,
+  runtime_profile: "flash",
+  procedure: { kind: "controller_authored", authored_by: "controller" },
+};
+const flashImplementation: GeneratedBrief = {
+  ...briefBase,
+  runtime_profile: "flash",
+  procedure: {
+    kind: "controller_authored",
+    authored_by: "controller",
+    implementation_steps: [{ step_id: "step_one", instruction: "change one file" }],
+  },
+};
+const strongPrinciples: GeneratedBrief = {
+  ...briefBase,
+  runtime_profile: "strong",
+  procedure: { kind: "controller_authored", authored_by: "controller" },
+};
+assert.equal(flashImplementation.runtime_profile, "flash");
+assert.equal(strongPrinciples.runtime_profile, "strong");
+// @ts-expect-error execution profile remains the schema's literal enum
+const badRuntimeProfile: ExecutionBriefPayload["execution_brief"]["brief"]["runtime_profile"] = "tiny";
 
 // Non-members are rejected — this is the assertion that fails the build if
 // the field degrades to `unknown` (the @ts-expect-error becomes unused) or
@@ -57,10 +185,6 @@ test("generated enum fields accept their literal members", () => {
 const badTriggerType: IngestionPayload["triggerType"] = "not-a-trigger";
 // @ts-expect-error non-member rejected through the anyOf union
 const badScope: DecisionImportPayload["decision"]["scope"] = "region";
-// @ts-expect-error JSON Schema const rejects a different string
-const badAuthority: ContinuityCapsulePayload["data_authority"] = "instructions";
-// @ts-expect-error JSON Schema const rejects a different number
-const badRecordVersion: ContinuityCapsulePayload["continuity"]["record_version"] = 2;
 
 // Requiredness is preserved: omitting the required enum field must fail to
 // compile even though the interface carries an index signature.

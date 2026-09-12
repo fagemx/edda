@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "control_receipt payload",
+  "description": "Locally sealed result of an S6a intent transition.",
+  "type": "object",
+  "properties": {
+    "control_receipt": {
+      "type": "object",
+      "properties": {
+        "receipt_version": { "const": 1 },
+        "control_id": { "type": "string", "pattern": "^control_[a-z0-9]+$" },
+        "step_id": { "type": "string", "pattern": "^step_[a-z0-9]+$" },
+        "action_id": { "type": "string", "pattern": "^action_[0-9a-f]{64}$" },
+        "intent_event_id": { "type": "string", "pattern": "^evt_[a-z0-9]+$" },
+        "observed_state_version": { "type": "integer", "minimum": 1 },
+        "action_token": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Commitment to the exact opaque token presented for the applied transition; it must equal the durable intent commitment." },
+        "action_kind": { "enum": ["complete", "needs_decision"] },
+        "target": { "$ref": "#/$defs/target" },
+        "product_result": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "dispatch_handle": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "event_ids": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^evt_[a-z0-9]+$" } },
+        "external_identity": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "cost_microusd": { "type": "integer", "minimum": 0 },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "next_state": { "enum": ["needs_decision", "completed"] },
+        "next_wake": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "recorded_at": { "type": "string", "minLength": 20, "maxLength": 64 },
+        "seal": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "required": ["receipt_version", "control_id", "step_id", "action_id", "intent_event_id", "observed_state_version", "action_token", "action_kind", "target", "product_result", "next_state", "next_wake", "recorded_at", "seal"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["control_receipt"],
+  "additionalProperties": true,
+  "$defs": {
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "control" }, "control_id": { "type": "string", "pattern": "^control_[a-z0-9]+$" } },
+          "required": ["kind", "control_id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "task" }, "task_key": { "type": "string" }, "attempt": { "type": "integer", "minimum": 1 } },
+          "required": ["kind", "task_key", "attempt"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "pull_request" }, "number": { "type": "integer", "minimum": 1 }, "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" } },
+          "required": ["kind", "number", "head_sha"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}
