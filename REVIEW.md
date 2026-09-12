@@ -33,7 +33,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.9`
+- Spec version: `review-spec-v1.10`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -357,19 +357,21 @@ git log --format=%B "origin/$BASE..$SHA" \
 ```
 # review-spec:check-end
 
-**U3 — the `Issue: #N` line exists. P1.** This is a convention miss, not a data
+**U3 — the `Issue: #N` line exists. P2.** This is a convention miss, not a data
 dependency: §1 collects issue numbers from **three**
 sources — `Issue:`/`Issues:` lines,
 closing keywords anywhere in the body, and GitHub's
 closingIssuesReferences — so a body carrying only `Closes #N` still supplies
 the brief with the issue's `doneWhen`, and an empty ceiling is never a
-consequence of the missing line. Missing `Issue: #N` is still P1 because the
-repo wants the issue named in this exact conventional form. Empty output is
-the failure.
+consequence of the missing line. An absent exact `Issue:`/`Issues:` line is a
+visible, nonblocking convention advisory; it does not set a P0/P1 or turn any
+other failed rule into a pass. Empty output is that advisory. A failure to read
+the body is still `ERROR`, not evidence that the line is absent.
 
 # review-spec:check U3
 ```sh
-gh pr view "$N" --json body --jq .body | awk 'tolower($0) ~ /^issues?[[:space:]]*:/'
+body=$(gh pr view "$N" --json body --jq .body) || exit $?
+printf '%s\n' "$body" | awk 'tolower($0) ~ /^issues?[[:space:]]*:/'
 ```
 # review-spec:check-end
 
@@ -843,7 +845,7 @@ One comment per round, pinned to the reviewed full SHA
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
 - reviewer_session: <per-PR UUID the lane was launched with>
-- spec: review-spec-v1.9
+- spec: review-spec-v1.10
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - shadow: true|false  (documentation for a SHADOW round: true requires the heading suffix ` (SHADOW)` — `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; the suffix is the only marker, this field never substitutes for it; a SHADOW round is never a verdict — §8)
@@ -979,7 +981,7 @@ mechanical.
 |---|---|---|
 | U1 | RAN | on PR #659 and #664 |
 | U2 | RAN | 1 hit on PR #659 (`Closes #558`), 0 on PR #664 |
-| U3 | RAN | empty on PR #659 — a real miss of this repo's own convention |
+| U3 | RAN | empty on PR #659 — a real miss of this repo's own convention; under v1.10 that exact miss is a visible P2 advisory |
 | U4 | RAN | clean over the last 12 commits of `main` |
 | U5 | RAN | exit 0 on this worktree |
 | U6 | RAN | `gh pr checks 664` — `CI Gate pass`, clippy/test `skipping` |
@@ -1088,6 +1090,11 @@ mechanical.
   adapter. Only a controller with standing repository R6 authority merges,
   immediately once the existing conditions hold and without a second prompt;
   workers, fixers, and reviewers never merge.
+- `review-spec-v1.10` (2026-09-11, delivery-first A3): U3's missing exact
+  `Issue:`/`Issues:` line changes from P1 to a visible P2 convention advisory.
+  A successful body read with no matching line is nonblocking; a failed body
+  read remains `ERROR`, and every other rule keeps its existing severity and
+  aggregate effect.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
