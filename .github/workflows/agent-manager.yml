@@ -1,0 +1,28 @@
+name: Agent manager
+on:
+  pull_request:
+    paths: ['integrations/agent-manager/**', 'integrations/pi/**', '.github/workflows/agent-manager.yml']
+  push:
+    branches: [main]
+    paths: ['integrations/agent-manager/**', 'integrations/pi/**', '.github/workflows/agent-manager.yml']
+  workflow_dispatch:
+jobs:
+  manager:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: integrations/agent-manager/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: integrations/agent-manager
+      - run: npm run typecheck
+        working-directory: integrations/agent-manager
+      - run: npm test
+        working-directory: integrations/agent-manager
