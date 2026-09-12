@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { openStore, digest, validateSession, validateId } from './store.mjs';
 import { createHandoff } from './handoff.mjs';
+import { createDependencyObserver } from './dependency-observer.mjs';
+import { readEnrollment } from './supervision.mjs';
 
 const terminal = new Set(['settled', 'failed', 'unknown']);
 const now = () => new Date().toISOString();
@@ -28,13 +30,15 @@ async function jsonBody(req) {
   return body;
 }
 
-export async function startChannel({ root, sessionId, cwd, label = '', deliver, getConversation, heartbeatMs = 5000 }) {
+export async function startChannel({ root, sessionId, cwd, label = '', deliver, getConversation, heartbeatMs = 5000,
+  dependencyCommand, dependencyPollMs = 60000 }) {
   validateSession(sessionId);
   const instanceId = randomUUID();
   const token = randomBytes(32).toString('hex');
   const owner = { version: 1, sessionId, instanceId, pid: process.pid, token, port: null };
   const store = openStore(root, sessionId, owner);
   let handoff;
+  let dependencies;
   try { handoff = createHandoff(store.dir, sessionId, instanceId); }
   catch (error) { store.release(); throw error; }
   let closed = false;
@@ -78,7 +82,8 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
-      capabilities: ['send', 'receipts', 'handoff', ...(getConversation ? ['conversation'] : [])] }),
+      capabilities: ['send', 'receipts', 'handoff', 'dependencies', ...(getConversation ? ['conversation'] : [])] }),
+    get dependencies() { return dependencies; },
     handoffContext: (budget) => handoff.context(channel.snapshot(), budget),
     reportHandoff(id, value) {
       if (closed || storageError) throw fail('Channel unavailable', 503);
@@ -118,6 +123,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       closed = true;
       clearInterval(heartbeat);
       try {
+        await dependencies?.close();
         for (const r of receipts.values()) {
           if (r.instanceId === instanceId && !terminal.has(r.status)) update(r, 'unknown');
         }
@@ -131,6 +137,32 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     },
   };
 
+  function submitMessage(body, requireIdle = false) {
+    const message = validateMessage(body);
+    const fingerprint = digest(JSON.stringify(message));
+    const prior = receipts.get(message.id);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw fail('Message ID conflict', 409);
+      return publicReceipt(prior);
+    }
+    if (closed || storageError) throw fail('Channel unavailable', 503);
+    if (waiting) throw fail('Pi is waiting for a user answer; message delivery refused', 409);
+    if (requireIdle && channel.snapshot().state !== 'idle') throw fail('Receiver is no longer idle', 409);
+    if (receipts.size >= 1000) throw fail('Receipt capacity reached; archive this session before sending more', 409);
+    const envelope = `[Edda message ${message.id} from ${message.sender}]\n${message.message}`;
+    const receipt = { id: message.id, sessionId, instanceId, sender: message.sender, mode: message.mode,
+      status: 'accepted', fingerprint, envelopeHash: digest(envelope), createdAt: now(), updatedAt: now() };
+    store.putReceipt(receipt);
+    receipts.set(receipt.id, receipt);
+    try {
+      deliver(envelope, { deliverAs: message.mode, expandPromptTemplates: false });
+      const current = receipts.get(receipt.id);
+      if (current.status === 'accepted') update(current, 'unconfirmed');
+    } catch { update(receipts.get(receipt.id), 'unknown'); }
+    save();
+    return publicReceipt(receipts.get(receipt.id));
+  }
+
   const server = createServer(async (req, res) => {
     const reply = (status, value) => {
       res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
@@ -142,6 +174,16 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       if (req.headers.origin || Buffer.byteLength(auth) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw fail('Unauthorized', 401);
       if (req.headers['x-edda-instance'] !== instanceId) throw fail('Wrong session instance', 409);
       if (req.method === 'GET' && req.url === '/status') return reply(200, channel.snapshot());
+      if (req.method === 'GET' && req.url === '/dependencies') return reply(200, dependencies.status());
+      if (req.method === 'POST' && req.url?.startsWith('/dependencies')) {
+        if (closed || storageError) throw fail('Channel unavailable', 503);
+        if (req.headers['content-type'] !== 'application/json') throw fail('Expected application/json', 415);
+        const body = await jsonBody(req);
+        if (req.url === '/dependencies') return reply(200, await dependencies.configure(body));
+        if (req.url === '/dependencies/pause') return reply(200, await dependencies.pause());
+        if (req.url === '/dependencies/check') { void dependencies.check(); return reply(200, dependencies.status()); }
+        throw fail('Unknown dependency operation', 404);
+      }
       if (req.method === 'GET' && req.url?.startsWith('/handoff?')) {
         const params = new URL(req.url, 'http://127.0.0.1').searchParams;
         return reply(200, channel.handoffContext(params.get('budget') || 16384));
@@ -165,33 +207,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       }
       if (req.method !== 'POST' || req.url !== '/messages') throw fail('Unknown channel operation', 404);
       if (req.headers['content-type'] !== 'application/json') throw fail('Expected application/json', 415);
-      const message = validateMessage(await jsonBody(req));
-      const fingerprint = digest(JSON.stringify(message));
-      const prior = receipts.get(message.id);
-      if (prior) {
-        if (prior.fingerprint !== fingerprint) throw fail('Message ID conflict', 409);
-        return reply(200, publicReceipt(prior));
-      }
-      if (closed || storageError) throw fail('Channel unavailable', 503);
-      if (waiting) throw fail('Pi is waiting for a user answer; message delivery refused', 409);
-      if (receipts.size >= 1000) throw fail('Receipt capacity reached; archive this session before sending more', 409);
-      const envelope = `[Edda message ${message.id} from ${message.sender}]\n${message.message}`;
-      const receipt = { id: message.id, sessionId, instanceId, sender: message.sender, mode: message.mode,
-        status: 'accepted', fingerprint, envelopeHash: digest(envelope), createdAt: now(), updatedAt: now() };
-      // Durable before calling Pi. Ambiguous failures must not cause a second call.
-      store.putReceipt(receipt);
-      receipts.set(receipt.id, receipt);
-      try {
-        // Pi's void wrapper hides asynchronous rejection. Only message_start
-        // confirms ingestion; a return cannot prove that anything is queued.
-        deliver(envelope, { deliverAs: message.mode, expandPromptTemplates: false });
-        const current = receipts.get(receipt.id);
-        if (current.status === 'accepted') update(current, 'unconfirmed');
-      } catch {
-        update(receipts.get(receipt.id), 'unknown');
-      }
-      save();
-      return reply(200, publicReceipt(receipts.get(receipt.id)));
+      return reply(200, submitMessage(await jsonBody(req)));
     } catch (error) {
       reply(error.status || 400, { error: error.status ? error.message : 'Invalid request or channel storage unavailable' });
     }
@@ -201,6 +217,10 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   server.timeout = 5000;
   let heartbeat;
   try {
+    dependencies = createDependencyObserver({ dir: store.dir, sessionId, instanceId,
+      policy: () => readEnrollment(root, sessionId), runtime: () => channel.snapshot(),
+      manifestRevision: () => handoff.currentRevision(), send: (body) => submitMessage(body, true),
+      receipt: (id) => receipts.get(id), command: dependencyCommand, pollMs: dependencyPollMs });
     await new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);

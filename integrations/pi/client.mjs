@@ -16,7 +16,8 @@ export async function requestSession(root, sessionId, path, body, timeoutMs = 25
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error(body ? `Delivery outcome unknown; query receipt ${body.id} before retrying with the SAME ID` : 'Session endpoint unreachable');
+    throw new Error(body?.id ? `Delivery outcome unknown; query receipt ${body.id} before retrying with the SAME ID` :
+      body ? 'Request outcome unknown; query session state before repeating the operation' : 'Session endpoint unreachable');
   }
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `Channel HTTP ${response.status}`);

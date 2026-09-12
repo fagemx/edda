@@ -26,6 +26,7 @@ export function createHandoff(dir, sessionId, instanceId) {
   const current = () => data?.instanceId === instanceId;
   const commit = (next) => { writeJson(path, next); data = next; };
   return {
+    currentRevision: () => current() ? data.manifestRevision : null,
     prepare(value, expectedRevision, runtime) {
       if (runtime.state !== 'idle') throw problem('Handoff preparation requires an idle instance', 409);
       const manifest = normalizeManifest(value);

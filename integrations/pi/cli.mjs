@@ -5,6 +5,7 @@ import { defaultRoot, recover, validateId } from './store.mjs';
 import { listSessions, requestSession, getReceipt, inspectSession, prepareHandoff } from './client.mjs';
 import { enroll, watch, checkpoint, reply, managementBrief } from './supervision.mjs';
 import { composeHandoff } from './compose.mjs';
+import { followDependencies, dependencyStatus, unfollowDependencies, doctor } from './dependency-client.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs list
@@ -23,10 +24,16 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs reply SESSION_ID --to CURSOR --message TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor CURSOR --action observed|working|waiting_user|complete|paused --note TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --action paused --note TEXT
+  node integrations/pi/cli.mjs doctor [SESSION_ID]
+  node integrations/pi/cli.mjs follow SESSION_ID --project PATH --tasks ID,ID [--scope TEXT] [--notify] [--max-notifications 10]
+  node integrations/pi/cli.mjs dependencies SESSION_ID
+  node integrations/pi/cli.mjs check-dependencies SESSION_ID
+  node integrations/pi/cli.mjs unfollow SESSION_ID
 
 JSON stdout; diagnostics stderr. EDDA_PI_CHANNEL_DIR overrides the private root.
 Supervision commands are tools for an authorized controller, not a decision engine.
-No automatic resume, retries or remote network listener. Keep the message ID.
+No automatic process restart or message retry. Opt-in dependency alerts may start a model turn.
+The listener is local only. Keep the message ID.
 `;
 
 async function main(args) {
@@ -37,7 +44,7 @@ async function main(args) {
   const options = {};
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
-    if (arg === '--conversation' && options[arg] === undefined) { options[arg] = true; continue; }
+    if (['--conversation', '--notify'].includes(arg) && options[arg] === undefined) { options[arg] = true; continue; }
     if (!arg.startsWith('--')) { positional.push(arg); continue; }
     if (options[arg] !== undefined || rest[i + 1] === undefined || rest[i + 1].startsWith('--')) throw new Error(`Missing or duplicate option ${arg}`);
     options[arg] = rest[++i];
@@ -48,12 +55,21 @@ async function main(args) {
     conversation: ['--after', '--limit'], enroll: ['--scope'], watch: ['--conversation'],
     prepare: ['--manifest', '--expected'], brief: ['--budget-bytes'],
     compose: ['--project', '--task', '--context', '--output', '--edda-bin'],
+    doctor: [], follow: ['--project', '--tasks', '--scope', '--notify', '--max-notifications'],
+    dependencies: [], 'check-dependencies': [], unfollow: [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
-  if (positional.length !== (['list', 'watch', 'compose'].includes(command) ? 0 : 1)) throw new Error('Use the exact session ID; see --help');
+  const counts = command === 'doctor' ? [0, 1] : [['list', 'watch', 'compose'].includes(command) ? 0 : 1];
+  if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
+  if (command === 'doctor') result = await doctor(root, sessionId);
+  if (command === 'follow') result = await followDependencies(root, sessionId, { project: options['--project'],
+    taskIds: options['--tasks']?.split(',').map((s) => s.trim()), scope: options['--scope'],
+    notify: options['--notify'] === true, maxNotifications: Number(options['--max-notifications'] || 10) });
+  if (command === 'dependencies' || command === 'check-dependencies') result = await dependencyStatus(root, sessionId, command === 'check-dependencies');
+  if (command === 'unfollow') result = await unfollowDependencies(root, sessionId);
   if (command === 'compose') result = await composeHandoff({ project: options['--project'], id: options['--task'],
     contextFile: options['--context'], output: options['--output'], root,
     eddaCommand: options['--edda-bin'] ? { file: options['--edda-bin'], args: [] } : undefined });
@@ -84,7 +100,7 @@ async function main(args) {
       sender: options['--sender'] || 'codex', mode: options['--mode'] || 'followUp' });
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-  if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable'].includes(result?.status)) process.exitCode = 2;
+  if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable', 'needs_reload', 'needs_enrollment', 'not_registered'].includes(result?.status)) process.exitCode = 2;
 }
 
 main(process.argv.slice(2)).catch((error) => {
