@@ -256,16 +256,16 @@ mod tests {
     }
 
     #[test]
-    fn init_without_claude_dir_no_error() {
+    fn init_without_detected_host_projects_no_skills() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
 
         execute(&tmp, false, false).unwrap();
 
-        // Workspace created
         assert!(tmp.join(".edda").is_dir());
-        // No Claude artifacts
         assert!(!tmp.join(".claude").join("settings.local.json").exists());
+        assert!(!tmp.join(".claude").join("skills").exists());
+        assert!(!tmp.join(".agents").join("skills").exists());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -374,41 +374,69 @@ mod tests {
     }
 
     #[test]
-    fn init_skips_existing_skills() {
+    fn init_preserves_every_embedded_customization_for_both_hosts() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
-        let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "custom content").unwrap();
+        std::fs::write(tmp.join("AGENTS.md"), "# Project instructions\n").unwrap();
+
+        for host in [".claude", ".agents"] {
+            for &(name, _) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+                std::fs::write(&skill, format!("custom {host} {name}")).unwrap();
+            }
+        }
 
         execute(&tmp, true, false).unwrap();
 
-        // Should NOT be overwritten
-        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-        assert_eq!(
-            content, "custom content",
-            "should not overwrite existing skill"
-        );
+        for host in [".claude", ".agents"] {
+            for &(name, _) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                assert_eq!(
+                    std::fs::read_to_string(skill).unwrap(),
+                    format!("custom {host} {name}"),
+                    "default init must preserve {host} {name}"
+                );
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn init_force_skills_overwrites() {
+    fn tracked_orchestration_projection_matches_embedded_source() {
+        let embedded = include_str!("skills/coord-orchestrate.md");
+        let tracked = include_str!("../../../.claude/skills/coord-orchestrate/SKILL.md");
+        assert_eq!(tracked, embedded);
+        assert!(embedded.contains("delivery-flow/1"));
+    }
+
+    #[test]
+    fn init_force_skills_overwrites_every_embedded_skill_for_both_hosts() {
         let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
-        let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "custom content").unwrap();
+        std::fs::write(tmp.join("AGENTS.md"), "# Project instructions\n").unwrap();
+
+        for host in [".claude", ".agents"] {
+            for &(name, _) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+                std::fs::write(skill, format!("custom {host} {name}")).unwrap();
+            }
+        }
 
         execute(&tmp, true, true).unwrap();
 
-        // Should be overwritten with embedded version
-        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-        assert!(
-            content.contains("name: coord-sync"),
-            "should overwrite with embedded version"
-        );
+        for host in [".claude", ".agents"] {
+            for &(name, expected) in SKILLS {
+                let skill = tmp.join(host).join("skills").join(name).join("SKILL.md");
+                assert_eq!(
+                    std::fs::read_to_string(skill).unwrap(),
+                    expected,
+                    "force must overwrite every embedded entry: {host} {name}"
+                );
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

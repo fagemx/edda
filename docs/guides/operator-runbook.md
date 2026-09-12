@@ -13,6 +13,73 @@
 > 依決策 `coord.session-identity`，需要身分的動詞要帶 `--session <id>` 或在環境設 `EDDA_SESSION_ID`；`edda status` 與 `edda peers` 不需要身分，照常可用（2026-09-02 實跑確認）。
 > 控制層的 `watch` / `report` / `promote` / `intake` 是**概念動詞**（定義在 `docs/superpowers/specs/2026-09-02-control-layer-and-l2-shapes-design.md` §2.1）；§五列的是**現有指令**，其中 `edda watch`（TUI）與 `edda intake github` 與概念動詞同名但範圍不同，勿混用。
 
+## Delivery entry 與 transport index（`delivery-flow/1`）
+
+Generic 流程唯一 authored source 是
+`crates/edda-cli/src/skills/coord-orchestrate.md`；本 repo tracked
+`.claude/skills/coord-orchestrate/SKILL.md` 是 byte-identical projection。
+`edda init` 只把 embedded bytes 寫給偵測到的新 host，既有 custom skill 預設保留；
+不要為更新單一 copy 對未知 checkout 使用 `--force-skills`，因為它會覆寫**每一份**
+embedded project skill（包含未來或非 coordination 新增項）。`.agents/` 是
+local/generated state，不 force-track。
+
+| 進來的情況 | 路由 |
+|---|---|
+| 已 assigned／resume | `edda task show <id>`，讀 reachable brief、舊 result 與 source，做原角色；不重開 planning／formation |
+| controller resume 已有 plan | 先讀 rail owner、active map、task JSON、dispatch/session 與 PR/source evidence，再選 next action |
+| `issue-pipeline --skip-plan` | 重用已有 acceptance，不是略過 acceptance；`--no-merge` 只停止，不給 merge authority |
+| `issue-action` | 保留 issue acceptance／owner／fix context，再進 generic flow；active `edda pipeline` 也只是進入 `delivery-flow/1` 的單 phase compatibility route，不要求只能交 PR |
+| `edda pipeline` | Standard／QuickFix 都只有一個 terminal implementation／delivery phase，透過 `issue-action` 並明確遵循 `delivery-flow/1`；Standard 重用 accepted plan，沒有 accepted plan 時在同 phase bounded acceptance clarification；QuickFix 略過獨立 planning phase，但不略過 clear acceptance；依本 repo focused L0 驗證，可按 assigned brief 如實交 local candidate、commit 或 authorized PR。Conductor completion 不是 independent review、task completion 或 merge；pipeline／worker／reviewer 都無 merge authority |
+| `pr-review-loop` | 只有 author self-check/fix；不是 independent verdict 或 merge loop |
+| 小型或一條 cohesive writer chain | 原 session 普通實作，不為儀式建 rail／fleet |
+| 兩個以上真正可並行 writers | 一個 controller 才啟用 `coord-orchestrate` formation；只有實際 artifact dependency 等待 |
+
+同一 repository task rail 先選**一個** owner。Manual 模式使用 exact key
+`delivery.rail-owner=manual:<controller-session>`，建立／啟動前掃所有 plan/task/peer，
+並證明 scheduler、one-off reconcile process 與舊 reconcile attempt 都不在執行；不明就
+拒絕。對 **legacy/uncontrolled task**，Reconcile 模式由現有 runner 全權負責 Codex
+start/retry/settlement，不混入 manual start、Pi／ACP／host 或 no-retry task。受 accepted
+`ExecutionBriefV1` 綁定的 **controlled task** 不走這條 legacy lifecycle：目前 accepted product
+只能驗證／綁定後回傳 `execution: "none"` 的 descriptor，不會 launch；在 authorized S6
+capability 出現前，direct controlled execution unavailable。Literal `CONTROL_UNAVAILABLE` 僅是
+future planned S6 contract，不是 current evidence。Descriptor、caller-authored event 或 ordinary
+task command 都不是 launch authority。因為目前 reconcile 不按 `plan_id` filter，絕不能用
+`delivery.rail-owner.<plan>` 讓不同 plan 各選一種模式。Decision 只是 caller coordination
+evidence，不是 runtime lock、身份授權或 exactly-once 保證；切模式要操作者授權並先處理
+scheduler/process/lease/side effects。
+
+Manual controller 用 `delivery.active.<plan>` 的 exact decision 加 exact `plan_id` recovery，
+每個 `task new --key` 都要 capture ID 後 `task show --json` 比對；same key 只 dedupe create，
+不更新 brief／owner／scope／deps。Failed 且 assignment 不變時 `task start` 同一 ID 是 retry；
+owner／brief／dependency 改變則開下一 revision，重接 pending successor 後才 supersede map，
+舊 task 留歷史、不 fake done。Controller launch 前 start 一次；worker 只讀 Running 後正常
+done/fail。這個 ordinary `task done --receipt ... --evidence ...` 與 Done 後 metadata correction
+只適用 legacy/uncontrolled task。Controlled completion 必須由 authorized product path 驗證
+`WorkReceiptV1`，精確綁定 brief/session/attempt/lease/outcome 並帶所需 S6 authority seal；不接受
+ordinary `--evidence` 或 legacy post-Done correction，且 capability 尚不可用時 fail closed。
+Dispatch 的 `outcome=done` 不等於 task done、review 或 merge。
+
+| Backend | 本 repo 的 caller contract |
+|---|---|
+| Pi | task-linked `--prompt-file` + `--cwd`；續跑重用 `--session-id`，若選過則保留 `--session-dir`；不用 `--task-id`／`--resume` |
+| Claude | task-linked prompt；既有 conversation 用同一 `--session-id --resume`；不用 `--task-id` |
+| Codex | task-linked prompt；同一 `--session-id` 並核對 observed thread；不用 `--task-id`／`--resume` 或不支援的 model/tool flags |
+| ACP | 另建 task 且 `--agent acp:<target>`、reachable relative brief、existing concrete roots；start 後只用 matching `--task-id`，不塞 prompt/session/legacy flags/`--detach` |
+| Host subagent | host task text 明載同一 brief；沒觀測到 native continuity 就明示 replacement，不假稱 Edda dispatch session |
+
+ACP preflight 驗 task/kind/Running/concrete roots，但不證明 brief 可讀；bounded injection 可能
+`unavailable`／`truncated`，worker 仍須用實際能力讀 full card。Caller-authored event 也不能
+繞過目前 controlled execution 所需的 product-verifiable authority seal。需要網路的 Codex
+角色走 `edda dispatch --agent codex` 以保留 user global Codex config；不要改用會強制
+read-only sandbox、使 outbound 失敗的 Claude Code codex plugin。
+
+Author 只做一次 combined self-check activity，同一 receipt 記 behavior lens 與最可能失敗的
+counterexample lens；它不取代 independent current-head review。本 repo author 跑 focused L0，
+L1 是 exact-head CI，加 verifier 對 Windows CI 未覆蓋 surface 的 focused C5；不要因 SHA freeze
+本機重跑 workspace 全套，也不要給 docs-only 工作虛構 build lane。合併只走
+`edda review merge --pr <N>` 的既有 R6 path；`--no-merge`、task done、worker／fixer／reviewer
+都不會取得 authority，絕不改成 raw `gh pr merge`。
+
 ## START HERE：控制者開場
 
 1. **先確認這個 checkout 在 `main` 上**。控制者 session 若開在過時或 feature-branch 的
@@ -184,8 +251,28 @@
 
    1. **派**：`edda review --pr <N> --agent claude --model claude-opus-5`。它自己組 brief
       （`REVIEW.md` 讀 base SHA 那份）、以唯讀能力起審查者、把 `review_verdict` 事件寫進帳本。
+      若 controller 明確選了精簡 facts 檔，先從選定 binary 的 `edda review --help` 確認
+      `--context-file`，再加 `--context-file <facts>`；這是最多 32 KiB 的 UTF-8 untrusted
+      supporting DATA，不是 acceptance、evidence、判決或 tool authority，也不可塞進
+      `--trust-spec`。舊 binary 無此 capability 時省略 flag 並揭露 product context 缺失，
+      或走既有 direct-review route；不自動安裝、升級或加 fallback wrapper。這不是
+      redaction boundary：Edda system provenance 只加 path/digest，但 reviewer 若引用或重排
+      內容，既有 verdict fields 與 raw-response blob 可以保存該 output。
       要自己控制運輸時就 `edda dispatch --agent claude --exclude-tools Edit,Write,NotebookEdit`
       餵同一份 brief——工具集是唯讀的那一半，brief 正文是另一半。
+
+      新 head 的 follow-up 優先同 reviewer agent 與真實 native conversation，更新 facts
+      後加 product `--resume`：Pi 必須有 persisted conversation，Claude 用 native resume；
+      每個 Codex product round 都要求 mapping store 可讀，且 final mapping／tombstone 寫入
+      成功後才記錄 verdict；first round 可從 missing map 開始。corrupt／unreadable store 或
+      lock／write／replace 失敗都拒絕該輪。`--resume` 另要求既有 mapping；缺 mapping 或
+      thread 被拒絕時 fail closed，不在舊 UUID 下 fresh start，tombstone 失敗也一併回報。
+      舊 SHA 的 LGTM 不沿用。Product 不能 resume
+      host-only session。找不到原 conversation 時，改用 distinct reviewer UUID、不加 `--resume`，
+      context 帶 prior findings 並明說 replacement；無 context replacement 也要揭露限制。
+      Product 自己的 `WorktreeGuard` 保留，caller 不另建第二個 review worktree。Fix round
+      查 delta、prior findings、affected direct consumers、current base 與新增安全／資料損失
+      風險，適用舊證據只標 READ。
    2. **貼**：審查者自己用 `gh pr comment` 貼 §7 判決，釘 full SHA。沒有中間人代貼。
    3. **落**：`edda review deliver --pr <N>` 依 union 規則（`edda review gate`）冪等結算
       `review:*` label 與 advisory `Independent Review` commit status；判決格式壞掉時它貼一次告示而不是猜。
@@ -296,7 +383,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 通知 | 背景任務完成會叫醒控制者；`edda notify` 存在 | 事件驅動（#545） |
 | 成本 | `--budget-usd`；plan 級 measured-ness（#533 已合） | 讀端報表（#582）；digest 成本 0.0 哨兵（#585）；conductor 散文成本（#584） |
 
-**存在但本頁未驗證是否符合現行流程的動詞**：`edda pipeline`（skill chain with approval gates）、`edda intake`（外部任務進帳）、`edda prs`（掃 GitHub PR 事件）、`edda bundle`（審查 bundle）、`edda scan`（能力掃描）、`edda brief`（任務 brief 檢視）。用之前先 `--help` 並確認有讀者。
+**存在但本頁未驗證是否符合現行流程的動詞**：`edda intake`（外部任務進帳）、`edda prs`（掃 GitHub PR 事件）、`edda bundle`（審查 bundle）、`edda scan`（能力掃描）、`edda brief`（任務 brief 檢視）。用之前先 `--help` 並確認有讀者。
 
 ---
 
@@ -308,10 +395,10 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用最低成本探測，通了才重試一次（同一 claude 訂閱運輸）；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex）。**2026-09-03 操作者裁決（`opus-default-sol-via-pi-fallback-no-codex`）：不是矛盾，是過時——Opus 是預設引擎，`fleet.review-engine-pool` 的錨仍是 sol（走 pi）；codex 自 `fleet.reviewer-agent` 起就不是審查運輸。watcher 自己不換模型，降到錨引擎是操作者動作** | `fleet.review-provider-overload` |
 | **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `HOME` 為空，lane wrapper 必須顯式設；`CARGO_TARGET_DIR` 只在 `-BuildLane` 指名四個允許 build lane 之一時設（不編譯的 session 沒有 build lane——`.claude/CLAUDE.md`、`verification.cost-discipline`；要編譯的必須給四擇一，launcher 拒絕其他名字）。`lane-launch.ps1` 不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`，設 `CARGO_TARGET_DIR`＝lane root（`$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）\`<BuildLane>`；docs lane 不傳，wrapper 不設。`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle。**手續已脚本化**：用 `scripts/fleet/lane-launch.ps1` 註冊起 lane、`scripts/fleet/lane-status.ps1` 盯狀態（用法見 START HERE），不要再手寫 wrapper | `fleet.lane-launch`、`fleet.lane-dispatch` |
 | **停 lane 一律走 `scripts/fleet/lane-stop.ps1 -Name <lane>`**：`Stop-ScheduledTask` 與 `Unregister-ScheduledTask` 都只終止任務的 wrapper，**不殺它 spawn 的 process tree**（GH-672：被「停」的 lane 照樣 commit／push／開 PR，任務卻顯示 `State = Ready`）。`lane-stop.ps1` 停任務、殺整棵樹（wrapper 已死時依 `CommandLine` 比對 wrapper／brief 路徑抓孤兒）、驗證無殘留、回報實際終止了什麼，並補寫結束記錄（done-file + lane log 的 `=== EXIT ===` 行）——wrapper 本身也在 `finally` 寫同樣的結束記錄，所以正常結束、出錯、被停三種 endings 都有 EXIT。**殺完要驗共用 `.git/config`**：硬殺撞上 git 寫 config 會把它變成整片 NUL，主 checkout 加全部 worktree 同時失去 git；2026-09-02／03 各發生一次，而當時的 `.bak` 是**損毀後**才複製的，所以也是整片 NUL——備份不驗證等於沒有備份（GH-715）。殺完 `lane-stop.ps1` 驗證 config 仍可解析，壞了就從 `lane-launch.ps1` 開跑前存的**已驗證**備份還原（`scripts/fleet/git-config-guard.ps1`），還不回來就 exit 1；結束記錄一定先寫。沒有優雅關閉窗口：不帶 `/F` 的 `taskkill` 對沒有視窗的隱藏 console 程序無效（實測 exit 128、目標存活），加一段等待只會讓每次停 lane 多付秒數而擋不住任何損毀 | `fleet.lane-stop-4090` |
-| 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
+| Issue/program、work bundle/task、PR/release slice 分開；同一不穩 code chain 一個 owner，只有實際 artifact dependency 寫 `--after`；compile lane 依 session 實際需要配置，不按 issue 數機械切分 | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | 跨機器認領、釋放與已交付歷史：讀帳本 `fleet.cross-machine-claim`；起手守門的實作入口與拒絕條件見 `docs/fleet/rules.md` R21，本表不重述 | `fleet.cross-machine-claim`、#784（R21） |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |
-| 操作者在場的小批量併行走 `/issue-pipeline`（in-session 子代理：開工先貼 `taking: <machine>/pipeline`、審查是 house review——審查者不修自己審的 PR、子代理隨 session 死，長時間無人值守改派 Task Scheduler lane）；一次最多兩張要編譯的單 | `fleet.parallel-modes=in-session-pipeline-when-operator-present-lanes-when-unattended` |
+| `/issue-pipeline` 是 legacy 薄入口：保留 issue／claim／`--skip-plan`／`--no-merge` 意義後轉 `delivery-flow/1`；只有真正並行 writers 才開 in-session formation，審查者不修自己判的 PR；長時間無人值守使用既有 authorized scheduler path | `fleet.parallel-modes=in-session-pipeline-when-operator-present-lanes-when-unattended` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |
 | 合併＝final current-head LGTM、P0=0/P1=0、required check「`CI Gate`」綠（`ci.merge-gate`）、SHA 窗檢查為空；docs-only PR 的 clippy／test job 顯示 skipped 而 `CI Gate` 仍綠＝`ci.path-filter` 正常跳過，不是漏跑 | `pr.merge-policy`、`ci.merge-gate` |
 | 未合併的 worktree／branch／source 永不刪；已合併的（PR MERGED）由控制者依第 9 步回收；build cache 可清、按年齡回收 | `fleet.merged-artifact-cleanup` |
