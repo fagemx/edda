@@ -1,0 +1,9 @@
+{
+  "name": "@edda/pi-session-channel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "pi": { "extensions": ["./extension.mjs"] },
+  "scripts": { "test": "node --test *.test.mjs" }
+}
