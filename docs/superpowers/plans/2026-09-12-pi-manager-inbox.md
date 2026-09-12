@@ -32,7 +32,7 @@ message through the existing exact-instance channel and durable receipt path.
   A missing/mismatched/revoked optional record produces a warning and omits its
   citation; it does not block the manager's otherwise valid explicit response.
 - `inbox-respond` explicitly chooses a message and optional authorization record.
-  Revalidate enabled enrollment, exact idle instance, current report/work identity
+  Revalidate any existing enrollment scope/pause, exact idle instance, current report/work identity
   and manifest/scope before a write-ahead response intent. One event has one
   deterministic message ID; uncertain attempts query receipts and never resend.
   Read acknowledgement, response intent, accepted/started/settled receipt and task

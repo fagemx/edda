@@ -149,3 +149,17 @@ test('pending publication recovers and malformed inbox setup does not block orig
     channel.settled();
   } finally { await channel.close(); }
 });
+
+test('reportless session can receive an explicit inbox response without enrollment or a manifest', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'edda-inbox-unmanaged-'));
+  const messages = [];
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: root, deliver: (text) => messages.push(text) });
+  t.after(async () => { await channel.close(); await rm(root, { recursive: true, force: true }); });
+  channel.event('agent_start');
+  channel.event('assistant_end', { stopReason: 'stop', text: 'Waiting for a concrete instruction' });
+  channel.settled();
+  const id = listInbox(root).events[0].eventId;
+  assert.equal((await respondInbox(root, id, { message: 'Continue the already-authorized task.' })).status, 'unconfirmed');
+  assert.equal(messages.length, 1);
+  assert.equal(channel.handoffContext().status, 'not_prepared');
+});

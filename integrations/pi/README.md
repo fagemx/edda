@@ -105,7 +105,10 @@ original idle instance and current work/scope before sending; old questions cann
 silently send into a new run. Its intent precedes delivery and uncertainty never
 causes a blind resend. Inspect `inbox-read` for the actual message receipt. A
 started/settled message proves processing began, never independent task acceptance.
-The ordinary `send` command remains available for a fresh authorized instruction.
+Enrollment and a prepared manifest are not prerequisites for responding to a
+reportless event. Missing setup is not a denial; an explicit pause or change to an
+existing bound scope still protects against stale responses. The ordinary `send`
+command remains available for a fresh authorized instruction.
 
 ### Optional reuse of an existing authorization
 
