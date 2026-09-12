@@ -1,6 +1,6 @@
 {
-  "spec_sha": "04b58b1e8efbc589417cd44120e2611fecf89229",
-  "spec_ref": "review-verdict fixture-fidelity tree — commit 04b58b1 on fix/gh934-repin-spec-review-verdict drops the refs.events key the typed Refs model skips (#934 round 2, 2026-09-06). Repin to a trunk SHA at the next spec change.",
+  "spec_sha": "a7eaba2cff93e59ceb96d786bbc9f1b4c83dacc2",
+  "spec_ref": "Delivery-first B2 pre-SDK integration tree containing the independently accepted GH-1141 S1/S2 continuity_capsule event contract and S4 native skills on base 56611b58ab8759a9eec6510fcb56c1b3875399ca.",
   "layout": {
     "schemas": "spec/events/*.schema.json + registry.json + canonical-v1.json",
     "fixtures": "tests/fixtures/events/*.jsonl"
