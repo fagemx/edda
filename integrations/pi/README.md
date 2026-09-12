@@ -31,7 +31,54 @@ idle point. Loading the extension does not resume work. It cannot silently attac
 to arbitrary existing terminals. New sessions load installed packages normally.
 Use `/edda-session` inside Pi to see its exact identity and status.
 
-## Start here: check, follow, inspect, pause
+## Start here: adopt an existing session
+
+When the task has a structured management brief, one command prepares its context,
+enrolls the session and follows the task plus its transitive `after` prerequisites:
+
+```powershell
+node integrations/pi/cli.mjs doctor
+node integrations/pi/cli.mjs adopt SESSION_PREFIX --task 17 --scope "Observe the assigned task within existing authority; no new spending." --preview
+node integrations/pi/cli.mjs adopt SESSION_PREFIX --task 17 --scope "Observe the assigned task within existing authority; no new spending." --notify
+```
+
+Use an exact ID or a unique prefix of at least eight characters; offline collisions
+also count. Project defaults to that live session's working directory. Add
+`--project PATH` for another task project, `--include 18,19` for explicit review/fix
+roots, or `--context FILE` for structured metadata when the task brief is prose.
+The metadata format is documented under task-to-handoff composition below.
+
+Adoption reads all prerequisites before applying setup, with an eight-task maximum.
+Cycles, missing tasks and overflow fail visibly; use `follow --tasks` to deliberately
+select a smaller observation set. Coverage is an `explicit_after_snapshot`: new
+review/fix tasks and changed graph edges need another adoption. Names, receipts and
+`done` status are not used to infer acceptance, ownership or missing edges.
+
+`--preview` reads/caches source snapshots but makes no enrollment, handoff, follow
+or message changes. Missing metadata reports exactly what to supply. Busy sessions
+and old extensions report idle/reload steps. Replacing an existing handoff or
+rebinding after reload needs `--expected REVISION`, obtained from `brief`; this is
+an explicit compare-and-set against the existing context, not new work authority.
+
+Repeated adoption reuses a semantically unchanged current manifest and its original
+immutable source snapshot. A task-status-only update does not reset notification
+caps. A changed task graph or explicit configuration is a new subscription; its
+initial alert may consume a normal model turn when `--notify` is present.
+
+Apply is a sequence of existing operations, not a transaction: `adoption_incomplete`
+lists confirmed steps and the possibly-applied last request. Inspect `doctor`,
+`brief` and `dependencies` before retrying. No rollback or blind resend occurs.
+Existing observation stays active until its configuration is changed. `adopted`
+means setup succeeded, not work started; notify mode reports `workStarted: null`
+until its separate message receipt is inspected. Without `--notify`, adoption
+configures observation only. Use an explicit `send` for an authorized work instruction.
+
+The receiver does not yet push decision requests into a manager inbox or wake an
+idle Codex thread. `conversation` reads replies on demand; `brief` reads structured
+reports when prepared. Dependency alerts wake the receiving Pi only. Manager inbox
+delivery and reverse wake routing remain a separate, necessary follow-up.
+
+## Select dependencies directly: follow, inspect, pause
 
 ```powershell
 node integrations/pi/cli.mjs doctor

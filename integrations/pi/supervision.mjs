@@ -22,9 +22,12 @@ async function locked(root, id, action) {
   writeFileSync(path, '', { flag: 'wx', mode: 0o600 });
   try { return await action(); } finally { unlinkSync(path); }
 }
-export async function enroll(root, id, scope) {
+export function validateScope(scope) {
   if (typeof scope !== 'string' || !scope.trim() || scope.length > 8000) throw new Error('An explicit bounded supervision scope is required');
-  const state = await requestSession(root, id, '/status');
+}
+export async function enroll(root, id, scope, expectedInstance) {
+  validateScope(scope);
+  const state = await requestSession(root, id, '/status', undefined, 2500, expectedInstance);
   privateRoot(root);
   mkdirSync(folder(root), { recursive: true, mode: 0o700 });
   return locked(root, id, async () => {
