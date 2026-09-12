@@ -640,7 +640,7 @@ mod effect_tests;
 #[test]
 fn taskless_external_completion_conditions_never_receive_local_complete_tokens() {
     let fixture = Fixture::new();
-    let authority_token = fixture.provision();
+    let authority_token = fixture.provision_for(Some(&format!("repo_{}", "d".repeat(64))));
     let ledger = Ledger::open(fixture.root.path()).unwrap();
 
     let mut invalid_profile = compile_input("control_invalidprofile");
