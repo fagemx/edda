@@ -12,6 +12,7 @@ import { wakeCapability } from './inbox-store.mjs';
 import { readBoundedFile } from './compose-sources.mjs';
 import { installRuntime } from './managed-store.mjs';
 import { launchManaged, managedStatus, stopManaged, resumeManaged } from './managed-client.mjs';
+import { startSupervisor, supervisorStatus, stopSupervisor } from './supervisor-client.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs list
@@ -49,6 +50,9 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs run-status RUN_ID
   node integrations/pi/cli.mjs run-stop RUN_ID [--abort]
   node integrations/pi/cli.mjs run-resume RUN_ID
+  node integrations/pi/cli.mjs supervisor-start --config FILE [--id UUID]
+  node integrations/pi/cli.mjs supervisor-status SUPERVISOR_ID
+  node integrations/pi/cli.mjs supervisor-stop SUPERVISOR_ID
 
 JSON stdout; diagnostics stderr. EDDA_PI_CHANNEL_DIR overrides the private root.
 Supervision commands are tools for an authorized controller, not a decision engine.
@@ -83,13 +87,22 @@ async function main(args) {
     'inbox-respond': ['--message', '--message-file', '--authorization', '--consumer'], 'inbox-wake': [],
     'runtime-install': [], launch: ['--project', '--pi-entry', '--provider', '--model', '--thinking', '--prompt-file', '--run-id', '--extension', '--agent-dir', '--no-tools'],
     'run-status': [], 'run-stop': ['--abort'], 'run-resume': [],
+    'supervisor-start': ['--config', '--id'], 'supervisor-status': [], 'supervisor-stop': [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
-  const counts = command === 'doctor' ? [0, 1] : [['list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch'].includes(command) ? 0 : 1];
+  const counts = command === 'doctor' ? [0, 1] : [['list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
   if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
+  if (command === 'supervisor-start') {
+    const config = JSON.parse((await readBoundedFile(options['--config'])).text);
+    config.id = validateId(options['--id'] || config.id || randomUUID());
+    process.stderr.write(`Supervisor ID: ${config.id}\n`);
+    result = await startSupervisor(root, config);
+  }
+  if (command === 'supervisor-status') result = await supervisorStatus(root, sessionId);
+  if (command === 'supervisor-stop') result = await stopSupervisor(root, sessionId);
   if (command === 'runtime-install') result = { status: 'installed', release: installRuntime(root), settingsChanged: false };
   if (command === 'launch') {
     const runId = validateId(options['--run-id'] || randomUUID());

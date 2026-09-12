@@ -72,6 +72,8 @@ try {
     ...(model.provider ? ['--provider', model.provider] : []), ...(model.id ? ['--model', model.id] : []),
     ...((resume ? prior.thinkingLevel : config.thinking) ? ['--thinking', resume ? prior.thinkingLevel : config.thinking] : []),
     ...(config.noTools ? ['--no-tools'] : []), ...config.extensions.flatMap((path) => ['-e', path])];
+  if (config.noSkills) args.push('--no-skills', '--no-prompt-templates');
+  if (config.tools) args.push('--tools', config.tools.join(','));
   child = spawn(process.execPath, args, { cwd: config.project, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   state.childPid = child.pid; save();
   child.on('error', (error) => { rpcError = error; });
