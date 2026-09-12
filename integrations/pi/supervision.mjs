@@ -6,6 +6,11 @@ import { fitContext } from './handoff-schema.mjs';
 
 const folder = (root) => join(root, 'supervision');
 const recordPath = (root, id) => join(folder(root), `${digest(validateSession(id))}.json`);
+export function readEnrollment(root, id) {
+  const value = readJson(recordPath(root, id));
+  if (value && value.sessionId !== id) throw new Error('Enrollment identity mismatch');
+  return value;
+}
 const now = () => new Date().toISOString();
 function record(root, id) {
   const value = readJson(recordPath(root, id));

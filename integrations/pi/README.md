@@ -2,7 +2,7 @@
 
 Read a running Pi session's replies and send a message to its existing conversation
 from another local process (including Codex). Uses Pi's extension API; no
-terminal keystrokes, transcript injection, duplicate agent or paid supervisor.
+terminal keystrokes, transcript injection, duplicate agent or separate supervisor model.
 
 Requires Node.js 24 and Pi 0.85.1 (the version used for the runtime smoke test).
 The extension has no npm dependencies. Older Pi versions may lack lifecycle
@@ -30,6 +30,57 @@ An already-open Pi needs `/reload` after package installation, at an appropriate
 idle point. Loading the extension does not resume work. It cannot silently attach
 to arbitrary existing terminals. New sessions load installed packages normally.
 Use `/edda-session` inside Pi to see its exact identity and status.
+
+## Start here: check, follow, inspect, pause
+
+```powershell
+node integrations/pi/cli.mjs doctor
+node integrations/pi/cli.mjs follow SESSION_ID --project C:/ai_agent/edda --tasks 17,18 --scope "Observe these dependencies within the existing task scope; no new work or spending authority." --notify --max-notifications 10
+node integrations/pi/cli.mjs dependencies SESSION_ID
+node integrations/pi/cli.mjs unfollow SESSION_ID
+```
+
+Use the exact session ID shown by `doctor`/`list`, and your actual upstream task
+IDs. `doctor` tells you whether the original Pi is offline, needs an idle `/reload`,
+needs enrollment, has a handoff, or is following dependencies. `follow --scope`
+can create/update the local enrollment; omit scope to reuse an enabled enrollment.
+Invalid setup is validated before changing enrollment.
+
+Without `--notify`, follow is **observation only**. With it, you explicitly permit
+an initial state message plus later changed-state messages to the current Pi model.
+Normal model usage applies; the default cap is 10 notification attempts per
+subscription, not a dollar-budget guarantee. Existing task/spend/approval limits
+still apply. No notification is a new grant or a declaration that all gates passed.
+
+The observer runs inside the existing Pi extension, every 60 seconds while that
+Pi process is running. It reads the selected tasks through the installed Rust
+`edda task show --json`. It does not wake a separate manager model to poll.
+Changed status, attempts, receipts or evidence can create an alert; timestamp-only
+noise does not. Select the execution **and** relevant review/correction task IDs:
+this version does not infer new review tasks or crawl the dependency graph.
+
+If the receiver is busy or waiting on an extension UI prompt, changes are coalesced
+until it is idle. The alert contains task facts and bounded, explicitly untrusted
+receipt excerpts. A review task marked `done` can still contain Changes Requested;
+the receiving controller must inspect its actual meaning and original authority.
+
+Each source transition has a monotonic sequence and its own message ID. Repeated
+checks of the same facts do not resend; A→B→A still has a fresh identity. One
+uncertain/unconfirmed delivery blocks additional notifications until resolved or
+explicitly reconfigured. `dependencies` and `doctor` expose that receipt state;
+never assume the model received or acted on an unconfirmed notification.
+
+`unfollow` writes a durable pause marker even if Pi is unreachable. A notification
+already handed to Pi cannot be recalled. Scope changes, paused enrollment or a
+changed handoff manifest suspend notification. After Pi reloads/restarts, use
+`follow` again explicitly; old pending changes do not replay into a new instance.
+The same active follow configuration does not reset its cap. To authorize another
+subscription after the cap, deliberately unfollow and follow again.
+
+`check-dependencies SESSION_ID` requests an immediate check using the saved mode;
+it may notify only if `--notify` was already enabled. `dependencies SESSION_ID` is
+read-only. A source read error retains the prior baseline and sends nothing.
+Diagnostics remain available to explain stopped/paused/error/limit states.
 
 ## Use from Codex or a local shell
 
@@ -162,7 +213,8 @@ Git; enrollment is a local controller policy, not new project/task authority.
 The next small layer is a prework management manifest plus structured reports.
 It separates what a **supervisor** needs from a controller's full implementation
 brief. It does not implement automatic judgments, Flash/strong-model routing,
-new authority, a second Edda task state machine or a monitoring scheduler.
+new authority or a second Edda task state machine. The opt-in dependency observer
+above supplies deterministic receiver-local polling, not a model-driven manager.
 Codex-to-Codex messages should continue using native session tools; this package
 is the Pi transport adapter and local observational prototype.
 
@@ -330,15 +382,34 @@ durability and filesystem corruption recovery are not guaranteed.
 ## Verify
 
 ```powershell
-node --test integrations/pi/channel.test.mjs integrations/pi/extension.test.mjs integrations/pi/conversation.test.mjs integrations/pi/supervision.test.mjs integrations/pi/handoff.test.mjs integrations/pi/compose.test.mjs
+npm --prefix integrations/pi test
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --reject
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --supervise
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff
 node integrations/pi/pi-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --handoff-budget
+node integrations/pi/dependency-smoke.mjs C:/nvm4w/nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js C:/Users/fagem/.cargo/bin/edda.exe
 ```
 
 The smoke test starts an isolated actual Pi with only this extension and a
 deterministic offline provider. It sends two messages through the real channel,
 checks two replies and receipts in the same session, then stops only that test
 subprocess. No credentials, user sessions or paid model calls are needed.
+
+The dependency smoke creates an isolated real Edda workspace/store and a real Pi
+using the offline provider, changes only its synthetic task, waits for the actual
+60-second timer to notify, verifies the same-session reply, then pauses and cleans
+only that test's processes/directories.
+
+## Remaining usability/product work
+
+- Automatic selection of newly created review/fix tasks and structured acceptance joins.
+- Bootstrap/update convenience for already-running old extensions; one idle reload
+  is still needed to load a new capability.
+- Full authority resolution and manager/strong-model escalation policy; no natural
+  language permission guessing is implemented.
+- Proactive Pi-to-Codex wake routing, Claude/Hermes recipient adapters and remote hosts.
+- Packaged distribution and a stable installer path independent of a development worktree.
+
+These are separate stages. Current dependency alerts are usable with explicit
+selected tasks and limits; they do not claim those broader capabilities.

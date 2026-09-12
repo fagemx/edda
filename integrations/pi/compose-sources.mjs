@@ -13,12 +13,12 @@ export function taskId(value) {
   return value;
 }
 
-export async function readTask(project, id, command = { file: process.env.EDDA_BIN || 'edda', args: [] }) {
+export async function readTask(project, id, command = { file: process.env.EDDA_BIN || 'edda', args: [] }, signal) {
   taskId(id);
   project = await realpath(resolve(project));
   if (!(await stat(project)).isDirectory()) throw new Error('Project must be a directory');
   const result = await exec(command.file, [...command.args, 'task', 'show', id, '--json'], {
-    cwd: project, windowsHide: true, timeout: 15000, maxBuffer: maxSourceBytes, encoding: 'utf8',
+    cwd: project, windowsHide: true, timeout: 15000, maxBuffer: maxSourceBytes, encoding: 'utf8', signal,
   });
   const raw = result.stdout;
   const value = JSON.parse(raw);
