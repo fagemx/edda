@@ -113,6 +113,7 @@ fn compile_input(control_id: &str, base: &str, head: &str) -> ControlCompileInpu
 
 #[cfg(unix)]
 #[test]
+#[allow(clippy::too_many_lines)] // One end-to-end controlled pipeline scenario.
 fn next_apply_product_adapter_records_one_atomic_review_claim_and_receipt() {
     let _env_lock = crate::claim_guard::GH_BIN_ENV_LOCK
         .lock()
@@ -273,11 +274,11 @@ esac
             state.display(),
             message.display(),
             observed.display(),
-            &head,
-            &base,
+            head,
+            base,
             "a".repeat(40),
             "a".repeat(40),
-            &head,
+            head,
             "a".repeat(40),
         ),
     )
