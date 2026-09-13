@@ -1,7 +1,7 @@
 # Edda agent manager
 
 A local Traditional Chinese progress and conversation console for explicitly
-selected Pi agents. This is the first typed management-service slice: the browser,
+selected Pi agents and read-only Codex records. The browser,
 gateway, operational journal and Pi transport have separate boundaries.
 
 ## Run
@@ -113,7 +113,7 @@ node dist/test/offline-smoke.js C:/path/to/pi/dist/bundle/cli.js --serve
 ```
 
 The smoke preserves its private receipt/workspace path for inspection. Real agents
-are never used as test recipients. Autonomous delegation, non-Pi runtimes, structured
+are never used as test recipients. Autonomous delegation, non-Pi message delivery, structured
 inbox approvals, automatic Docker operations, CPU/RSS sampling and remote hosting
 remain subsequent slices. Opening a conversation does not claim exclusive control
 over independent clients or the parent's existing monitoring automation.
@@ -198,3 +198,88 @@ The receipt proves one send despite duplicate requests, settled versus accepted
 separation, explicit delivery/closure and missing-task isolation. Browser work
 cards are available to the owner even when another agent is selected in the same
 project. They do not yet schedule an autonomous owner wake-up or remote notification.
+
+## Selected sessions and the owner inbox
+
+In **登記執行 session**, select an existing agent, its work role, expected
+next report and optional deadline. A reviewer must name a full reviewed commit SHA.
+The UI uses the current owner as parent; the API can name another selected parent.
+The work's Edda note chain retains the exact session identity and selection revision;
+changing an agent's configuration does not rewrite that historical binding. Retire
+an old relation explicitly with **結束 session 追蹤**. These actions neither start
+agents nor dispatch tasks. A missing relation or heartbeat never authorizes a second
+writer. Each work permits32 active relations and128 historical relations.
+
+Pi continues to use the selected authenticated channel. Its public reply-end/error
+events and known managed stop metadata are projected without private reasoning,
+raw tool arguments/results, or provider error strings. The bounded recent sample
+is marked history-incomplete; it is not a lossless native event subscription.
+
+Codex can be selected as a read-only recorded source:
+
+```json
+{
+  "id": "codex-reviewer",
+  "name": "Codex reviewer",
+  "projectId": "edda",
+  "role": "worker",
+  "transport": "codex",
+  "sessionId": "actual-desktop-thread-uuid",
+  "workspace": "C:/path/to/recorded/workspace",
+  "transcriptFile": "C:/path/to/explicitly-selected-rollout.jsonl"
+}
+```
+
+The adapter validates session metadata and workspace against this configuration.
+It reads at most1MiB per observation, including metadata/checkpoints, retains up to
+64 public entries and128 native events, and persists a bounded cursor projection.
+It handles incomplete tails, corrupt/oversized rows, truncation and replacement
+visibly. A tail bootstrap reports incomplete history. `task_started`,
+`task_complete`, `turn_aborted`, and native child references are observed data;
+history ancestry is not ownership. Recorded activity is never labeled live process
+proof. Codex sends are unsupported in this slice; continue its conversation through
+the native app. Unknown provider-event shapes remain unsupported rather than guessed.
+
+The **負責人事件收件匣** persists reply-ended, interruption, normalized provider
+error, source-unavailable and overdue notices before showing them. Stable native
+identity and binding identity prevent duplicates after restart. Provider categories
+and HTTP status are bounded metadata only. Explicit acknowledgements retain their
+own UUID/evidence and mean the notice was read, not that an instruction was understood
+or a task accepted. A child event newer than the owner's summary marks that summary
+stale. Deadlines are unresolved expectations until retired/replaced or independently
+delivered; random tool activity cannot satisfy their free-text meaning. Overdue
+means suspected stalled, never automatic termination or reassignment.
+
+**移交收尾負責人** transfers the work to a selected manager with evidence, retaining
+pending directions, original message targets, session relations and unresolved
+alerts. The bounded context endpoint provides that handoff packet. It does not
+automatically rotate a model based on cumulative token usage.
+
+Authenticated API additions (paths/executables still come only from local config):
+
+- Work actions: `bind_session {agentId,role,parentAgentId,reviewedSha,expectedEvent,nextExpectedAt}`,
+  `unbind_session {bindingId}`, `handoff_owner {ownerAgentId,evidence}`; all use the
+  existing `actionId` and observed `revision`. Optional SHA/deadline/parent use null.
+- `GET /api/owner-inbox?ownerAgentId=<selected-id>` returns bounded events.
+- `POST /api/owner-inbox/ack` accepts `{eventId,actionId,evidence}`.
+- `GET /api/owners/:id/context` returns at most20 work packets within64KiB, bounded
+  recent work history, pending instruction previews and at most10 unresolved alerts
+  per work, plus truncation. Each packet's `detailPath` points to the complete
+  selected work at `GET /api/works/:id`; source evidence is never truncated in storage.
+
+The journal schema upgrades add observational tables without replacing canonical
+Edda work events. Polling runs in the service (normally every3 seconds) and is
+independent of whether a browser is visible; disconnected sources remain unknown.
+Persistent inbox availability is not proof that a sleeping owner has read it.
+Native push/wake and remote notifications remain separate capabilities.
+
+Run the isolated actual Pi/Edda owner-inbox path with:
+
+```powershell
+node dist/test/offline-smoke.js C:/path/to/pi/dist/bundle/cli.js --session-events
+```
+
+This binds the real isolated Pi session before assignment, observes its native end
+event in the owner's inbox and acknowledges it twice with one durable result before
+independent delivery/acceptance. Synthetic Codex tests cover file and event boundaries;
+a selected actual Codex rollout was also observed read-only without exposing content.

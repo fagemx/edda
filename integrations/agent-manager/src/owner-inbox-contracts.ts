@@ -13,6 +13,7 @@ export interface OwnerInboxAck { eventId: string; actionId: string; evidence: st
 export interface OwnerWorkContext {
   work: WorkView; summaryStale: boolean; latestChildEventAt: string | null;
   alerts: OwnerInboxEvent[];
+  detailPath: string;
 }
 export interface OwnerContext { ownerAgentId: string; works: OwnerWorkContext[]; generatedAt: string; truncated: boolean }
 export interface BindingObservationState { unavailable: boolean; transition: number; latestChildEventAt: string | null }

@@ -41,7 +41,7 @@ export class OwnerInbox {
           for (const event of evidence.events.slice(-100)) {
             if (!event.id || event.id.length > 512 || !Number.isFinite(Date.parse(event.at)) || Date.parse(event.at) < Date.parse(binding.boundAt)) continue;
             if (binding.role !== 'manager' && (!state.latestChildEventAt || Date.parse(event.at) > Date.parse(state.latestChildEventAt))) state.latestChildEventAt = event.at;
-            if (event.kind === 'reply_ended') add(event.kind, event.id, event.at, ['delivered', 'accepted'].includes(work.stage) ? '代理本輪回覆結束；已有獨立工作交付紀錄。' : '代理本輪回覆結束，尚無工作交付證據。');
+            if (event.kind === 'reply_ended') add(event.kind, event.id, event.at, ['delivered', 'accepted'].includes(work.stage) ? '代理本輪回覆結束；事件記錄時已有獨立工作交付紀錄。' : '代理本輪回覆結束；事件記錄時尚無工作交付證據。');
             else if (event.kind === 'interrupted') add(event.kind, event.id, event.at, '代理回合被中斷；工作結果需要確認。');
             else if (event.kind === 'provider_error') {
               const status = typeof event.httpStatus === 'number' && Number.isInteger(event.httpStatus) && event.httpStatus >= 400 && event.httpStatus <= 599 ? event.httpStatus : null;
@@ -77,10 +77,22 @@ export class OwnerInbox {
     const owner = this.agents.find(a => a.id === ownerAgentId);
     const works = selected.slice(0, 20).map(work => {
       const latest = work.sessions.filter(s => s.role !== 'manager' && !s.unboundAt).map(s => this.store.bindingObservation(hash(JSON.stringify([work.id, s.id]))).latestChildEventAt).filter((s): s is string => s !== null).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
-      return { work: { ...work, history: work.history.slice(-10) }, latestChildEventAt: latest,
+      return { work: { ...work, title: work.title.slice(0, 300), nextStep: work.nextStep.slice(0, 600), evidence: work.evidence?.slice(0, 600) ?? null,
+        taskReceipt: work.taskReceipt?.slice(0, 600) ?? null,
+        pendingInstruction: work.pendingInstruction ? { ...work.pendingInstruction, message: work.pendingInstruction.message.slice(0, 1000), evidence: work.pendingInstruction.evidence?.slice(0, 300) ?? null } : null,
+        sessions: work.sessions.filter(s => !s.unboundAt).slice(-8).map(s => ({ ...s, expectedEvent: s.expectedEvent.slice(0, 300) })),
+        history: work.history.slice(-3).map(e => ({ ...e, summary: e.summary.slice(0, 300) })) }, latestChildEventAt: latest,
+        detailPath: `/api/works/${encodeURIComponent(work.id)}`,
         summaryStale: latest !== null && (!owner?.summaryUpdatedAt || Date.parse(latest) > Date.parse(owner.summaryUpdatedAt)),
-        alerts: inbox.events.filter(e => e.workId === work.id && !e.acknowledgedAt).slice(0, 20) };
+        alerts: inbox.events.filter(e => e.workId === work.id && !e.acknowledgedAt).slice(0, 10) };
     });
-    return { ownerAgentId, works, generatedAt: new Date().toISOString(), truncated: selected.length > 20 || inbox.truncated || works.some(w => inbox.events.filter(e => e.workId === w.work.id && !e.acknowledgedAt).length > 20) };
+    const result: OwnerContext = { ownerAgentId, works: [], generatedAt: new Date().toISOString(), truncated: selected.length > 20 || inbox.truncated };
+    for (const packet of works) {
+      if (Buffer.byteLength(JSON.stringify({ ...result, works: [...result.works, packet] })) > 65536) { result.truncated = true; break; }
+      result.works.push(packet);
+      const original = selected.find(w => w.id === packet.work.id)!;
+      if (JSON.stringify(original) !== JSON.stringify(packet.work) || inbox.events.filter(e => e.workId === original.id && !e.acknowledgedAt).length > 10) result.truncated = true;
+    }
+    return result;
   }
 }

@@ -14,6 +14,25 @@ import type { WorkView, WorkSessionBinding } from '../src/workflow-contracts.js'
 
 const at = '2026-09-13T00:00:00.000Z';
 const after = '2026-09-13T00:01:00.000Z';
+
+test('owner handoff context has a byte ceiling and points to complete work without losing stored directions', () => {
+  const root = mkdtempSync(join(tmpdir(), 'owner-context-budget-')), store = new ManagerStore(root);
+  try {
+    const inbox = new OwnerInbox(store);
+    const works = Array.from({ length: 24 }, (_, i) => ({ ...work(), id: `work-${i}`, taskId: i + 1,
+      nextStep: '進度'.repeat(1000), evidence: '證據'.repeat(2000),
+      pendingInstruction: { id: randomUUID(), operationId: randomUUID(), message: '待確認'.repeat(4000), acknowledgedAt: null, evidence: null },
+      history: Array.from({ length: 30 }, () => ({ id: randomUUID(), kind: 'block', at, summary: '歷史'.repeat(2000) })) }));
+    inbox.refresh([], { works, generatedAt: after });
+    const packet = inbox.context('owner');
+    assert.ok(Buffer.byteLength(JSON.stringify(packet)) <= 65536);
+    assert.equal(packet.truncated, true); assert.ok(packet.works.length > 0);
+    assert.equal(packet.works[0]!.detailPath, '/api/works/work-0');
+    assert.equal(packet.works[0]!.work.pendingInstruction!.acknowledgedAt, null);
+    assert.equal(works[0]!.pendingInstruction.message.length, 12000);
+    assert.equal(store.operations().length, 0);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
 function binding(): WorkSessionBinding { return { id: randomUUID(), agentId: 'worker', sessionId: 'session', selectionRevision: 'revision', transport: 'pi', role: 'worker', parentAgentId: 'owner', reviewedSha: null, expectedEvent: 'review reply', nextExpectedAt: null, boundAt: at, unboundAt: null }; }
 function work(session = binding()): WorkView { return { id: 'work', projectId: 'p', taskId: 7, title: 'Task', taskStatus: 'running', taskReceipt: null, ownerAgentId: 'owner', assigneeAgentId: 'worker', nextStep: 'Review', stage: 'executing', revision: 'r', evidence: null, waitingReason: null, pendingInstruction: null, deliveryOperationId: null, deliveryStatus: null, updatedAt: at, error: null, history: [], lastActionId: null, confirmedActionId: null, sessions: [session] }; }
 function agent(): AgentView { return { id: 'worker', name: 'worker', role: 'worker', projectId: 'p', workspace: '/private/workspace', transport: 'pi', selectionRevision: 'revision', summary: null, summaryUpdatedAt: at, summaryError: null, state: 'idle', instanceId: randomUUID(), observedAt: after, heartbeatAt: after, lastProgressAt: after, lastEvent: null, source: 'live', stale: false, reason: null, model: null, usage: null, capabilities: { conversation: true, send: true }, latestMessage: null, sessionEvidence: { sessionId: 'session', evidenceSource: 'live', historyComplete: true, events: [{ id: 'native-end', kind: 'reply_ended', at: after, turnId: 'turn', category: null, httpStatus: null }] } }; }

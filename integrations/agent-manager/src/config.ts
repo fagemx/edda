@@ -50,13 +50,16 @@ export function parseConfig(input: unknown): ManagerConfig {
   });
   const agents = array(c.agents, 32).map((value): AgentBinding => {
     const a = object(value), role = a.role;
+    if (a.transport != null && a.transport !== 'pi' && a.transport !== 'codex') throw new ManagerError('INVALID_CONFIG', '不支援的代理來源。');
     if (role !== 'manager' && role !== 'worker') throw new ManagerError('INVALID_CONFIG', '代理角色不正確。');
     const sessionId = text(a.sessionId, 200);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(sessionId)) throw new ManagerError('INVALID_CONFIG', 'Session 識別碼不正確。');
     const projectId = slug(a.projectId);
     if (!projects.some((p) => p.id === projectId)) throw new ManagerError('INVALID_CONFIG', '代理所屬專案未登記。');
-    return { id: slug(a.id), name: text(a.name), role, projectId, registryRoot: path(a.registryRoot), sessionId,
-      runId: a.runId == null ? null : uuid(a.runId), workspace: path(a.workspace), summaryFile: a.summaryFile == null ? null : path(a.summaryFile) };
+    if (a.transport === 'codex' && a.runId != null) throw new ManagerError('INVALID_CONFIG', 'Codex 記錄來源不能帶入 Pi 執行編號。');
+    return { id: slug(a.id), name: text(a.name), role, projectId, registryRoot: path(a.registryRoot ?? (a.transport === 'codex' ? a.workspace : undefined)), sessionId,
+      runId: a.runId == null ? null : uuid(a.runId), workspace: path(a.workspace), summaryFile: a.summaryFile == null ? null : path(a.summaryFile),
+      ...(a.transport === 'codex' ? { transport: 'codex', transcriptFile: path(a.transcriptFile) } : {}) };
   });
   unique(projects.map((p) => p.id)); unique(agents.map((a) => a.id));
   unique(agents.map((a) => `${a.registryRoot}\0${a.sessionId}`));

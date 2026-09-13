@@ -810,6 +810,12 @@ select {
 .work-field textarea,.work-field select { width:100%; min-width:0; box-sizing:border-box; padding:10px; font:inherit; color:inherit; border:1px solid #ccd5df; border-radius:5px; background:white; }
 .work-form button { justify-self:start; }
 .work-form pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
+.work-field input { width:100%; min-width:0; box-sizing:border-box; padding:10px; font:inherit; border:1px solid #ccd5df; border-radius:5px; }
+.bound-sessions,.owner-inbox { display:grid; gap:10px; padding-top:12px; }
+.bound-sessions h4,.owner-inbox h4 { margin:0; font-size:14px; }
+.session-row { padding:12px; background:#f6f8fb; border-left:3px solid #8298b2; display:grid; gap:8px; overflow-wrap:anywhere; }
+.session-row strong { font-size:13px; }
+.session-row button { justify-self:start; font-size:12px; }
 
 @media(prefers-reduced-motion:reduce) {
   *,*::before,*::after {

@@ -7,6 +7,7 @@ import { AgentManager } from './manager.js';
 import { ManagerError, MAX_BODY_BYTES } from './contracts.js';
 import { parseSend, uuid } from './config.js';
 import { parseWorkAction } from './workflow.js';
+import { object, text, slug } from './config.js';
 
 function authorized(header: string | undefined, token: string): boolean {
   const expected = Buffer.from(`Bearer ${token}`), value = Buffer.from(header || '');
@@ -57,7 +58,26 @@ export async function serve(manager: AgentManager, token: string, options: { por
       if (req.method === 'GET' && asset) { res.writeHead(200, { 'content-type': asset.type }); res.end(readFileSync(asset.file)); return; }
       if (!authorized(req.headers.authorization, token)) throw new ManagerError('UNAUTHORIZED', '請使用啟動時提供的管理台連結。', 401);
       if (req.method === 'GET' && url.pathname === '/api/overview') { json(200, manager.overview()); return; }
+      if (req.method === 'GET' && url.pathname === '/api/owner-inbox') {
+        await manager.refreshOwnerInbox();
+        const ownerId = url.searchParams.get('ownerAgentId');
+        if (ownerId) manager.binding(slug(ownerId));
+        json(200, manager.ownerInbox.list(ownerId || undefined)); return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/owner-inbox/ack') {
+        await manager.refreshOwnerInbox();
+        const input = object(await body(req));
+        json(200, manager.ownerInbox.acknowledge({ eventId: text(input.eventId, 200), actionId: uuid(input.actionId), evidence: text(input.evidence, 2000) })); return;
+      }
+      const ownerContext = /^\/api\/owners\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/context$/.exec(url.pathname);
+      if (req.method === 'GET' && ownerContext?.[1]) { manager.binding(ownerContext[1]); await manager.refreshOwnerInbox(); json(200, manager.ownerInbox.context(ownerContext[1])); return; }
       if (req.method === 'GET' && url.pathname === '/api/works') { json(200, await manager.works.list()); return; }
+      const workDetail = /^\/api\/works\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})$/.exec(url.pathname);
+      if (req.method === 'GET' && workDetail?.[1]) {
+        const work = (await manager.works.list()).works.find(w => w.id === workDetail[1]);
+        if (!work) throw new ManagerError('NOT_FOUND', '此工作未加入管理清單。', 404);
+        json(200, work); return;
+      }
       const work = /^\/api\/works\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/actions$/.exec(url.pathname);
       if (req.method === 'POST' && work?.[1]) { json(200, await manager.works.act(work[1], parseWorkAction(await body(req)))); return; }
       if (req.method === 'GET' && url.pathname === '/api/service') { json(200, { version: 1, startedAt: manager.startedAt, agents: manager.config.agents.length }); return; }

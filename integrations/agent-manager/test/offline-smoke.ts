@@ -14,9 +14,12 @@ import { serve } from '../src/http.js';
 import type { ConversationView, OperationView, SendRequest } from '../src/contracts.js';
 import { execFileSync } from 'node:child_process';
 import type { WorkAction, WorkView, WorksView } from '../src/workflow-contracts.js';
+import type { OwnerInboxEvent, OwnerInboxView } from '../src/owner-inbox-contracts.js';
+import { RuntimeAdapter } from '../src/runtime-adapter.js';
 
 const entry = process.argv[2], keep = process.argv.includes('--serve');
-const workflow = process.argv.includes('--workflow');
+const sessionEvents = process.argv.includes('--session-events');
+const workflow = process.argv.includes('--workflow') || sessionEvents;
 if (!entry) throw new Error('Supply installed Pi entry; optional --serve keeps the browser fixture running');
 interface Managed {
   launchManaged(root: string, input: unknown): Promise<unknown>;
@@ -26,6 +29,11 @@ interface Managed {
 const api = await import(pathToFileURL(join(defaultPiRoot(), 'managed-client.mjs')).href) as Managed;
 const root = mkdtempSync(join(tmpdir(), 'edda-manager-smoke-')), registry = join(root, 'registry'), workspace = join(root, 'fixture'), agentDir = join(root, 'agent');
 mkdirSync(workspace); mkdirSync(agentDir); await secureRoot(root);
+const codexSession = randomUUID(), codexFile = join(workspace, 'codex-rollout.jsonl');
+if (sessionEvents) writeFileSync(codexFile, [
+  { timestamp: new Date().toISOString(), type: 'session_meta', payload: { id: codexSession, session_id: codexSession, cwd: workspace } },
+  { timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'task_started', turn_id: 'isolated-codex-turn', started_at: new Date().toISOString() } },
+].map(v => JSON.stringify(v)).join('\n') + '\n');
 if (workflow) {
   execFileSync('git', ['init', '--quiet'], { cwd: workspace, windowsHide: true });
   const edda = process.platform === 'win32' ? 'edda.exe' : 'edda';
@@ -52,12 +60,13 @@ try {
   }
   const config = parseConfig({ version: 1, refreshMs: 1000, projects: [{ id: 'fixture', name: '隔離驗證', priority: 0, resources: [] }], agents: [
     { id: 'pi-fixture', name: 'Pi 收發驗證', projectId: 'fixture', role: 'worker', registryRoot: registry, workspace, sessionId, runId },
-    { id: 'offline-fixture', name: '離線狀態驗證', projectId: 'fixture', role: 'manager', registryRoot: registry, workspace, sessionId: randomUUID() }],
+    { id: 'offline-fixture', name: '離線狀態驗證', projectId: 'fixture', role: 'manager', registryRoot: registry, workspace, sessionId: randomUUID() },
+    ...(sessionEvents ? [{ id: 'codex-fixture', name: 'Codex 記錄驗證', projectId: 'fixture', role: 'worker', transport: 'codex', sessionId: codexSession, workspace, transcriptFile: codexFile }] : [])],
     ...(workflow ? { works: [
       { id: 'review-flow', projectId: 'fixture', taskId: 1, workspace, ownerAgentId: 'offline-fixture' },
       { id: 'missing-task', projectId: 'fixture', taskId: 9999, workspace, ownerAgentId: 'offline-fixture' },
     ] } : {}) });
-  store = new ManagerStore(join(root, 'manager')); manager = new AgentManager(config, store, await ChannelAdapter.create());
+  store = new ManagerStore(join(root, 'manager')); manager = new AgentManager(config, store, sessionEvents ? await RuntimeAdapter.create(store) : await ChannelAdapter.create());
   await manager.start(); const token = randomBytes(32).toString('hex');
   gateway = await serve(manager, token, { onStop: () => { void close(); } });
   const origin = gateway.origin, headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
@@ -79,6 +88,7 @@ try {
   assert.equal(conversation.entries.filter((e) => e.role === 'user' && e.text.includes(request.message)).length, 1);
   assert.ok(conversation.entries.some((e) => e.role === 'assistant' && e.text.includes('OFFLINE_ACK') && e.text.includes(request.message)));
   let workReceipt: WorkView | null = null;
+  let ownerReceipt: OwnerInboxEvent | null = null;
   if (workflow) {
     const all = await (await fetch(`${origin}/api/works`, { headers })).json() as WorksView;
     let work = all.works.find(w => w.id === 'review-flow')!;
@@ -90,6 +100,8 @@ try {
       return await response.json() as WorkView;
     };
     work = await act({ actionId: randomUUID(), revision: work.revision, kind: 'initialize', nextStep: '交付證據後，由負責人驗收並回報。' });
+    if (sessionEvents) work = await act({ actionId: randomUUID(), revision: work.revision, kind: 'bind_session', agentId: 'pi-fixture', role: 'worker',
+      parentAgentId: 'offline-fixture', reviewedSha: null, expectedEvent: '實際 Pi 回覆後，由負責人讀取事件', nextExpectedAt: new Date(Date.now() + 120000).toISOString() });
     const assignment: WorkAction = { actionId: randomUUID(), revision: work.revision, kind: 'assign', agentId: 'pi-fixture', nextStep: '回覆隔離測試交付證據',
       send: { ...request, operationId: randomUUID(), message: 'WORKFLOW_ACTUAL_PI_ONCE' } };
     work = await act(assignment); await act(assignment);
@@ -101,15 +113,32 @@ try {
     assert.equal(work.stage, 'awaiting_delivery'); assert.notEqual(work.stage, 'accepted');
     const publicView = await (await fetch(`${origin}/api/agents/pi-fixture/conversation`, { headers })).json() as ConversationView;
     assert.equal(publicView.entries.filter(e => e.role === 'user' && e.text.includes('WORKFLOW_ACTUAL_PI_ONCE')).length, 1);
+    if (sessionEvents) {
+      let inbox: OwnerInboxView = { events: [], generatedAt: '', truncated: false };
+      for (let i = 0; i < 50; i++) {
+        inbox = await (await fetch(`${origin}/api/owner-inbox?ownerAgentId=offline-fixture`, { headers })).json() as OwnerInboxView;
+        ownerReceipt = inbox.events.find(e => e.workId === 'review-flow' && e.kind === 'reply_ended') ?? null;
+        if (ownerReceipt) break; await delay(200);
+      }
+      assert.ok(ownerReceipt, 'Actual Pi end event reaches durable owner inbox');
+      assert.equal(ownerReceipt.deliveryRecorded, false);
+      const ack = { actionId: randomUUID(), eventId: ownerReceipt.id, evidence: '隔離驗證：負責人已讀取 Pi 結束事件，不等於工作驗收。' };
+      for (let i = 0; i < 2; i++) {
+        const response = await fetch(`${origin}/api/owner-inbox/ack`, { method: 'POST', headers, body: JSON.stringify(ack) });
+        assert.equal(response.status, 200); ownerReceipt = await response.json() as OwnerInboxEvent;
+        assert.equal(ownerReceipt.acknowledgementId, ack.actionId);
+      }
+      assert.equal((await (await fetch(`${origin}/api/owner-inbox`, { headers })).json() as OwnerInboxView).events.filter(e => e.id === ownerReceipt!.id).length, 1);
+    }
     work = await act({ actionId: randomUUID(), revision: work.revision, kind: 'deliver', evidence: '實際 Pi 公開回覆 + settled 收據，重複請求只傳送一次。', nextStep: '負責人核對證據後記錄驗收。' });
     work = await act({ actionId: randomUUID(), revision: work.revision, kind: 'accept', evidence: '隔離流程驗證通過；本紀錄不宣稱產品合併。' });
     assert.equal(work.stage, 'accepted'); assert.equal(work.taskStatus, 'ready');
     workReceipt = work;
   }
   const summary = { passed: true, actualPi: true, liveModel: false, messageDeliveredOnce: true, publicReplyVisible: true, receiptSettled: true, partialSourceFailureIsolated: true,
-    root, origin, sessionId, runId, operationId: request.operationId, workReceipt };
+    root, origin, sessionId, runId, operationId: request.operationId, workReceipt, ownerReceipt };
   writeFileSync(join(root, 'receipt.json'), JSON.stringify(summary, null, 2));
-  writeFileSync(join(root, 'browser.json'), JSON.stringify({ url: `${origin}/#token=${token}`, origin, token }, null, 2), { mode: 0o600 });
+  writeFileSync(join(root, 'browser.json'), JSON.stringify({ url: `${origin}/#token=${token}`, origin, token, codexSession, codexFile }, null, 2), { mode: 0o600 });
   console.log(JSON.stringify(summary));
   if (keep) {
     process.once('SIGINT', () => { void close(); }); process.once('SIGTERM', () => { void close(); });

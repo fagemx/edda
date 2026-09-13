@@ -5,6 +5,7 @@ import { unavailable } from './pi-adapter.js';
 import { ManagerStore } from './store.js';
 import { WorkManager } from './workflow.js';
 import type { WorkflowLedger, WorkflowLocks } from './edda-workflow.js';
+import { OwnerInbox } from './owner-inbox.js';
 
 const notices: Record<OperationStatus, string> = {
   prepared: '操作已記錄，傳送結果尚未確認。', unconfirmed: '通道已收件，尚未確認代理開始處理。',
@@ -24,6 +25,7 @@ function summary(binding: AgentBinding): Pick<AgentView, 'summary' | 'summaryUpd
 }
 export class AgentManager {
   readonly works: WorkManager;
+  readonly ownerInbox: OwnerInbox;
   readonly startedAt = new Date().toISOString();
   private views = new Map<string, AgentView>();
   private refreshing: Promise<void> | null = null;
@@ -32,6 +34,7 @@ export class AgentManager {
   constructor(readonly config: ManagerConfig, readonly store: ManagerStore, private adapter: PiAdapter, workflow?: { ledger?: WorkflowLedger; locks?: WorkflowLocks }) {
     store.putSetting('config', JSON.stringify(config));
     this.works = new WorkManager(this, workflow?.ledger, workflow?.locks);
+    this.ownerInbox = new OwnerInbox(store);
   }
   binding(id: string): AgentBinding {
     const binding = this.config.agents.find((a) => a.id === id);
@@ -40,7 +43,7 @@ export class AgentManager {
   }
   private view(binding: AgentBinding, observation = unavailable()): AgentView {
     return { ...observation, id: binding.id, name: binding.name, role: binding.role, projectId: binding.projectId,
-      workspace: binding.workspace, transport: 'pi', selectionRevision: selectionRevision(binding), ...summary(binding) };
+      workspace: binding.workspace, transport: binding.transport ?? 'pi', selectionRevision: selectionRevision(binding), ...summary(binding) };
   }
   overview(): Overview {
     const selected = new Set(this.config.agents.map((a) => a.id));
@@ -67,7 +70,9 @@ export class AgentManager {
     }));
     await Promise.all(this.store.operations(100).filter((op) => this.config.agents.some((a) => a.id === op.agentId) && !['settled', 'failed'].includes(op.status))
       .map((op) => this.reconcile(op).catch(() => op)));
+    await this.refreshOwnerInbox();
   }
+  async refreshOwnerInbox(): Promise<void> { this.ownerInbox.refresh(this.overview().agents, await this.works.list()); }
   async start(): Promise<void> { await this.refresh(); this.timer = setInterval(() => { void this.refresh().catch(() => {}); }, this.config.refreshMs); }
   async stop(): Promise<void> { clearInterval(this.timer); await this.works.stop(); if (this.refreshing) await this.refreshing; await Promise.allSettled(this.checking.values()); }
   async conversation(id: string, after?: string): Promise<ConversationView> {
