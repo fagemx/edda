@@ -110,7 +110,8 @@ test('liveness stays a separate process fact from the wait reason', () => {
 
   const fresh = derive(work, [observation('worker', { state: 'executing_tool', heartbeatAt: at(200) })]);
   assert.equal(fresh.phase, 'working');
-  assert.equal(fresh.waitingFor, 'tool');
+  // A working child is not waiting on the operator; the tool call is liveness.
+  assert.equal(fresh.waitingFor, 'none');
   assert.doesNotMatch(fresh.waitEvidence ?? '', /2026-09-13T00:03:20/);
 
   const running = derive(work, [observation('worker', { state: 'running' })]);
@@ -157,7 +158,41 @@ test('terminal native task and delivery states are projected explicitly', () => 
 
   const stopped = derive(view({ stage: 'executing' }), [observation('worker', { state: 'stopped', source: 'unavailable', stale: true, reason: '上次管理紀錄為已停止；目前沒有即時連線。' })]);
   assert.equal(stopped.phase, 'interrupted');
-  assert.equal(stopped.waitingFor, null);
+  assert.equal(stopped.waitingFor, 'worker');
+  assert.match(stopped.waitEvidence ?? '', /worker:stopped/);
+});
+
+test('a stopped session only interrupts the role the work waits on, never a terminal or delivered phase', () => {
+  const stoppedWorker = observation('worker', { state: 'stopped', source: 'unavailable', stale: true, reason: '執行 session 已停止。' });
+  const stoppedReviewer = observation('reviewer', { role: 'worker', state: 'stopped', source: 'unavailable', stale: true, reason: '審查 session 已停止。' });
+  const delivered = view({ stage: 'delivered', deliveryStatus: 'settled', sessions: [binding('worker', 'worker'), binding('reviewer', 'reviewer')] });
+
+  // Reproduced from the Round-1 review: a delivered work awaiting a verifier must
+  // stay delivered and name the verifier whether the stopped session is the
+  // reviewer or another role.
+  const reviewerDown = derive(delivered, [observation('worker'), stoppedReviewer]);
+  assert.equal(reviewerDown.phase, 'delivered');
+  assert.equal(reviewerDown.waitingFor, 'verifier');
+  const workerDown = derive(delivered, [stoppedWorker, observation('reviewer', { role: 'worker' })]);
+  assert.equal(workerDown.phase, 'delivered');
+  assert.equal(workerDown.waitingFor, 'verifier');
+
+  // A terminal or delivery fact is never overridden by a stopped session.
+  assert.equal(derive(view({ stage: 'accepted' }), [stoppedWorker]).phase, 'accepted');
+  assert.equal(derive(view({ stage: 'assigned', deliveryStatus: 'failed' }), [stoppedWorker]).phase, 'failed');
+
+  // The active hand-off is the one case where a stopped pending session interrupts.
+  const activeStopped = derive(view({ stage: 'executing' }), [stoppedWorker]);
+  assert.equal(activeStopped.phase, 'interrupted');
+  assert.equal(activeStopped.waitingFor, 'worker');
+});
+
+test('an unparseable observation timestamp cannot let an interruption override live work', () => {
+  const work = view({ stage: 'executing', updatedAt: at(2) });
+  const live = observation('worker', { state: 'running', heartbeatAt: null, observedAt: 'not-a-time' });
+  const result = derive(work, [live], [inboxEvent('interrupted', LATER)]);
+  assert.equal(result.phase, 'working');
+  assert.equal(result.waitingFor, 'none');
 });
 
 class ClockLedger implements WorkflowLedger {
