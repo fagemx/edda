@@ -48,7 +48,9 @@ export class AgentManager {
   private piRoots(): string[] {
     const roots = this.config.agents.filter((a) => (a.transport ?? 'pi') === 'pi').map((a) => a.registryRoot);
     const effective = this.adapter.defaultRegistryRoot?.();
-    if (effective) roots.push(effective);
+    // The effective default root goes first so the bounded discovery slice can
+    // never drop the one root the documented set always contains.
+    if (effective) roots.unshift(effective);
     return [...new Set(roots)];
   }
   // Read-only. The bounded root set is the effective default Pi registry plus the

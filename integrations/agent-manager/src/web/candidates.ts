@@ -49,7 +49,7 @@ export class CandidatePanel {
     const view = this.view;
     this.list.replaceChildren();
     if (!view) { this.list.append(el('p', '尚未讀取候選執行。', 'empty')); return; }
-    if (view.issues.length) this.list.append(el('p', `部分來源目前無法讀取（${view.issues.map((issue) => issue.label).join('、')}）；其他來源不受影響。`, 'notice'));
+    if (view.issues.length) this.list.append(el('p', `部分來源未納入本次候選。${view.issues.map((issue) => issue.message).join(' ')}`, 'notice'));
     if (!view.candidates.length) this.list.append(el('p', '沒有可顯示的候選執行。連線或離線的已註冊 session 都會列在這裡。', 'empty'));
     const selected = this.openForm;
     for (const candidate of view.candidates) this.list.append(this.row(candidate, selected));

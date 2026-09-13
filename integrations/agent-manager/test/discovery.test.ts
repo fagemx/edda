@@ -59,6 +59,12 @@ test('candidate projection deduplicates by session, marks configured runs and ne
   assert.ok(!JSON.stringify(view).includes('registryRoot'));
 });
 
+test('opaque candidate ids keep the session and run namespaces distinct', () => {
+  const root = join(tmpdir(), 'manager-id-namespace');
+  assert.notEqual(candidateId({ registryRoot: root, sessionId: 'shared-id' }), candidateId({ registryRoot: root, runId: 'shared-id' }));
+  assert.equal(candidateId({ registryRoot: root, sessionId: 'shared-id' }), candidateId({ registryRoot: root, sessionId: 'shared-id', runId: 'other' }));
+});
+
 test('the same session in two registry roots stays two root-scoped candidates', () => {
   const first = join(tmpdir(), 'manager-dedupe-first'), second = join(tmpdir(), 'manager-dedupe-second'), workspace = join(tmpdir(), 'manager-dedupe-ws');
   const report: DiscoveryReport = { runs: [
@@ -209,7 +215,7 @@ test('discovery root set unions the effective default root with the configured r
     observe: async () => { throw new Error('unused'); }, conversation: async () => { throw new Error('unused'); },
     send: async () => { throw new Error('unused'); }, receipt: async () => null };
   const store = new ManagerStore(root), manager = new AgentManager(config, store, adapter);
-  try { await manager.candidates(); assert.deepEqual(calls[0], [root, fallback]); }
+  try { await manager.candidates(); assert.deepEqual(calls[0], [fallback, root]); }
   finally { await manager.stop(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

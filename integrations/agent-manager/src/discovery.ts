@@ -1,9 +1,13 @@
 import type { AgentBinding, CandidateListView, CandidateView, DiscoveredRun, DiscoveryReport } from './contracts.js';
 import { hash } from './config.js';
 
+/** Run key: the session identity when present, otherwise the managed run id. */
+function runKey(run: Partial<Pick<DiscoveredRun, 'sessionId' | 'runId'>>): string {
+  return run.sessionId ? `s:${run.sessionId}` : `r:${run.runId ?? ''}`;
+}
 /** Stable opaque handle for one discovered run. Never exposes the registry path. */
 export function candidateId(run: Pick<DiscoveredRun, 'registryRoot'> & Partial<Pick<DiscoveredRun, 'sessionId' | 'runId'>>): string {
-  return hash(`${run.registryRoot}\0${run.sessionId ?? run.runId ?? ''}`).slice(0, 24);
+  return hash(`${run.registryRoot}\0${runKey(run)}`).slice(0, 24);
 }
 /** A non-sensitive label for a configured root when its listing fails. */
 export function rootLabel(registryRoot: string): string {
@@ -15,7 +19,7 @@ export function rootLabel(registryRoot: string): string {
 // `candidateId` use — so the same session under another root is a different
 // registration, not a duplicate to merge.
 function identity(run: DiscoveredRun): string {
-  return `${run.registryRoot}\0${run.sessionId ? `s:${run.sessionId}` : `r:${run.runId ?? candidateId(run)}`}`;
+  return `${run.registryRoot}\0${runKey(run)}`;
 }
 function merge(preferred: DiscoveredRun, other: DiscoveredRun): DiscoveredRun {
   return { ...preferred, sessionId: preferred.sessionId ?? other.sessionId, runId: preferred.runId ?? other.runId,

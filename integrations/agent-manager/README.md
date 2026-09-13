@@ -102,10 +102,10 @@ re-reads the list; discovery is never polled in the background loop.
 Bounds and safety:
 
 - The root set is exactly the effective default Pi registry (`EDDA_PI_CHANNEL_DIR`,
-  else `~/.edda-pi-sessions`) plus the distinct `registryRoot` values of the already-selected
-  Pi agents, deduplicated and bounded to at most 32 roots; if the configured union exceeds
-  that bound, the dropped roots are reported as a source issue rather than silently ignored.
-  There is no other home/project/directory scan, and no raw
+  else `~/.edda-pi-sessions`), kept first, plus the distinct `registryRoot` values of the
+  already-selected Pi agents, deduplicated and bounded to at most 32 roots; if the configured
+  union exceeds that bound, the dropped roots are reported as a source issue rather than
+  silently ignored. There is no other home/project/directory scan, and no raw
   `owner.json`/`state.json`/`managed/**.json` parsing in the manager: each root is read
   through the same validated Pi inventory used elsewhere: `listManagedRuns` (recorded
   managed runs with their `runId`) and `listSessions` (live or offline sessions). A
