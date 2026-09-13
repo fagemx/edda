@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
 import { lstatSync, readFileSync } from 'node:fs';
-import { ManagerError, MAX_MESSAGE_BYTES, type AgentBinding, type ManagerConfig, type SendRequest } from './contracts.js';
+import { ManagerError, MAX_MESSAGE_BYTES, type AgentBinding, type ManagerConfig, type RegisterCandidateRequest, type SendRequest } from './contracts.js';
 
 export function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ManagerError('INVALID_DATA', '資料格式不正確。');
@@ -79,6 +79,13 @@ export function loadConfig(file: string): ManagerConfig {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 262144) throw new ManagerError('INVALID_CONFIG', '設定必須是小於 256 KiB 的一般檔案。');
   try { return parseConfig(JSON.parse(readFileSync(file, 'utf8')) as unknown); }
   catch (error) { if (error instanceof ManagerError) throw error; throw new ManagerError('INVALID_CONFIG', '無法解析管理設定。'); }
+}
+export function parseRegisterCandidate(input: unknown): RegisterCandidateRequest {
+  const r = object(input), role = r.role;
+  if (role !== 'manager' && role !== 'worker') throw new ManagerError('INVALID_ROLE', '代理角色不正確。');
+  const candidateId = text(r.candidateId, 64).toLowerCase();
+  if (!/^[0-9a-f]{16,64}$/.test(candidateId)) throw new ManagerError('INVALID_ID', '候選項目識別碼格式不正確。');
+  return { candidateId, id: slug(r.id), name: text(r.name), role, projectId: slug(r.projectId) };
 }
 export function parseSend(input: unknown): SendRequest {
   const r = object(input), mode = r.mode;

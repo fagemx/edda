@@ -1,6 +1,7 @@
 import type { AgentView, ConversationView, MessageMode, OperationStatus, OperationView, Overview, PublicEntry, RuntimeState, SendRequest } from '../contracts.js';
 import { MAX_MESSAGE_BYTES } from '../contracts.js';
 import { WorkBoard } from './workboard.js';
+import { CandidatePanel } from './candidates.js';
 
 // Everything from the gateway and browser storage is rendered as text, never HTML.
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] {
@@ -83,6 +84,7 @@ const checking = new Set<string>();
 const entries = new Map<string, PublicEntry>();
 let conversationSignature = '';
 let projectSignature = '';
+let candidatesLoaded = false;
 const agentAges = new Map<string, HTMLElement>();
 const railSignatures = new Map<string, string>();
 function selectedAgent(): AgentView | undefined { return overview?.agents.find(agent => agent.id === selectedId); }
@@ -296,6 +298,8 @@ async function refreshOverview(): Promise<void> {
     renderProjects(); renderAgent(); renderRail();
     workBoard.update(result, selectedAgent()?.projectId ?? null);
     void workBoard.refresh();
+    candidatePanel.update(result);
+    if (!candidatesLoaded) { candidatesLoaded = true; void candidatePanel.refresh(); }
     if (!selectedId && result.agents.length) {
       const first = result.agents.find(a => a.projectId === result.projects[0]?.id && a.role === 'manager') ?? result.agents[0];
       if (first) selectAgent(first.id);
@@ -370,6 +374,7 @@ async function checkReceipt(): Promise<void> {
   finally { checking.delete(id); renderCompose(); renderProjects(); void refreshOverview(); }
 }
 const workBoard = new WorkBoard(get('work-board'), { api, openAgent: selectAgent });
+const candidatePanel = new CandidatePanel(get('candidates'), { api, refresh: () => { void refresh(); } });
 get('compose').addEventListener('submit', event => { void sendMessage(event as SubmitEvent); });
 get('message').addEventListener('input', () => { const draft = draftFor(selectedId); if (draft.pending) return; draft.message = get<HTMLTextAreaElement>('message').value; persist(); renderCompose(); });
 get('mode').addEventListener('change', () => { const draft = draftFor(selectedId); if (draft.pending) return; draft.mode = get<HTMLSelectElement>('mode').value === 'steer' ? 'steer' : 'followUp'; persist(); renderCompose(); });
@@ -378,7 +383,7 @@ get('release-rejected').addEventListener('click', () => { const draft = draftFor
 get('conversation-refresh').addEventListener('click', () => { void refreshConversation(); });
 get('load-more').addEventListener('click', () => { void refreshConversation(); });
 async function refresh(): Promise<void> { await refreshOverview(); await refreshConversation(); }
-get('refresh').addEventListener('click', () => { void refresh(); });
+get('refresh').addEventListener('click', () => { void refresh(); void candidatePanel.refresh(); });
 get('auth-form').addEventListener('submit', event => { event.preventDefault(); token = get<HTMLInputElement>('token').value.trim(); if (!token) return; save(tokenKey, token); get<HTMLInputElement>('token').value = ''; void refresh(); });
 window.addEventListener('online', () => { void refresh(); });
 window.addEventListener('offline', () => { connected = false; get('connection-status').textContent = '離線'; renderCompose(); });
