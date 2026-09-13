@@ -1,7 +1,7 @@
 import { mkdirSync, lstatSync, chmodSync, readFileSync, writeFileSync, renameSync,
   unlinkSync, readdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -35,13 +35,38 @@ export function privateRoot(root) {
   return root;
 }
 
+// A record that exists but cannot be used (bad JSON, wrong shape, oversized, a
+// symlink) degrades per record. readJson keeps strict semantics for callers that
+// must distinguish "absent" from "unusable", but the thrown error is typed and
+// its message never embeds the record bytes (JSON.parse messages do).
+export class RecordUnavailableError extends Error {
+  constructor(record = 'record') {
+    super(`Record unavailable: ${record}; it was not repaired`);
+    this.name = 'RecordUnavailableError';
+    this.code = 'record_unavailable';
+    this.record = record;
+  }
+}
+
 export function readJson(path) {
-  try {
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) throw new Error('Invalid channel record');
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
+  let stat;
+  try { stat = lstatSync(path); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) throw new RecordUnavailableError(basename(path));
+  let text;
+  try { text = readFileSync(path, 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try { return JSON.parse(text); }
+  catch { throw new RecordUnavailableError(basename(path)); }
+}
+
+// Tolerant per-record access: ENOENT yields `{ value: null, error: null }`; an
+// unusable record yields `{ value: null, error: { code, record } }` with no record
+// bytes. Genuine failures (permissions, I/O) still throw so they are not hidden.
+export function readRecord(path) {
+  try { return { value: readJson(path), error: null }; }
+  catch (error) {
+    if (error.code === 'record_unavailable') return { value: null, error: { code: error.code, record: error.record } };
     throw error;
   }
 }
@@ -103,8 +128,11 @@ export function registry(root) {
   return readdirSync(root).filter((name) => /^[0-9a-f]{64}$/.test(name)).map((name) => {
     const dir = join(root, name);
     if (lstatSync(dir).isSymbolicLink()) throw new Error('Symlink in channel registry');
-    return { state: readJson(join(dir, 'state.json')), owner: readJson(join(dir, 'owner.json')) };
-  }).filter((r) => r.state || r.owner);
+    // Read each record independently: a corrupt state.json must not hide a
+    // readable owner.json, and neither may abort the registry-wide read.
+    const state = readRecord(join(dir, 'state.json')), owner = readRecord(join(dir, 'owner.json'));
+    return { dir, state: state.value, owner: owner.value, stateError: state.error, ownerError: owner.error };
+  }).filter((r) => r.state || r.owner || r.stateError || r.ownerError);
 }
 
 export function recover(root, sessionId, instanceId) {

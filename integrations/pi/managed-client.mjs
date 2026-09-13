@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, openSync, closeSync, unlinkSync, realpathSync, lstatSync, readSync } from 'node:fs';
+import { mkdirSync, openSync, closeSync, unlinkSync, realpathSync, lstatSync, readSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { managedDir, installRuntime, verifyRelease, findPiEntry, alive, inside } from './managed-store.mjs';
-import { readJson, writeJson, validateId, digest, sessionDir, recover } from './store.mjs';
+import { readJson, readRecord, writeJson, validateId, digest, sessionDir, recover } from './store.mjs';
 import { requestSession, getReceipt } from './client.mjs';
 import { readTranscript } from './conversation.mjs';
 
@@ -29,7 +29,14 @@ export async function managedStatus(root, id) {
   const { dir, config } = runConfig(root, id);
   try { return await runnerRequest(root, id, 'status'); }
   catch {
-    const state = readJson(join(dir, 'state.json'));
+    const { value: state, error: stateError } = readRecord(join(dir, 'state.json'));
+    // A corrupt state.json is a per-run degradation: config.json still holds the
+    // run identity. Whitelist fields; never spread config (it holds the prompt).
+    if (stateError) return { runId: id, project: config.project, release: config.release,
+      provider: config.provider ?? null, model: config.model ?? null, thinking: config.thinking ?? null,
+      status: 'record_unavailable', state: 'record_unavailable', live: false, lastRecordedPhase: null,
+      initialReceipt: { status: 'unknown', live: false }, error: stateError,
+      nextAction: 'The run state record is unreadable and was not repaired. Use the identity shown; inspect the owned session directory before any resume.' };
     // Runner snapshots refresh the receipt without writing it back to state.json.
     // After stop/crash, the channel receipt is authoritative, not the launch copy.
     let initialReceipt = state?.initialReceipt || null;
@@ -108,29 +115,65 @@ export async function launchManaged(root, { runId = randomUUID(), project, piEnt
   return awaitLaunch(root, runId, serviceId);
 }
 
-function ownedSessionFile(dir, config, state) {
-  if (!state?.sessionId || !state.sessionFile || !inside(join(dir, 'sessions'), state.sessionFile)) throw new Error('No owned persisted session to resume or read');
-  if (lstatSync(join(dir, 'sessions')).isSymbolicLink()) throw new Error('Managed session directory must not be a link');
-  const file = realpathSync(state.sessionFile);
-  if (!inside(realpathSync(join(dir, 'sessions')), file) || !lstatSync(file).isFile()) throw new Error('Session file escaped managed storage');
+function readSessionHeader(file) {
   const headerFd = openSync(file, 'r'), buffer = Buffer.alloc(16384);
   let size;
   try { size = readSync(headerFd, buffer, 0, buffer.length, 0); } finally { closeSync(headerFd); }
   const newline = buffer.subarray(0, size).indexOf(10);
   if (newline < 0) throw new Error('Session header exceeds bounded read');
-  const header = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, newline)));
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, newline))); }
+  catch { throw new Error('Session header is unreadable; it was not repaired'); }
+}
+
+function ownedSessionFile(dir, config, state) {
+  if (!state?.sessionId || !state.sessionFile || !inside(join(dir, 'sessions'), state.sessionFile)) throw new Error('No owned persisted session to resume or read');
+  if (lstatSync(join(dir, 'sessions')).isSymbolicLink()) throw new Error('Managed session directory must not be a link');
+  const file = realpathSync(state.sessionFile);
+  if (!inside(realpathSync(join(dir, 'sessions')), file) || !lstatSync(file).isFile()) throw new Error('Session file escaped managed storage');
+  const header = readSessionHeader(file);
   if (header.type !== 'session' || header.id !== state.sessionId || realpathSync(header.cwd) !== config.project) throw new Error('Session file identity/project mismatch');
   return file;
 }
 
+// Without state.json, recover runId -> sessionId by enumerating the run's owned
+// sessions directory: exactly one transcript whose header matches the project.
+function recoverOwnedSession(dir, config) {
+  const sessionsDir = join(dir, 'sessions');
+  let info; try { info = lstatSync(sessionsDir); } catch { info = null; }
+  if (!info || !info.isDirectory() || info.isSymbolicLink()) throw new Error('Managed session directory must not be a link');
+  const owned = realpathSync(sessionsDir), candidates = [];
+  for (const name of readdirSync(sessionsDir).filter((entry) => entry.endsWith('.jsonl')).sort()) {
+    const file = join(sessionsDir, name);
+    let stat; try { stat = lstatSync(file); } catch { continue; }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024 * 1024) continue;
+    let real; try { real = realpathSync(file); } catch { continue; }
+    if (!inside(owned, real)) continue;
+    let header; try { header = readSessionHeader(real); } catch { continue; }
+    if (header?.type !== 'session' || typeof header.id !== 'string' || !header.id) continue;
+    try { if (realpathSync(header.cwd) === config.project) candidates.push({ file: real, sessionId: header.id }); }
+    catch { /* header cwd is not resolvable; not this project's transcript */ }
+  }
+  if (!candidates.length) throw new Error('No owned persisted session to read');
+  if (candidates.length > 1) throw new Error('Multiple owned persisted sessions; pass an explicit session identity');
+  return candidates[0];
+}
+
 export async function managedConversation(root, id, options = {}) {
   id = validateId(id);
-  const { dir, config } = runConfig(root, id), state = readJson(join(dir, 'state.json'));
-  if (state?.runId !== id) throw new Error('Managed state identity mismatch');
-  const file = ownedSessionFile(dir, config, state);
-  return { runId: id, sessionId: state.sessionId, evidenceSource: 'persisted_session',
-    conversation: await readTranscript(file, options),
-    notice: 'Read-only persisted public history, not live branch or process proof. No session was resumed.' };
+  const { dir, config } = runConfig(root, id);
+  const { value: state, error: stateError } = readRecord(join(dir, 'state.json'));
+  if (!stateError) {
+    if (state?.runId !== id) throw new Error('Managed state identity mismatch');
+    const file = ownedSessionFile(dir, config, state);
+    return { runId: id, sessionId: state.sessionId, evidenceSource: 'persisted_session',
+      conversation: await readTranscript(file, options),
+      notice: 'Read-only persisted public history, not live branch or process proof. No session was resumed.' };
+  }
+  const recovered = recoverOwnedSession(dir, config);
+  return { runId: id, sessionId: recovered.sessionId, evidenceSource: 'persisted_session',
+    error: stateError, recoveredWithoutState: true,
+    conversation: await readTranscript(recovered.file, options),
+    notice: 'Read-only persisted public history recovered from the owned session directory because the run state record is unreadable. Not live branch or process proof; no session was resumed.' };
 }
 
 export async function resumeManaged(root, id) {

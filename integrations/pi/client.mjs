@@ -62,14 +62,24 @@ export async function prepareHandoff(root, sessionId, manifest, expectedRevision
 }
 
 export async function listSessions(root = defaultRoot()) {
-  return Promise.all(registry(root).map(async ({ state, owner }) => {
-    const sessionId = owner?.sessionId || state.sessionId;
+  return Promise.all(registry(root).map(async ({ state, owner, stateError, ownerError }) => {
+    const sessionId = owner?.sessionId || state?.sessionId;
+    // Identity may itself be unrecoverable when both records are unreadable;
+    // still publish a degraded row instead of aborting the whole inventory.
+    if (typeof sessionId !== 'string') return degradedRow(null, stateError || ownerError);
     try { return await requestSession(root, sessionId, '/status'); }
     catch {
+      if (stateError || ownerError || !state) return degradedRow(sessionId, stateError || ownerError, owner);
       return { ...state, sessionId, instanceId: owner?.instanceId || state?.instanceId,
         live: false, state: owner ? 'unreachable' : (state?.state === 'stopped' ? 'stopped' : 'unreachable') };
     }
   }));
+}
+
+function degradedRow(sessionId, error, owner) {
+  return { sessionId, instanceId: owner?.instanceId || null, status: 'record_unavailable',
+    state: 'record_unavailable', live: false,
+    error: { code: 'record_unavailable', record: error?.record || 'state.json' } };
 }
 
 export async function getReceipt(root, sessionId, id) {

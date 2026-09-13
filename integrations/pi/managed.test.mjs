@@ -137,6 +137,31 @@ test('missing session file prevents recovery without spawning a replacement', as
   await writeFile(launched.sessionFile, source);
 });
 
+test('a NUL state.json degrades run-status and recovers run-conversation from the owned session', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO' });
+  await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
+  await stopManaged(f.registry, f.runId);
+  const expected = await managedConversation(f.registry, f.runId);
+  const stateFile = join(managedDir(f.registry, f.runId), 'state.json');
+  const config = readJson(join(managedDir(f.registry, f.runId), 'config.json'));
+  await writeFile(stateFile, Buffer.alloc(1887, 0));
+  const before = await readFile(stateFile);
+  const status = await managedStatus(f.registry, f.runId);
+  assert.equal(status.status, 'record_unavailable');
+  assert.equal(status.live, false);
+  assert.equal(status.runId, f.runId);
+  assert.equal(status.project, config.project);
+  assert.deepEqual(status.release, config.release);
+  assert.deepEqual(status.error, { code: 'record_unavailable', record: 'state.json' });
+  const recovered = await managedConversation(f.registry, f.runId);
+  assert.equal(recovered.evidenceSource, 'persisted_session');
+  assert.equal(recovered.sessionId, expected.sessionId);
+  assert.equal(recovered.conversation.headCursor, expected.conversation.headCursor);
+  assert.deepEqual(recovered.conversation.entries, expected.conversation.entries);
+  assert.deepEqual(await readFile(stateFile), before);
+});
+
 test('system-style ancestor aliases do not reject an owned session during resume', async (t) => {
   const f = await fixture(t);
   const alias = join(f.root, 'ancestor-alias');
