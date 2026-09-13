@@ -101,7 +101,12 @@ export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress 
   const interruption = inbox.filter(e => INTERRUPTING_INBOX.includes(e.kind) && Number.isFinite(Date.parse(e.at)) &&
     (!Number.isFinite(ledgerAt) || Date.parse(e.at) > ledgerAt)).sort((a, b) => b.at.localeCompare(a.at))[0];
   let liveAt = Number.NEGATIVE_INFINITY;
-  for (const b of busy) liveAt = Math.max(liveAt, Date.parse(b.agent?.heartbeatAt ?? b.agent?.observedAt ?? ''));
+  for (const b of busy) {
+    // An unparseable observation timestamp must not silently turn the
+    // comparison into NaN and let an old interruption override a live session.
+    const observed = Date.parse(b.agent?.heartbeatAt ?? b.agent?.observedAt ?? '');
+    if (Number.isFinite(observed)) liveAt = Math.max(liveAt, observed);
+  }
   if (interruption && !(busy.length && liveAt >= Date.parse(interruption.at))) {
     note(`inbox:${interruption.kind} @ ${interruption.at}`);
     note(interruption.summary.slice(0, 160));
@@ -179,12 +184,14 @@ export class WorkManager {
   async list(): Promise<WorksView> {
     const bindings = this.manager.config.works ?? [];
     if (!this.refreshing && !this.closing) {
-      let index = 0;
+      let index = 0, snapshot: AgentView[] | undefined;
       const worker = async () => { while (index < bindings.length && !this.closing) {
         const binding = bindings[index++]!;
         const cached = this.cache.get(binding.id);
         if (cached && Date.now() - cached.at < 10000) continue;
-        try { await this.read(binding); }
+        // One native observation snapshot per pass, not one full overview() per work.
+        snapshot ??= this.manager.overview().agents;
+        try { await this.read(binding, snapshot); }
         catch (error) {
           const view = { ...(cached?.view ?? empty(binding)), error: error instanceof ManagerError ? error.message : '此工作的 Edda 紀錄暫時無法讀取。' };
           this.cache.set(binding.id, { at: Date.now(), view });
@@ -199,11 +206,11 @@ export class WorkManager {
     return { works: bindings.map((b) => this.cache.get(b.id)?.view ?? { ...empty(b), error: '正在取得此工作的 Edda 紀錄。' }), generatedAt: new Date().toISOString() };
   }
   async stop(): Promise<void> { this.closing = true; await Promise.allSettled([...this.queue.values(), ...this.reads.values(), ...(this.refreshing ? [this.refreshing] : [])]); }
-  private async read(binding: WorkBinding): Promise<ReadWork> {
+  private async read(binding: WorkBinding, agents?: AgentView[]): Promise<ReadWork> {
     const pending = this.reads.get(binding.id); if (pending) return pending;
-    const promise = this.doRead(binding).finally(() => this.reads.delete(binding.id)); this.reads.set(binding.id, promise); return promise;
+    const promise = this.doRead(binding, agents).finally(() => this.reads.delete(binding.id)); this.reads.set(binding.id, promise); return promise;
   }
-  private async doRead(binding: WorkBinding): Promise<ReadWork> {
+  private async doRead(binding: WorkBinding, agents?: AgentView[]): Promise<ReadWork> {
     const [task, notes] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding)]);
     const events: ReadWork['events'] = [];
     for (const note of notes) {
@@ -262,7 +269,7 @@ export class WorkManager {
     // Derive the operator-facing phase last: it reads the native task rail,
     // delivery receipt, observed sessions and recorded owner-inbox events, so a
     // fresher native signal overrides a stale manual stage/waiting reason.
-    const native = deriveWorkProgress({ task, view, agents: this.manager.overview().agents,
+    const native = deriveWorkProgress({ task, view, agents: agents ?? this.manager.overview().agents,
       inbox: this.manager.store.inboxEvents(view.id, binding.projectId, binding.taskId, 201) });
     view.phase = native.phase; view.waitingFor = native.waitingFor; view.waitEvidence = native.waitEvidence;
     this.cache.set(binding.id, { at: Date.now(), view }); return { task, events: ordered, view };

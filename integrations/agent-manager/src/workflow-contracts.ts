@@ -8,8 +8,11 @@ export type WorkStage = 'uninitialized' | 'ready' | 'assigned' | 'executing' | '
 // manual `stage` and never lets `task running` imply that a child is working.
 export type WorkPhase = 'uninitialized' | 'ready' | 'assigned' | 'working' | 'waiting' | 'interrupted' | 'delivered' | 'accepted' | 'blocked' | 'failed';
 // Wait target. `'none'` means the work is provably not waiting on another party
-// (it is working, or it reached a terminal phase); `null` means no target can be
-// named from native evidence (unlinked / unavailable) — never a guessed role.
+// (it is working, or it reached a terminal phase). `null` means this projection
+// will not name a target, and `waitEvidence` says which case it is: the session
+// relation is unlinked/unavailable, or the recorded stage leaves the next actor
+// to the operator (uninitialized/ready, a delivery with no reviewer bound, an
+// interruption, a failure). A role is never guessed.
 // `'worker'` is the executing party, which a manager-role controller can also be
 // when it executes the work directly; `'verifier'` is the reviewing party.
 export type WorkWaitingFor = 'worker' | 'verifier' | 'dependency' | 'user_decision' | 'tool' | 'none' | null;

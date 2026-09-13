@@ -110,7 +110,7 @@ export class WorkBoard {
     this.details.append(el('p', work.stage === 'accepted' ? `收尾紀錄由 ${this.name(work.ownerAgentId)} 負責。` : `目前由 ${this.name(nextOwner)} 接續處理。`, 'muted'));
     // Native phase first: it is the authoritative reading of task/delivery/session/
     // inbox events. The manual ledger stage stays visible but secondary.
-    this.details.append(el('p', `原生階段：${phases[work.phase]}${work.waitingFor ? ` · ${waitTargets[work.waitingFor]}` : ''}`, 'work-phase'));
+    this.details.append(el('p', `原生階段：${phases[work.phase]}${work.waitingFor ? ` · ${waitTargets[work.waitingFor]}` : ''}`, 'work-next'));
     if (work.waitEvidence) this.details.append(el('p', `原生證據：${work.waitEvidence}`, 'public-text'));
     this.details.append(el('p', `Edda 任務狀態：${work.taskStatus} · 手動交接紀錄：${labels[work.stage]}`, 'muted'));
     if (stageStale(work)) this.details.append(el('p', '手動交接紀錄顯示執行中，但原生來源無法確認有子代理正在工作；以原生階段為準。', 'notice'));
