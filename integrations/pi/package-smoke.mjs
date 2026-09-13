@@ -1,8 +1,8 @@
 // Exercise the installed npm shim, not imports from the checkout. No paid models.
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, cp, rename, writeFile, readFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, cp, rename, writeFile, readFile, rm, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -51,7 +51,10 @@ try {
   await rename(staged, join(root, 'source-unavailable'));
   assert.match(await cli(['--version']), /^edda-pi 0\.8\.0$/);
   const info = await cli(['runtime-info'], true);
-  assert.ok(info.cli.startsWith(prefix));
+  // macOS reports tmpdir under /var while ESM resolves it through /private/var.
+  const [realCli, realPrefix] = await Promise.all([realpath(info.cli), realpath(prefix)]);
+  const installedPath = relative(realPrefix, realCli);
+  assert.ok(installedPath && !installedPath.startsWith('..') && !isAbsolute(installedPath));
   assert.match(await readFile(info.guide, 'utf8'), /new session/i);
   assert.deepEqual((await cli(['runs'])).runs, []);
 
