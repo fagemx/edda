@@ -172,13 +172,23 @@ fn ensure_layout(dir: &Path) -> Result<()> {
 fn write_atomic(path: &Path, record: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(record)?;
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
-    {
-        let mut file =
-            fs::File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
+    if let Err(error) = write_temp(&temp, &bytes) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
     }
-    fs::rename(&temp, path).with_context(|| format!("rename into {}", path.display()))?;
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error).with_context(|| format!("rename into {}", path.display()));
+    }
+    Ok(())
+}
+
+/// Write `bytes` to `temp` and flush them to disk, so the later rename into the
+/// final path can never expose a partially written file.
+fn write_temp(temp: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = fs::File::create(temp).with_context(|| format!("create {}", temp.display()))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -233,15 +243,26 @@ fn read_message(dir: &Path, id: &str) -> Result<Option<MessageRecord>> {
     read_json(&message_file(dir, id))
 }
 
+/// A claim marker counts only when it holds a complete record. A zero-length
+/// marker is a crash-incomplete write and must not hide the return forever.
 fn is_claimed(dir: &Path, id: &str) -> Result<bool> {
-    Ok(claim_file(dir, id).exists())
+    let path = claim_file(dir, id);
+    match fs::metadata(&path) {
+        Ok(meta) => Ok(meta.len() > 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("stat {}", path.display())),
+    }
 }
 
 fn pending_messages(dir: &Path, owner: &str) -> Result<Vec<MessageRecord>> {
-    let mut messages = list_json::<MessageRecord>(&dir.join("messages"))?;
-    messages.retain(|m| m.owner == owner && !is_claimed(dir, &m.id).unwrap_or(true));
-    messages.sort_by(|a, b| a.posted_at.cmp(&b.posted_at).then_with(|| a.id.cmp(&b.id)));
-    Ok(messages)
+    let mut pending = Vec::new();
+    for message in list_json::<MessageRecord>(&dir.join("messages"))? {
+        if message.owner == owner && !is_claimed(dir, &message.id)? {
+            pending.push(message);
+        }
+    }
+    pending.sort_by(|a, b| a.posted_at.cmp(&b.posted_at).then_with(|| a.id.cmp(&b.id)));
+    Ok(pending)
 }
 
 pub fn execute(cmd: ReturnCmd, repo_root: &Path) -> Result<()> {
@@ -317,14 +338,19 @@ fn post(dir: &Path, args: PostArgs) -> Result<()> {
         Some(path) => Some(fs::read_to_string(path).with_context(|| format!("read {path}"))?),
     };
     let _guard = lock(dir)?;
+    // Content hash over the whole record: a corrected --result or
+    // --deliverable is a new return, while an identical re-post keeps the same
+    // id and stays idempotent.
     let id = sha256_hex(
         format!(
-            "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+            "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
             args.owner,
             args.work,
             args.status,
             args.session,
-            message.as_deref().unwrap_or("")
+            message.as_deref().unwrap_or(""),
+            args.result.as_deref().unwrap_or(""),
+            args.deliverable.as_deref().unwrap_or("")
         )
         .as_bytes(),
     );
@@ -416,15 +442,13 @@ fn claim(dir: &Path, args: ClaimArgs) -> Result<()> {
             claimed_by_session: args.session.clone(),
             claimed_at: now(),
         };
-        let path = claim_file(dir, &message.id);
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(&serde_json::to_vec_pretty(&claim)?)?;
-                claimed.push(message);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error).with_context(|| format!("claim {}", path.display())),
-        }
+        // write_atomic (temp + sync + rename) means a crash cannot leave a
+        // zero-length marker at the final path and hide this return forever.
+        // The exclusive lock plus pending_messages' non-empty-marker filter
+        // make the write exactly-once: a valid marker is skipped, a missing or
+        // zero-length one is claimed now.
+        write_atomic(&claim_file(dir, &message.id), &claim)?;
+        claimed.push(message);
     }
     if args.json {
         println!(
@@ -453,7 +477,17 @@ fn claim(dir: &Path, args: ClaimArgs) -> Result<()> {
     Ok(())
 }
 
+/// Ids are sha256 hex; rejecting anything else keeps caller input out of the
+/// filesystem path so `show --id` cannot traverse out of the mailbox.
+fn validate_message_id(id: &str) -> Result<()> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid return id '{id}': expected 64 hex characters");
+    }
+    Ok(())
+}
+
 fn show(dir: &Path, args: ShowArgs) -> Result<()> {
+    validate_message_id(&args.id)?;
     let Some(message) = read_message(dir, &args.id)? else {
         bail!("unknown return id '{}'", args.id);
     };
@@ -526,14 +560,25 @@ mod tests {
     }
 
     fn post(dir: &Path, owner: &str, work: &str, session: &str) -> Result<()> {
+        post_with(dir, owner, work, session, "ok", "out.md")
+    }
+
+    fn post_with(
+        dir: &Path,
+        owner: &str,
+        work: &str,
+        session: &str,
+        result: &str,
+        deliverable: &str,
+    ) -> Result<()> {
         super::post(
             dir,
             PostArgs {
                 owner: owner.into(),
                 work: work.into(),
                 status: "done".into(),
-                result: Some("ok".into()),
-                deliverable: Some("out.md".into()),
+                result: Some(result.into()),
+                deliverable: Some(deliverable.into()),
                 message_file: None,
                 session: session.into(),
                 json: true,
@@ -597,6 +642,41 @@ mod tests {
     }
 
     #[test]
+    fn a_corrected_result_is_a_new_return_not_a_silent_skip() {
+        let dir = temp();
+        bind(&dir, "assistant/p", "s1", None).unwrap();
+        post(&dir, "assistant/p", "job-a", "controller-1").unwrap();
+        post_with(
+            &dir,
+            "assistant/p",
+            "job-a",
+            "controller-1",
+            "corrected",
+            "out2.md",
+        )
+        .unwrap();
+        let pending = pending_messages(&dir, "assistant/p").unwrap();
+        assert_eq!(pending.len(), 2, "a corrected re-post must not be dropped");
+        assert!(pending
+            .iter()
+            .any(|m| m.result.as_deref() == Some("corrected")));
+        assert!(pending
+            .iter()
+            .any(|m| m.deliverable.as_deref() == Some("out2.md")));
+        // The identical re-post of the corrected record is still idempotent.
+        post_with(
+            &dir,
+            "assistant/p",
+            "job-a",
+            "controller-1",
+            "corrected",
+            "out2.md",
+        )
+        .unwrap();
+        assert_eq!(pending_messages(&dir, "assistant/p").unwrap().len(), 2);
+    }
+
+    #[test]
     fn same_session_behaviour_is_unchanged() {
         let dir = temp();
         bind(&dir, "assistant/p", "s1", None).unwrap();
@@ -626,5 +706,58 @@ mod tests {
         assert!(!is_claimed(&dir, &id).unwrap());
         claim(&dir, "assistant/p", "s1").unwrap();
         assert!(is_claimed(&dir, &id).unwrap());
+    }
+
+    #[test]
+    fn an_empty_claim_marker_does_not_hide_a_return() {
+        let dir = temp();
+        bind(&dir, "assistant/p", "s1", None).unwrap();
+        post(&dir, "assistant/p", "job-a", "controller-1").unwrap();
+        let id = pending_messages(&dir, "assistant/p").unwrap()[0].id.clone();
+        // Simulate a crash after create but before the record was written.
+        fs::write(claim_file(&dir, &id), b"").unwrap();
+        assert!(
+            !is_claimed(&dir, &id).unwrap(),
+            "an empty marker is not a claim"
+        );
+        assert_eq!(pending_messages(&dir, "assistant/p").unwrap().len(), 1);
+        claim(&dir, "assistant/p", "s1").unwrap();
+        assert!(is_claimed(&dir, &id).unwrap());
+        let written = fs::read(claim_file(&dir, &id)).unwrap();
+        assert!(serde_json::from_slice::<ClaimRecord>(&written).is_ok());
+        assert!(pending_messages(&dir, "assistant/p").unwrap().is_empty());
+    }
+
+    #[test]
+    fn show_rejects_an_id_that_is_not_a_content_hash() {
+        let dir = temp();
+        let traversal = show(
+            &dir,
+            ShowArgs {
+                id: "../owners/x".into(),
+                json: false,
+            },
+        )
+        .unwrap_err();
+        assert!(traversal.to_string().contains("invalid return id"));
+        let short = show(
+            &dir,
+            ShowArgs {
+                id: "abc".into(),
+                json: false,
+            },
+        )
+        .unwrap_err();
+        assert!(short.to_string().contains("invalid return id"));
+        // A well-formed 64-hex id that does not exist is a clean miss.
+        let missing = show(
+            &dir,
+            ShowArgs {
+                id: "a".repeat(64),
+                json: true,
+            },
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("unknown return id"));
     }
 }

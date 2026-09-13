@@ -113,6 +113,8 @@ not the controller, worker or implementer of this project's jobs.
    Keep the printed runId.
 4. Reply with the runId, where the deliverable lands, and that you will report the outcome.
 ## Result return (owner-bound; survives assistant replacement)
+- `edda return` is added by issue #1192 (PR #1193) and exists only in a build that includes it; an
+  older installed `edda` exits non-zero for it, where the session-addressed path below still works.
 - Register your owner reference once, at the start:
   edda return bind --owner "assistant/<project>" --session "$EDDA_SESSION_ID"
   The reference is stable; the session is only its current holder. A replacement assistant re-binds with
@@ -175,8 +177,9 @@ and let every session inherit the **same** `EDDA_PI_CHANNEL_DIR` so all runs sha
 
 ## 2. Receive the controller's completion or failure
 
-A controller reports back against the **owner reference** in its brief (`edda return post`; the legacy
-session-addressed `edda-pi send` to the assistant's `sessionId` still works for the same-session case).
+A controller reports back against the **owner reference** in its brief (`edda return post`, added by
+issue #1192 and present only in a build that includes it; the legacy session-addressed `edda-pi send`
+to the assistant's `sessionId` still works for the same-session case).
 The owner reference is stable across assistant replacement: the current holder claims pending returns
 with `edda return claim` at the start of a turn, and each return is presented exactly once. On a
 **live, idle** managed Pi session a direct `edda-pi send` also starts a new turn with no user prompt and

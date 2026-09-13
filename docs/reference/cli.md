@@ -1081,6 +1081,9 @@ Owner-bound return continuity: a delegated job's completion survives replacement
 session that delegated it. Returns are posted against a stable owner reference, and the current holder
 claims each one exactly once.
 
+This verb is added by issue #1192 (PR #1193) and is present only in a build that includes it; an older
+installed `edda` does not know `edda return` and exits non-zero.
+
 ```bash
 edda return bind --owner assistant/<project> --session "$EDDA_SESSION_ID" [--replaces-session OLD] [--json]
 edda return post --owner assistant/<project> --work <job> --status done|failed [--result T] [--deliverable P] [--message-file F] --session C [--json]
