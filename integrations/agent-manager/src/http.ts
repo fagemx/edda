@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { AgentManager } from './manager.js';
 import { ManagerError, MAX_BODY_BYTES } from './contracts.js';
 import { parseSend, uuid } from './config.js';
+import { parseWorkAction } from './workflow.js';
 
 function authorized(header: string | undefined, token: string): boolean {
   const expected = Buffer.from(`Bearer ${token}`), value = Buffer.from(header || '');
@@ -35,6 +36,7 @@ export async function serve(manager: AgentManager, token: string, options: { por
   const assets = new Map([
     ['/', { file: join(root, 'src/web/index.html'), type: 'text/html; charset=utf-8' }],
     ['/app.js', { file: join(root, 'dist/src/web/app.js'), type: 'text/javascript; charset=utf-8' }],
+    ['/workboard.js', { file: join(root, 'dist/src/web/workboard.js'), type: 'text/javascript; charset=utf-8' }],
     ['/contracts.js', { file: join(root, 'dist/src/contracts.js'), type: 'text/javascript; charset=utf-8' }],
     ['/style.css', { file: join(root, 'src/web/style.css'), type: 'text/css; charset=utf-8' }],
   ]);
@@ -55,6 +57,9 @@ export async function serve(manager: AgentManager, token: string, options: { por
       if (req.method === 'GET' && asset) { res.writeHead(200, { 'content-type': asset.type }); res.end(readFileSync(asset.file)); return; }
       if (!authorized(req.headers.authorization, token)) throw new ManagerError('UNAUTHORIZED', '請使用啟動時提供的管理台連結。', 401);
       if (req.method === 'GET' && url.pathname === '/api/overview') { json(200, manager.overview()); return; }
+      if (req.method === 'GET' && url.pathname === '/api/works') { json(200, await manager.works.list()); return; }
+      const work = /^\/api\/works\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/actions$/.exec(url.pathname);
+      if (req.method === 'POST' && work?.[1]) { json(200, await manager.works.act(work[1], parseWorkAction(await body(req)))); return; }
       if (req.method === 'GET' && url.pathname === '/api/service') { json(200, { version: 1, startedAt: manager.startedAt, agents: manager.config.agents.length }); return; }
       const agent = /^\/api\/agents\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/(conversation|messages)$/.exec(url.pathname);
       if (agent?.[1] && agent[2] === 'conversation' && req.method === 'GET') {

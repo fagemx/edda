@@ -28,6 +28,7 @@
       <p class="sidebar-footnote">執行狀態供協作參考。閒置或執行結束，不代表工作已驗收。</p>
     </nav>
     <main id="workspace" class="workspace">
+      <section id="work-board" class="work-board" aria-label="工作交接與介入"></section>
       <div id="welcome" class="welcome"><span class="welcome-symbol" aria-hidden="true">↗</span><h2>選擇一位代理，接續工作</h2><p>查看公開對話與最近進度，再向明確的收件人傳送新訊息。</p></div>
       <section id="agent-panel" hidden aria-labelledby="agent-name">
         <header class="agent-header"><div><p id="agent-project" class="muted"></p><h2 id="agent-name"></h2><p id="agent-identity" class="identity"></p></div><div id="agent-status"></div></header>
@@ -42,6 +43,7 @@
         </section>
         <form id="compose" class="compose">
           <div class="recipient"><label for="message">新訊息</label><span>收件人：<strong id="recipient"></strong></span></div>
+          <p class="muted">一般對話使用這裡；變更工作方向請用上方「變更工作指示」，讓負責人同步掌握。</p>
           <textarea id="message" rows="4" placeholder="補充方向、提出問題，或交付下一步工作…" aria-describedby="mode-help draft-status" required></textarea>
           <div class="compose-controls"><label class="mode-label" for="mode">送出方式<select id="mode"><option value="followUp">接續目前工作</option><option value="steer">優先指示</option></select></label><button id="send" class="primary" type="submit">傳送新訊息</button></div>
           <p id="mode-help" class="muted">目前工作結束後，再處理這則訊息。</p>

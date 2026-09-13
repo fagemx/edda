@@ -29,6 +29,10 @@ export class ManagerStore {
   close(): void { this.db.close(); }
   setting(key: string): string | null { const row = this.db.prepare('SELECT value FROM settings WHERE key=?').get(key); return typeof row?.value === 'string' ? row.value : null; }
   putSetting(key: string, value: string): void { this.db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
+  ensureSetting(key: string, value: string): string {
+    this.db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)').run(key, value);
+    return this.setting(key)!;
+  }
   operation(id: string): OperationView | null {
     const row = this.db.prepare('SELECT data FROM operations WHERE id=?').get(id);
     return typeof row?.data === 'string' ? JSON.parse(row.data) as OperationView : null;

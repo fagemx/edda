@@ -60,7 +60,7 @@ Do not enumerate every directory of an unrelated Pi registry. Each agent has:
 }
 ```
 
-The complete file is `{version:1, projects:[...], agents:[...], refreshMs:3000}`.
+The complete file is `{version:1, projects:[...], agents:[...], refreshMs:3000, works:[]}`.
 Projects contain `id`, `name`, `priority` (lower first) and `resources` (registered
 name/kind/details/owner/source, not live health). `runId` and `summaryFile` accept
 JSON null. The importer handles the current Character/Edda delegation index and
@@ -113,7 +113,88 @@ node dist/test/offline-smoke.js C:/path/to/pi/dist/bundle/cli.js --serve
 ```
 
 The smoke preserves its private receipt/workspace path for inspection. Real agents
-are never used as test recipients. General delegation, non-Pi runtimes, structured
+are never used as test recipients. Autonomous delegation, non-Pi runtimes, structured
 inbox approvals, automatic Docker operations, CPU/RSS sampling and remote hosting
 remain subsequent slices. Opening a conversation does not claim exclusive control
 over independent clients or the parent's existing monitoring automation.
+
+## Work ownership and handoff
+
+Select existing Edda tasks in the optional `works` array while the console is
+stopped. The `workspace` must resolve the intended Edda project; it need not be
+the current assignee's worktree. `ownerAgentId` names a selected manager in the
+same project. No task is automatically created or completed by the console.
+
+```json
+{
+  "id": "review-delivery",
+  "projectId": "edda",
+  "taskId": 217,
+  "workspace": "C:/ai_agent/edda",
+  "ownerAgentId": "edda"
+}
+```
+
+Use an actual task number from `edda task list`, not the illustrative number
+above. The task's title/status/receipt are read from `edda task show --json`.
+Versioned coordination notes tagged `manager-work-<taskId>` in that same ledger
+retain assignments, direction changes, evidence and closure. The task rail
+remains canonical; coordination acceptance neither runs a merge nor sets task
+status to done. Preserve original notes rather than editing their JSON by hand.
+
+The work card separates the closure owner, current assignee, next step and task
+status from message delivery. Choose **安排下一步**, then **交辦給代理** with a
+bounded brief. A channel accepting a message does not mean the agent has started.
+A started receipt proves execution; a settled receipt means the reply ended and
+delivery evidence is still due. Record **交付** with evidence, then have the
+authorized owner record **驗收與收尾** after the project's existing gates.
+
+Use **變更工作指示** for a direction change that must remain visible to the owner.
+It sends a priority message to the current assignee and keeps a pending instruction
+on the work card. **記錄指示已確認** requires evidence of the agent's explicit
+acknowledgement. This is an operator attestation, not a model-inferred agreement.
+Ordinary questions can still use the agent conversation beneath the work card.
+Viewing or acknowledging a work item does not grant a new runtime permission.
+
+The browser preserves full action requests before POST. If the result is unknown,
+**查詢／恢復原操作** submits that same request and ID; do not manufacture a new ID.
+A stale revision rejects the edit and offers to preserve the draft for review
+against the latest work. Uncertain writes retain their original request. Service
+restart reads the same notes and message journal; it never automatically replays
+a send. Losing the original message journal is not proof that no send occurred.
+
+API (same loopback bearer/Host/Origin boundaries as conversations):
+
+- `GET /api/works` → `{works, generatedAt}`; per-work unavailable/error state.
+- `POST /api/works/:id/actions` → the updated `WorkView` and `confirmedActionId`.
+  Every action includes `actionId` (UUID) and the observed `revision`.
+- Actions: `initialize {nextStep}`, `assign {agentId,nextStep,send}`,
+  `intervene {send}`, `acknowledge {instructionId,evidence}`,
+  `deliver {evidence,nextStep}`, `accept {evidence}`, `block {reason,nextStep}`.
+  `send` is the existing `SendRequest` including its own stable operation UUID,
+  current selection revision and exact instance. See `workflow-contracts.ts`.
+
+Workspaces/executables cannot be supplied in an HTTP action. The adapter calls
+only fixed `task show`, `log`, and `note` argument vectors with no shell. Each
+selected work supports at most 256 coordination events; exceeding that limit
+reports an explicit error, preserving history for a successor task. Per-task
+cross-process locks contain no task state and are released by the OS after a crash.
+Serialized coordination events are limited to 12,000 characters, including JSON
+escaping and target metadata, to fit Windows command arguments. A larger event is
+rejected before recording or sending; shorten its message/evidence. Work snapshots
+return within 1.5 seconds with loading rows if needed; a shared background refresh
+uses at most two concurrent work reads and a ten-second per-work cache.
+
+Explicit real Edda + installed Pi offline lifecycle (temporary isolated project,
+no paid model invocation and no production test recipients):
+
+```powershell
+node dist/test/offline-smoke.js C:/path/to/pi/dist/bundle/cli.js --workflow
+# Optional interactive browser fixture:
+node dist/test/offline-smoke.js C:/path/to/pi/dist/bundle/cli.js --workflow --serve
+```
+
+The receipt proves one send despite duplicate requests, settled versus accepted
+separation, explicit delivery/closure and missing-task isolation. Browser work
+cards are available to the owner even when another agent is selected in the same
+project. They do not yet schedule an autonomous owner wake-up or remote notification.

@@ -1,5 +1,6 @@
 import type { AgentView, ConversationView, MessageMode, OperationStatus, OperationView, Overview, PublicEntry, RuntimeState, SendRequest } from '../contracts.js';
 import { MAX_MESSAGE_BYTES } from '../contracts.js';
+import { WorkBoard } from './workboard.js';
 
 // Everything from the gateway and browser storage is rendered as text, never HTML.
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] {
@@ -105,7 +106,7 @@ function operationBadge(operation: OperationView): HTMLElement {
   return badge(operationLabels[operation.status] ?? '結果不明', operation.status === 'failed' ? 'danger' : ['prepared', 'unknown', 'unconfirmed'].includes(operation.status) ? 'attention' : 'active');
 }
 class ApiError extends Error { constructor(public code: string, message: string, public status: number) { super(message); } }
-async function api<T>(path: string, body?: SendRequest): Promise<T> {
+async function api<T>(path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   if (body) headers['Content-Type'] = 'application/json';
   const response = await fetch(path, { method: body ? 'POST' : 'GET', headers, ...(body ? { body: JSON.stringify(body) } : {}), cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(15000) });
@@ -261,6 +262,7 @@ function selectAgent(id: string): void {
   selectedId = id; generation++; conversation = null; entries.clear(); conversationSignature = 'reset'; persist();
   const draft = draftFor(id); get<HTMLTextAreaElement>('message').value = draft.message; get<HTMLSelectElement>('mode').value = draft.mode;
   notice('conversation-notice', ''); renderProjects(); renderAgent(); renderRail(); renderConversation();
+  if (overview) workBoard.update(overview, selectedAgent()?.projectId ?? null);
   void refreshConversation();
 }
 function applyOperation(operation: OperationView): void {
@@ -292,6 +294,8 @@ async function refreshOverview(): Promise<void> {
     if (selectedId && after && (!before || before.instanceId !== after.instanceId || before.selectionRevision !== after.selectionRevision)) selectAgentAfterIdentityChange();
     if (selectedId && !after) { generation++; conversation = null; entries.clear(); notice('global-notice', '原收件人已移出選取清單；其草稿與待確認請求仍保留。請選擇其他代理。'); }
     renderProjects(); renderAgent(); renderRail();
+    workBoard.update(result, selectedAgent()?.projectId ?? null);
+    void workBoard.refresh();
     if (!selectedId && result.agents.length) {
       const first = result.agents.find(a => a.projectId === result.projects[0]?.id && a.role === 'manager') ?? result.agents[0];
       if (first) selectAgent(first.id);
@@ -365,6 +369,7 @@ async function checkReceipt(): Promise<void> {
   catch (error) { pending.notice = error instanceof ApiError && error.status === 404 ? '工作台目前找不到原始收據。送出結果仍不明，原始請求已保留。' : errorText(error); persist(); }
   finally { checking.delete(id); renderCompose(); renderProjects(); void refreshOverview(); }
 }
+const workBoard = new WorkBoard(get('work-board'), { api, openAgent: selectAgent });
 get('compose').addEventListener('submit', event => { void sendMessage(event as SubmitEvent); });
 get('message').addEventListener('input', () => { const draft = draftFor(selectedId); if (draft.pending) return; draft.message = get<HTMLTextAreaElement>('message').value; persist(); renderCompose(); });
 get('mode').addEventListener('change', () => { const draft = draftFor(selectedId); if (draft.pending) return; draft.mode = get<HTMLSelectElement>('mode').value === 'steer' ? 'steer' : 'followUp'; persist(); renderCompose(); });

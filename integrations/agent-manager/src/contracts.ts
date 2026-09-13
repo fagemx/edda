@@ -11,7 +11,7 @@ export interface AgentBinding {
   registryRoot: string; sessionId: string; runId: string | null; workspace: string;
   summaryFile: string | null;
 }
-export interface ManagerConfig { version: 1; projects: ProjectView[]; agents: AgentBinding[]; refreshMs: number }
+export interface ManagerConfig { version: 1; projects: ProjectView[]; agents: AgentBinding[]; refreshMs: number; works?: import('./workflow-contracts.js').WorkBinding[] }
 export interface ModelView { provider: string; id: string }
 export interface UsageView { tokens: number | null; reportedCost: number | null }
 export interface PublicEntry {
