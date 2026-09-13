@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ManagerError, type AdapterReceipt, type AgentBinding, type AgentObservation, type ConversationView, type OperationStatus, type OperationView, type PiAdapter, type PublicEntry, type RuntimeState, type SendRequest } from './contracts.js';
+import { ManagerError, type AdapterReceipt, type AgentBinding, type AgentObservation, type ConversationView, type DiscoveredRun, type DiscoveryReport, type OperationStatus, type OperationView, type PiAdapter, type PublicEntry, type RuntimeState, type SendRequest } from './contracts.js';
 import type { NativeSessionEvent } from './session-contracts.js';
 
 // This is the only legacy-module boundary. All values crossing back are projected
@@ -9,10 +9,15 @@ import type { NativeSessionEvent } from './session-contracts.js';
 interface LegacyClient {
   requestSession(root: string, id: string, path: string, body?: unknown, timeout?: number, instance?: string): Promise<unknown>;
   getReceipt(root: string, id: string, operationId: string): Promise<unknown>;
+  listSessions?(root: string): Promise<unknown>;
 }
 interface LegacyManaged { managedStatus(root: string, id: string): Promise<unknown> }
-interface LegacyStore { privateRoot(root: string): string }
+interface LegacyActivation { listManagedRuns?(root: string, options?: { limit?: number }): Promise<unknown> }
+interface LegacyStore { privateRoot(root: string): string; defaultRoot?(): string }
 export const defaultPiRoot = (): string => fileURLToPath(new URL('../../../pi/', import.meta.url));
+async function optionalModule<T>(piRoot: string, file: string): Promise<T> {
+  try { return await import(pathToFileURL(resolve(piRoot, file)).href) as T; } catch { return {} as T; }
+}
 export async function secureRoot(root: string, piRoot = defaultPiRoot()): Promise<string> {
   const legacy = await import(pathToFileURL(resolve(piRoot, 'store.mjs')).href) as LegacyStore;
   return legacy.privateRoot(root);
@@ -22,6 +27,8 @@ const str = (value: unknown, max = 1000): string | null => typeof value === 'str
 const date = (value: unknown): string | null => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
 const number = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const states: RuntimeState[] = ['running', 'executing_tool', 'idle', 'waiting_user', 'stopped', 'unknown'];
+const discoveryStates: RuntimeState[] = ['running', 'executing_tool', 'idle', 'waiting_user', 'stopped', 'unavailable', 'unknown'];
+const MAX_DISCOVERY_ROOTS = 32, MAX_DISCOVERY_ROWS = 200, MAX_MANAGED_RUNS = 100;
 const statuses: OperationStatus[] = ['prepared', 'unconfirmed', 'accepted', 'queued', 'started', 'settled', 'failed', 'unknown'];
 function canonical(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
 function assertState(binding: AgentBinding, value: unknown, instance?: string): Record<string, unknown> {
@@ -56,16 +63,74 @@ export const unavailable = (): AgentObservation => ({ state: 'unavailable', inst
 export class ChannelAdapter implements PiAdapter {
   private cache = new Map<string, { instance: string; progress: string | null; latest: PublicEntry | null }>();
   private nativeEvents = new Map<string, Map<string, NativeSessionEvent>>();
-  private constructor(private client: LegacyClient, private managed: LegacyManaged) {}
+  private constructor(private client: LegacyClient, private managed: LegacyManaged, private activation: LegacyActivation = {}, private defaultRootFn?: () => string) {}
   static async create(piRoot = defaultPiRoot()): Promise<ChannelAdapter> {
     const client = await import(pathToFileURL(resolve(piRoot, 'client.mjs')).href) as LegacyClient;
     const managed = await import(pathToFileURL(resolve(piRoot, 'managed-client.mjs')).href) as LegacyManaged;
     if (typeof client.requestSession !== 'function' || typeof client.getReceipt !== 'function' || typeof managed.managedStatus !== 'function') throw new Error('Unsupported Pi adapter library');
-    return new ChannelAdapter(client, managed);
+    const activation = await optionalModule<LegacyActivation>(piRoot, 'activation.mjs');
+    const store = await optionalModule<LegacyStore>(piRoot, 'store.mjs');
+    return new ChannelAdapter(client, managed, activation, typeof store.defaultRoot === 'function' ? store.defaultRoot : undefined);
+  }
+  // The normal/effective Pi registry (EDDA_PI_CHANNEL_DIR, else ~/.edda-pi-sessions)
+  // is a bounded, documented root, not an arbitrary home scan. Null when the
+  // loaded Pi module does not expose it.
+  defaultRegistryRoot(): string | null {
+    if (!this.defaultRootFn) return null;
+    try { return this.defaultRootFn(); } catch { return null; }
   }
   validateMessage(request: SendRequest): void {
     const envelope = { id: request.operationId, message: request.message, sender: 'operator-console', mode: request.mode };
     if (Buffer.byteLength(JSON.stringify(envelope)) > 24576) throw new ManagerError('TOO_LARGE', '訊息包含較多跳脫字元，超過代理通道的容量；請縮短內容。', 413);
+  }
+  // Read-only bounded discovery over the roots the operator already configured.
+  // It reuses the validated managed-run and session listings (owner identity is
+  // authenticated by Pi), never reads registry files here, and never assigns,
+  // sends or launches. A managed run and its live session merge into one row.
+  async discover(registryRoots: string[]): Promise<DiscoveryReport> {
+    const report: DiscoveryReport = { runs: [], failures: [] };
+    const roots = [...new Set(registryRoots)].slice(0, MAX_DISCOVERY_ROOTS);
+    const listSessions = this.client.listSessions, listManaged = this.activation.listManagedRuns;
+    if (typeof listSessions !== 'function' && typeof listManaged !== 'function') {
+      report.failures.push(...roots.map((registryRoot) => ({ registryRoot, message: '這個 Pi 版本沒有可用的探索介面；未進行探索。' })));
+      return report;
+    }
+    await Promise.all(roots.map(async (root) => {
+      const found: DiscoveredRun[] = [], problems: string[] = [];
+      if (typeof listManaged === 'function') {
+        try {
+          const listing = record(await listManaged(root, { limit: MAX_MANAGED_RUNS })), runs = Array.isArray(listing.runs) ? listing.runs : [];
+          for (const raw of runs.slice(0, MAX_MANAGED_RUNS)) {
+            const value = record(raw), runId = str(value.runId, 64);
+            if (!runId || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(runId)) continue;
+            const sessionId = typeof value.sessionId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(value.sessionId) ? value.sessionId : null;
+            const project = value.project, phase = str(value.recordedPhase, 40) ?? 'unknown', stopped = ['stopped', 'failed', 'exited'].includes(phase);
+            found.push({ registryRoot: root, sessionId, runId, instanceId: null, live: false, source: 'recorded',
+              state: stopped ? 'stopped' : 'unknown', workspace: typeof project === 'string' && isAbsolute(project) ? project : null,
+              lastProgressAt: date(value.updatedAt), reason: str(value.error, 300) ?? (stopped ? '上次管理紀錄為已停止；目前沒有即時連線。' : '僅有管理紀錄，沒有即時連線；不代表工作已完成。') });
+          }
+        } catch { problems.push('此來源的管理執行清單目前無法讀取；其他來源不受影響。'); }
+      }
+      if (typeof listSessions === 'function') {
+        try {
+          const rows = await listSessions(root);
+          if (!Array.isArray(rows)) problems.push('此來源的 session 清單格式不正確；未採用任何項目。');
+          else for (const raw of rows.slice(0, MAX_DISCOVERY_ROWS)) {
+            const value = record(raw), sessionId = str(value.sessionId, 200);
+            const live = value.live === true, cwd = value.cwd;
+            if (!sessionId || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(sessionId)) continue;
+            const reason = live ? null : value.state === 'stopped' ? '上次紀錄為已停止；目前沒有即時連線。' : '目前沒有可連線的註冊擁有者；不代表工作已完成。';
+            found.push({ registryRoot: root, sessionId, runId: null, instanceId: typeof value.instanceId === 'string' ? value.instanceId : null,
+              state: discoveryStates.includes(value.state as RuntimeState) ? value.state as RuntimeState : value.state === 'unreachable' ? 'unavailable' : 'unknown',
+              live, source: live ? 'live' : 'recorded', workspace: typeof cwd === 'string' && isAbsolute(cwd) ? cwd : null,
+              lastProgressAt: date(value.lastProgressAt), reason });
+          }
+        } catch { problems.push('此來源的 session 清單目前無法讀取；其他來源不受影響。'); }
+      }
+      report.runs.push(...found);
+      if (problems.length) report.failures.push({ registryRoot: root, message: problems.join(' ') });
+    }));
+    return report;
   }
   async observe(binding: AgentBinding): Promise<AgentObservation> {
     let managed: Record<string, unknown> = {};

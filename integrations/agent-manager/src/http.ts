@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { AgentManager } from './manager.js';
 import { ManagerError, MAX_BODY_BYTES } from './contracts.js';
-import { parseSend, uuid } from './config.js';
+import { parseRegisterCandidate, parseSend, uuid } from './config.js';
 import { parseWorkAction } from './workflow.js';
 import { object, text, slug } from './config.js';
 import { MAX_CONTINUITY_BUNDLE_BYTES, type ContinuationPublishRequest, type ContinuationImportRequest, type ContinuationTakeoverRequest, type ContinuationRecoverRequest } from './continuation-contracts.js';
@@ -39,6 +39,7 @@ export async function serve(manager: AgentManager, token: string, options: { por
     ['/', { file: join(root, 'src/web/index.html'), type: 'text/html; charset=utf-8' }],
     ['/app.js', { file: join(root, 'dist/src/web/app.js'), type: 'text/javascript; charset=utf-8' }],
     ['/workboard.js', { file: join(root, 'dist/src/web/workboard.js'), type: 'text/javascript; charset=utf-8' }],
+    ['/candidates.js', { file: join(root, 'dist/src/web/candidates.js'), type: 'text/javascript; charset=utf-8' }],
     ['/continuation-board.js', { file: join(root, 'dist/src/web/continuation-board.js'), type: 'text/javascript; charset=utf-8' }],
     ['/continuation-drafts.js', { file: join(root, 'dist/src/web/continuation-drafts.js'), type: 'text/javascript; charset=utf-8' }],
     ['/contracts.js', { file: join(root, 'dist/src/contracts.js'), type: 'text/javascript; charset=utf-8' }],
@@ -101,6 +102,10 @@ export async function serve(manager: AgentManager, token: string, options: { por
         if (req.method === 'POST' && action === 'import') { json(200, await manager.continuation.import(id, await body(req, MAX_CONTINUITY_BUNDLE_BYTES + 4096) as ContinuationImportRequest)); return; }
         if (req.method === 'POST' && action === 'takeover') { json(200, await manager.continuation.takeover(id, await body(req) as ContinuationTakeoverRequest)); return; }
         if (req.method === 'POST' && action === 'recover') { json(200, await manager.continuation.recover(id, await body(req) as ContinuationRecoverRequest)); return; }
+      }
+      if (req.method === 'GET' && url.pathname === '/api/candidates') { json(200, await manager.candidates()); return; }
+      if (req.method === 'POST' && url.pathname === '/api/candidates/register') {
+        json(200, await manager.registerCandidate(parseRegisterCandidate(await body(req)))); return;
       }
       if (req.method === 'GET' && url.pathname === '/api/service') { json(200, { version: 1, startedAt: manager.startedAt, agents: manager.config.agents.length }); return; }
       const agent = /^\/api\/agents\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/(conversation|messages)$/.exec(url.pathname);

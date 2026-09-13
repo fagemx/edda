@@ -43,7 +43,8 @@ an upgrade rather than editing a running release in place.
 ## Configuration and actual capabilities
 
 `config.json` in the private root is an explicit operator selection. Add a known
-worker by editing the agents array while the console is stopped, then restart.
+worker by editing the agents array while the console is stopped, then restart (or
+add an already-running run from the console with **加入管理**, see below).
 Do not enumerate every directory of an unrelated Pi registry. Each agent has:
 
 ```json
@@ -91,10 +92,52 @@ Selections and events are bounded per response. One service owns the private SQL
 journal; operations retain their original target even if a display agent is later
 bound to a new session. The journal does not replace Edda task/decision truth.
 
+## Discovering managed Pi runs
+
+The sidebar's **候選執行** section (or `GET /api/candidates`) lists Pi sessions that
+already exist in the registry roots this configuration names, so a running workbench
+shows a freshly launched run without editing `config.json` or restarting. **更新候選**
+re-reads the list; discovery is never polled in the background loop.
+
+Bounds and safety:
+
+- The root set is exactly the effective default Pi registry (`EDDA_PI_CHANNEL_DIR`,
+  else `~/.edda-pi-sessions`) plus the distinct `registryRoot` values of the already-selected
+  Pi agents, deduplicated. There is no other home/project/directory scan, and no raw
+  `owner.json`/`state.json`/`managed/**.json` parsing in the manager: each root is read
+  through the same validated Pi inventory used elsewhere: `listManagedRuns` (recorded
+  managed runs with their `runId`) and `listSessions` (live or offline sessions). A
+  managed run and its live session merge into one row, with bounded roots, bounded rows
+  per root and bounded run limits.
+- It is read-only. Listing only reads status/inventory; it never assigns work, changes an
+  owner, launches or resumes a session, calls a model, sends a message or records
+  acceptance.
+- A candidate whose session is already selected shows **已加入管理** with its agent id
+  and cannot be added twice. A run registered from two configured roots is shown once,
+  preferring the live registration. Offline or stopped runs are shown as recorded
+  evidence with a reason, never as proof of completion. If one root cannot be listed,
+  its failure is reported and every other root still returns its candidates.
+
+**加入管理** is the only mutation and it is an explicit operator action.
+`POST /api/candidates/register {candidateId,id,name,role,projectId}` validates the
+request with the same rules as `config.json` and adds the run to this running process
+only; it does not edit `config.json`, restart a service, or change any work. The run
+then appears in the project list like any selected agent, so the existing
+**登記執行 session** (`bind_session`) action, conversations and message sending apply
+unchanged. A runtime-added agent is not persisted; after a service restart, add it
+again or record it in `config.json`. Merging, delivery and acceptance are still the
+project's own gates.
+
+Capability boundary: this removes the manual config edit/restart needed only for
+seeing a candidate and for explicitly adding it at runtime. It does not auto-register,
+auto-bind, assign, wake an owner, restart a worker, or migrate runs across machines,
+and it does not scan arbitrary user or project registries.
+
 ## Architecture and checks
 
 - `contracts.ts` / `config.ts`: DTOs, shared limits, versioned configuration validation.
 - `pi-adapter.ts`: sole production legacy-module boundary, exact identity and private projection.
+- `discovery.ts`: read-only candidate projection, session deduplication and opaque candidate ids.
 - `store.ts`: atomic intent/event records and monotonic receipt evidence in SQLite.
 - `manager.ts`: bounded observations, freshness, summaries and receipt reconciliation.
 - `http.ts` / `cli.ts`: loopback bearer gateway, Host/Origin/body/CSP checks and owned service lifecycle.
@@ -102,7 +145,8 @@ bound to a new session. The journal does not replace Edda task/decision truth.
 
 `npm test` covers durable intent/restart, stale identity and branch reset, poisoned
 unselected registry records, duplicate/unknown sends, public projection, actual Pi
-channel HTTP and gateway controls, plus background CLI restart.
+channel HTTP and gateway controls, plus background CLI restart, bounded candidate
+discovery/registration and per-root failure isolation.
 
 Actual installed Pi with an offline provider (no paid model invocation):
 

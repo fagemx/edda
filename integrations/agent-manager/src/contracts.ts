@@ -53,9 +53,28 @@ export interface Overview {
   version: 1; generatedAt: string; startedAt: string; refreshMs: number;
   projects: ProjectView[]; agents: AgentView[]; events: ManagerEvent[]; operations: OperationView[];
 }
+// A run projected from the bounded Pi session/channel listing. registryRoot is
+// internal to the manager and must never be serialized to the browser.
+export interface DiscoveredRun {
+  registryRoot: string; sessionId: string | null; runId: string | null; instanceId: string | null;
+  state: RuntimeState; live: boolean; source: 'live' | 'recorded';
+  workspace: string | null; lastProgressAt: string | null; reason: string | null;
+}
+export interface DiscoveryReport { runs: DiscoveredRun[]; failures: Array<{ registryRoot: string; message: string }> }
+// Public candidate projection. Deliberately omits registryRoot; `id` is a stable
+// opaque handle the operator can register without seeing any private path.
+export interface CandidateView {
+  id: string; sessionId: string | null; runId: string | null; instanceId: string | null; state: RuntimeState; live: boolean;
+  source: 'live' | 'recorded'; workspace: string | null; lastProgressAt: string | null;
+  reason: string | null; configuredAgentId: string | null;
+}
+export interface CandidateListView { candidates: CandidateView[]; issues: Array<{ label: string; message: string }>; generatedAt: string }
+export interface RegisterCandidateRequest { candidateId: string; id: string; name: string; role: 'manager' | 'worker'; projectId: string }
 export interface AdapterReceipt { status: OperationStatus; instanceId: string; sessionId: string; id: string }
 export interface PiAdapter {
   validateMessage?(request: SendRequest): void;
+  defaultRegistryRoot?(): string | null;
+  discover?(registryRoots: string[]): Promise<DiscoveryReport>;
   observe(binding: AgentBinding): Promise<AgentObservation>;
   conversation(binding: AgentBinding, after?: string): Promise<Omit<ConversationView, 'agentId' | 'selectionRevision'>>;
   send(binding: AgentBinding, request: SendRequest): Promise<AdapterReceipt>;

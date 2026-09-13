@@ -1,6 +1,7 @@
 import { lstatSync, readFileSync } from 'node:fs';
-import { ManagerError, type AgentBinding, type AgentView, type ConversationView, type ManagerConfig, type OperationStatus, type OperationView, type Overview, type PiAdapter, type SendRequest } from './contracts.js';
-import { hash, selectionRevision } from './config.js';
+import { ManagerError, type AgentBinding, type AgentView, type CandidateListView, type ConversationView, type ManagerConfig, type OperationStatus, type OperationView, type Overview, type PiAdapter, type RegisterCandidateRequest, type SendRequest } from './contracts.js';
+import { hash, parseConfig, selectionRevision } from './config.js';
+import { candidateId, dedupeRuns, projectCandidates } from './discovery.js';
 import { unavailable } from './pi-adapter.js';
 import { ManagerStore } from './store.js';
 import { WorkManager } from './workflow.js';
@@ -43,6 +44,46 @@ export class AgentManager {
     const binding = this.config.agents.find((a) => a.id === id);
     if (!binding) throw new ManagerError('NOT_FOUND', '此代理未加入管理清單。', 404);
     return binding;
+  }
+  private piRoots(): string[] {
+    const roots = this.config.agents.filter((a) => (a.transport ?? 'pi') === 'pi').map((a) => a.registryRoot);
+    const effective = this.adapter.defaultRegistryRoot?.();
+    if (effective) roots.push(effective);
+    return [...new Set(roots)];
+  }
+  // Read-only. The bounded root set is the effective default Pi registry plus the
+  // registry roots already present in the explicit operator selection; there is
+  // no other home/project scan.
+  async candidates(): Promise<CandidateListView> {
+    const report = await this.adapter.discover?.(this.piRoots()) ?? { runs: [], failures: [] };
+    return projectCandidates(report, this.config.agents);
+  }
+  // Explicit operator action. It adds the discovered run to this running
+  // process only; it never edits config.json, restarts a service, assigns work,
+  // changes an owner, launches a session or sends a message.
+  async registerCandidate(request: RegisterCandidateRequest): Promise<AgentView> {
+    if (!this.config.projects.some((p) => p.id === request.projectId)) throw new ManagerError('NOT_FOUND', '此專案未登記，無法加入代理。', 404);
+    if (this.config.agents.some((a) => a.id === request.id)) throw new ManagerError('CONFLICT', '此代理識別碼已存在。', 409);
+    const report = await this.adapter.discover?.(this.piRoots()) ?? { runs: [], failures: [] };
+    const run = dedupeRuns(report).find((candidate) => candidateId(candidate) === request.candidateId);
+    if (!run) throw new ManagerError('NOT_FOUND', '找不到這個候選執行；請重新整理候選清單。', 404);
+    if (!run.sessionId) throw new ManagerError('UNAVAILABLE', '這個管理執行尚無可綁定的 session；未加入管理。', 409);
+    if (this.config.agents.some((a) => a.sessionId === run.sessionId)) throw new ManagerError('ALREADY_CONFIGURED', '這個執行已在管理清單中。', 409);
+    if (!run.workspace) throw new ManagerError('UNAVAILABLE', '此候選沒有可驗證的工作目錄，未加入管理。', 409);
+    const binding: AgentBinding = { id: request.id, name: request.name, role: request.role, projectId: request.projectId,
+      registryRoot: run.registryRoot, sessionId: run.sessionId, runId: run.runId, workspace: run.workspace, summaryFile: null };
+    // Reuse the same strict configuration validation as config.json; it also
+    // enforces unique agent ids and identity roots before anything is added.
+    const parsed = parseConfig({ version: 1, projects: this.config.projects, agents: [...this.config.agents, binding],
+      refreshMs: this.config.refreshMs, ...(this.config.works ? { works: this.config.works } : {}) });
+    const added = parsed.agents.at(-1);
+    if (!added || added.id !== request.id) throw new ManagerError('INVALID_CONFIG', '候選資料驗證失敗，未加入管理。');
+    this.config.agents.push(added);
+    const observation = await this.adapter.observe(added).catch(() => unavailable());
+    const view = this.view(added, observation);
+    this.views.set(added.id, view);
+    this.store.observation(added.id, hash(JSON.stringify([added.sessionId, 'registered'])), `${added.name}：已從候選加入管理`);
+    return view;
   }
   private view(binding: AgentBinding, observation = unavailable()): AgentView {
     return { ...observation, id: binding.id, name: binding.name, role: binding.role, projectId: binding.projectId,

@@ -1,4 +1,4 @@
-import type { AgentBinding, PiAdapter, SendRequest, OperationView } from './contracts.js';
+import type { AgentBinding, DiscoveryReport, PiAdapter, SendRequest, OperationView } from './contracts.js';
 import { ChannelAdapter } from './pi-adapter.js';
 import { CodexAdapter } from './codex-adapter.js';
 import type { ManagerStore } from './store.js';
@@ -11,6 +11,8 @@ export class RuntimeAdapter implements PiAdapter {
   }
   private for(binding: AgentBinding): PiAdapter { return binding.transport === 'codex' ? this.codex : this.pi; }
   validateMessage(request: SendRequest): void { this.pi.validateMessage?.(request); }
+  defaultRegistryRoot(): string | null { return this.pi.defaultRegistryRoot?.() ?? null; }
+  async discover(registryRoots: string[]): Promise<DiscoveryReport> { return this.pi.discover?.(registryRoots) ?? { runs: [], failures: [] }; }
   observe(binding: AgentBinding) { return this.for(binding).observe(binding); }
   conversation(binding: AgentBinding, after?: string) { return this.for(binding).conversation(binding, after); }
   send(binding: AgentBinding, request: SendRequest) { return this.for(binding).send(binding, request); }
