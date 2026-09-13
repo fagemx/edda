@@ -40,6 +40,7 @@ export async function serve(manager: AgentManager, token: string, options: { por
     ['/app.js', { file: join(root, 'dist/src/web/app.js'), type: 'text/javascript; charset=utf-8' }],
     ['/workboard.js', { file: join(root, 'dist/src/web/workboard.js'), type: 'text/javascript; charset=utf-8' }],
     ['/continuation-board.js', { file: join(root, 'dist/src/web/continuation-board.js'), type: 'text/javascript; charset=utf-8' }],
+    ['/continuation-drafts.js', { file: join(root, 'dist/src/web/continuation-drafts.js'), type: 'text/javascript; charset=utf-8' }],
     ['/contracts.js', { file: join(root, 'dist/src/contracts.js'), type: 'text/javascript; charset=utf-8' }],
     ['/style.css', { file: join(root, 'src/web/style.css'), type: 'text/css; charset=utf-8' }],
   ]);
@@ -81,6 +82,11 @@ export async function serve(manager: AgentManager, token: string, options: { por
         json(200, work); return;
       }
       const work = /^\/api\/works\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/actions$/.exec(url.pathname);
+      const recordedAction = /^\/api\/works\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/actions\/([a-f0-9-]{36})$/.exec(url.pathname);
+      if (req.method === 'GET' && recordedAction?.[1] && recordedAction[2]) {
+        const actionId = uuid(recordedAction[2]), state = await manager.works.continuationSnapshot(recordedAction[1]);
+        json(200, { recorded: state.actions.some(a => a.actionId === actionId), actionId, work: state.view }); return;
+      }
       if (req.method === 'POST' && work?.[1]) {
         const action = parseWorkAction(await body(req));
         if (action.kind === 'attach_continuity') throw new ManagerError('INVALID_REQUEST', '請透過原生上下文入口連結 capsule。');

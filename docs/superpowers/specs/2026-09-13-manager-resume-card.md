@@ -75,3 +75,17 @@ This PR completes the native necessary-context UI and console crash/start recove
 It does not add a common scheduler, alter task leases, restart workers or change
 existing downstream review/merge procedures. Capability inventory must distinguish
 existing downstream capability from a workbench integration that is still absent.
+
+### Review correction: rejected input retention
+
+Unvalidated context text and bundle bytes stay in request memory and private native
+input temporaries, removed after the native call. The manager journal stores only
+operation identity and non-plaintext comparison proofs. Native accepted capsules
+remain the canonical persistent content. Sensitive material rejected by the native
+validator is not retained as manager intent payload or browser localStorage.
+
+Browser storage retains only work/action IDs, route and revision. Unsubmitted prose
+is memory-only; the UI states this. Reload reads native saved context or queries the
+same original operation. A recorded takeover can be queried by action ID; an absent
+record is unknown, not permission to issue a replacement. Re-entering original
+content reuses the original ID and revision rather than silently generating another.

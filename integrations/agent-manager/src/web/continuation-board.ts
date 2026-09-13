@@ -1,12 +1,13 @@
 import type { AgentView } from '../contracts.js';
 import type { WorkView } from '../workflow-contracts.js';
 import type { ContinuationPublication, ContinuationPublishRequest, ContinuationImportRequest, ContinuationTakeoverRequest } from '../continuation-contracts.js';
+import { encodeReferences, decodeReferences, type PendingReference } from './continuation-drafts.js';
 
 type Pending = { route: '' ; request: ContinuationPublishRequest } | { route: '/import'; request: ContinuationImportRequest } | { route: '/takeover'; request: ContinuationTakeoverRequest };
-interface Draft { goal: string; current: string; summary: string; next: string; questions: string; bundle: string; owner: string; environment: string; release: string; pending: Pending | null; rejected?: boolean }
+interface Draft { goal: string; current: string; summary: string; next: string; questions: string; bundle: string; owner: string; environment: string; release: string; pending: Pending | null; recovery: PendingReference | null; refilling?: boolean; rejected?: boolean }
 interface Host { api<T>(path: string, body?: unknown): Promise<T> }
-const storageKey = 'edda-manager-continuity-drafts-v1';
-const fresh = (): Draft => ({ goal: '', current: '', summary: '', next: '', questions: '', bundle: '', owner: '', environment: '', release: '', pending: null });
+const storageKey = 'edda-manager-continuity-operations-v2';
+const fresh = (): Draft => ({ goal: '', current: '', summary: '', next: '', questions: '', bundle: '', owner: '', environment: '', release: '', pending: null, recovery: null });
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, value = '', cls = ''): HTMLElementTagNameMap[K] { const node = document.createElement(tag); node.textContent = value; node.className = cls; return node; }
 const definite = new Set(['INVALID_DATA', 'INVALID_ID', 'INVALID_REQUEST', 'TOO_LARGE', 'CONTINUITY_TOO_LARGE', 'CONTINUITY_INVALID', 'STALE_WORK', 'INVALID_OWNER', 'CONTEXT_NOT_ATTACHED']);
 
@@ -25,17 +26,16 @@ export class ContinuationBoard {
   constructor(readonly root: HTMLElement, private host: Host) {
     try {
       const raw = localStorage.getItem(storageKey);
-      if (raw) {
-        const parsed: unknown = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('draft');
-        for (const [id, value] of Object.entries(parsed)) {
-          if (!value || typeof value !== 'object' || !['goal','current','summary','next','questions','bundle','owner','environment','release'].every(k => typeof value[k] === 'string') ||
-              (value.pending !== null && (!value.pending || !['', '/import', '/takeover'].includes(value.pending.route) || typeof value.pending.request?.actionId !== 'string'))) throw new Error('draft');
-          this.drafts[id] = value as Draft;
-        }
+      if (raw) for (const [id, recovery] of Object.entries(decodeReferences(raw))) this.drafts[id] = { ...fresh(), recovery };
+      const legacy = localStorage.getItem('edda-manager-continuity-drafts-v1');
+      if (legacy) {
+        const old = JSON.parse(legacy) as Record<string, { pending?: Pending }>;
+        for (const [id, value] of Object.entries(old)) if (value.pending && !this.drafts[id]?.recovery) this.drafts[id] = { ...fresh(), recovery: { route: value.pending.route, actionId: value.pending.request.actionId, revision: value.pending.request.revision } };
+        if (!this.persist()) throw new Error('migration');
+        localStorage.removeItem('edda-manager-continuity-drafts-v1');
       }
     } catch { this.storageOK = false; }
-    this.panel.append(el('summary', '必要上下文與接手'), el('p', '保存目前進度，讓新 session 從必要資訊接續。接手會記錄本機負責人；執行工作仍走原有交辦流程。', 'muted'), this.form, this.result, this.feedback);
+    this.panel.append(el('summary', '必要上下文與接手'), el('p', '未送出文字只保留在本頁；保存後可從原生上下文讀回。瀏覽器只保存操作編號，接手仍走原有交辦流程。', 'muted'), this.form, this.result, this.feedback);
     root.append(this.panel); this.feedback.setAttribute('role', 'status');
     this.panel.addEventListener('toggle', () => { if (this.panel.open) void this.load(); });
     window.addEventListener('storage', event => { if (event.key === storageKey) { this.storageOK = false; this.feedback.textContent = '另一分頁更新了續作請求，請重新載入。'; this.render(); } });
@@ -48,7 +48,7 @@ export class ContinuationBoard {
   private draft(): Draft { return this.drafts[this.work!.id] ??= fresh(); }
   private persist(): boolean {
     if (!this.storageOK) return false;
-    try { localStorage.setItem(storageKey, JSON.stringify(this.drafts)); return true; }
+    try { localStorage.setItem(storageKey, encodeReferences(Object.fromEntries(Object.entries(this.drafts).map(([id, d]) => [id, d.recovery])))); return true; }
     catch { this.storageOK = false; this.feedback.textContent = '瀏覽器無法保存原請求，尚未傳送。'; return false; }
   }
   private async load(): Promise<void> {
@@ -59,8 +59,8 @@ export class ContinuationBoard {
       if (this.work?.id !== id) return;
       this.publication = data; this.work = data.work; this.renderResult();
       const d = this.draft();
-      if (d.pending && d.pending.route !== '/takeover' && data.operation?.actionId === d.pending.request.actionId) {
-        if (data.operation.status === 'attached') { d.pending = null; this.persist(); this.render(); }
+      if (d.recovery && d.recovery.route !== '/takeover' && data.operation?.actionId === d.recovery.actionId) {
+        if (data.operation.status === 'attached') { d.pending = null; d.recovery = null; this.persist(); this.render(); }
         else if (data.operation.status === 'failed') { d.rejected = true; this.persist(); this.render(); }
       }
     } catch (error) { if (this.work?.id === id) this.feedback.textContent = error instanceof Error ? error.message : '無法讀取必要上下文。'; }
@@ -70,12 +70,13 @@ export class ContinuationBoard {
     this.form.replaceChildren(); if (!this.work) return;
     if (!this.storageOK) { this.form.append(el('p', '草稿儲存無法使用，請先恢復瀏覽器儲存。', 'notice')); return; }
     const d = this.draft();
-    if (d.pending) {
-      this.form.append(el('p', `原操作：${d.pending.request.actionId}`, 'identity'), this.button('查詢／恢復原續作操作', () => { void this.submit(d.pending!); }));
-      if (d.rejected) this.form.append(this.button('保留內容重新編輯', () => { d.pending = null; d.rejected = false; this.persist(); this.render(); }));
+    if (d.recovery && !d.refilling) {
+      this.form.append(el('p', `原操作：${d.recovery.actionId}`, 'identity'), this.button('查詢／恢復原續作操作', () => { if (d.pending) void this.submit(d.pending); else void this.recoverReference(); }));
+      if (d.rejected) this.form.append(this.button('保留內容重新編輯', () => { d.pending = null; d.recovery = null; d.rejected = false; this.persist(); this.render(); }));
+      else if (!d.pending) this.form.append(this.button('重新輸入原內容（沿用編號）', () => { d.refilling = true; this.render(); }));
       return;
     }
-    const field = (label: string, key: Exclude<keyof Draft, 'pending' | 'rejected'>, rows = 2) => {
+    const field = (label: string, key: 'goal' | 'current' | 'summary' | 'next' | 'questions' | 'bundle' | 'environment' | 'release', rows = 2) => {
       const input = el('textarea'); input.rows = rows; input.value = d[key]; input.disabled = this.busy;
       input.setAttribute('aria-label', label); input.oninput = () => { d[key] = input.value; this.persist(); };
       const wrap = el('label', label, 'work-field'); wrap.append(input); this.form.append(wrap);
@@ -135,22 +136,36 @@ export class ContinuationBoard {
     const id = this.work.id; this.busy = true; this.render();
     try {
       const data = await this.host.api<ContinuationPublication>(`/api/works/${id}/continuation/recover`, { actionId, ...(capsuleId ? { capsuleId } : {}) });
-      if (this.work?.id === id) { this.publication = data; this.work = data.work; const d = this.draft(); if (data.operation?.status === 'attached' && d.pending?.request.actionId === actionId) d.pending = null; this.persist(); }
+      if (this.work?.id === id) { this.publication = data; this.work = data.work; const d = this.draft(); if (data.operation?.status === 'attached' && d.recovery?.actionId === actionId) { d.pending = null; d.recovery = null; } else if (data.operation?.status === 'failed') d.rejected = true; this.persist(); }
     } catch (error) { if (this.work?.id === id) this.feedback.textContent = error instanceof Error ? error.message : '無法核對原生紀錄。'; }
     finally { this.busy = false; this.render(); this.renderResult(); }
   }
+  private async recoverReference(): Promise<void> {
+    const d = this.draft(), ref = d.recovery; if (!ref || !this.work) return;
+    if (ref.route !== '/takeover') { await this.recover(ref.actionId, ''); return; }
+    try {
+      const result = await this.host.api<{ recorded: boolean; work: WorkView }>(`/api/works/${this.work.id}/actions/${ref.actionId}`);
+      if (result.recorded) { d.recovery = null; d.pending = null; this.persist(); this.render(); this.feedback.textContent = '已找回原接手紀錄。'; }
+      else this.feedback.textContent = '尚未找到原接手紀錄；可重新輸入原內容並沿用同一編號核對，未建立另一操作。';
+    } catch (error) { this.feedback.textContent = error instanceof Error ? error.message : '無法讀取原接手紀錄。'; }
+  }
   private async submit(pending: Pending): Promise<void> {
     if (!this.work || this.busy) return;
-    const id = this.work.id, d = this.draft(); d.pending = pending; d.rejected = false;
+    const id = this.work.id, d = this.draft();
+    if (d.recovery) {
+      if (d.recovery.route !== pending.route) { this.feedback.textContent = '請先恢復原操作；不能用原編號執行另一種操作。'; return; }
+      pending = { ...pending, request: { ...pending.request, actionId: d.recovery.actionId, revision: d.recovery.revision } } as Pending;
+    }
+    d.pending = pending; d.rejected = false; d.refilling = false; d.recovery = { route: pending.route, actionId: pending.request.actionId, revision: pending.request.revision };
     if (!this.persist()) return;
     this.busy = true; this.feedback.textContent = '正在核對並保存原操作…'; this.render();
     try {
       const response = await this.host.api<ContinuationPublication | WorkView>(`/api/works/${id}/continuation${pending.route}`, pending.request);
       if ('work' in response) {
         if (this.work?.id === id) { this.publication = response; this.work = response.work; }
-        if (response.operation?.status === 'attached') d.pending = null;
+        if (response.operation?.status === 'attached') { d.pending = null; d.recovery = null; }
         else if (response.operation?.status === 'failed') d.rejected = true;
-      } else { if (response.confirmedActionId === pending.request.actionId) d.pending = null; if (this.work?.id === id) this.work = response; }
+      } else { if (response.confirmedActionId === pending.request.actionId) { d.pending = null; d.recovery = null; } if (this.work?.id === id) this.work = response; }
       this.persist(); if (this.work?.id === id) this.feedback.textContent = d.pending ? '結果仍待确认，原操作編號已保存；請核對紀錄。' : '已記錄完成，可讀取上下文或接續工作交辦。';
     } catch (error) {
       // Validation codes from a POST may also follow a native effect. Query the

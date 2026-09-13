@@ -302,13 +302,12 @@ After checking the destination and old writer release, **記錄接手** reuses t
 owner handoff. The original task lifecycle and next execution action stay under their
 existing owner. Ordinary work assignment remains the separate work action.
 
-Saving and importing persist the original request before the native effect. After
+Saving and importing persist the original operation identity and non-plaintext verification proofs before the native effect. After
 an interrupted response, reopening this panel reads native capsule records and
 reconciles verifiable saved state without repeating save. Known pre-write validation
 refusals allow editing a new request; ambiguous I/O remains visible with its original
 ID. **核對原生紀錄並恢復連結** accepts an exact capsule ID when bounded discovery cannot
-find it, and verifies correlation before attachment. Browser reload preserves inputs
-and pending requests. Clipboard-denied environments have a selectable JSON view.
+find it, and verifies correlation before attachment. Browser persistence keeps only operation IDs, route and revision; unsaved prose remains in page memory. After reload, recover the original operation from native records or re-enter the original request using the same ID. Saved context is read back from Edda. Clipboard-denied environments have a selectable JSON view.
 
 `start` now automatically reclaims a demonstrably dead, matching console owner under
 a cross-process lifecycle mutex. It preserves config, SQLite and pending operations.
@@ -346,3 +345,5 @@ owner inbox, but this does not prove owner wake delivery or lossless Pi event ca
 while offline. Native controlled advancement, Pi supervisor routing, automatic worker
 restart, OS boot scheduling and cross-machine synchronization are distinct downstream
 capabilities; this change does not replace or claim to implement them.
+
+- `GET /api/works/:id/actions/:actionId`: read whether an original work action was recorded; an absent record remains unknown and never authorizes a replacement action.
