@@ -11,6 +11,7 @@ import { ChannelAdapter, defaultPiRoot, secureRoot } from './pi-adapter.js';
 import { hash, loadConfig, object, parseConfig, text } from './config.js';
 import { serve } from './http.js';
 import type { AgentBinding, ManagerConfig, ProjectView } from './contracts.js';
+import { RuntimeAdapter } from './runtime-adapter.js';
 
 interface Owner { version: 1; pid: number; instanceId: string; origin: string; token: string; configDigest: string; startedAt: string }
 const [command = 'help', ...args] = process.argv.slice(2), flags = new Map<string, string>();
@@ -127,7 +128,7 @@ async function main(): Promise<void> {
     if (object(read(lockPath)).instanceId === instanceId) unlinkSync(lockPath);
   };
   try {
-    store = new ManagerStore(root); manager = new AgentManager(config, store, await ChannelAdapter.create(piRoot));
+    store = new ManagerStore(root); manager = new AgentManager(config, store, await RuntimeAdapter.create(store, piRoot));
     await manager.start();
     const token = randomBytes(32).toString('hex');
     gateway = await serve(manager, token, { port, onStop: () => { void shutdown(); } });

@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ManagerError, type AdapterReceipt, type AgentBinding, type AgentObservation, type ConversationView, type OperationStatus, type OperationView, type PiAdapter, type PublicEntry, type RuntimeState, type SendRequest } from './contracts.js';
+import type { NativeSessionEvent } from './session-contracts.js';
 
 // This is the only legacy-module boundary. All values crossing back are projected
 // from unknown JSON into explicit DTO fields; no Pi owner/runner object is returned.
@@ -54,6 +55,7 @@ export const unavailable = (): AgentObservation => ({ state: 'unavailable', inst
 
 export class ChannelAdapter implements PiAdapter {
   private cache = new Map<string, { instance: string; progress: string | null; latest: PublicEntry | null }>();
+  private nativeEvents = new Map<string, Map<string, NativeSessionEvent>>();
   private constructor(private client: LegacyClient, private managed: LegacyManaged) {}
   static async create(piRoot = defaultPiRoot()): Promise<ChannelAdapter> {
     const client = await import(pathToFileURL(resolve(piRoot, 'client.mjs')).href) as LegacyClient;
@@ -67,6 +69,10 @@ export class ChannelAdapter implements PiAdapter {
   }
   async observe(binding: AgentBinding): Promise<AgentObservation> {
     let managed: Record<string, unknown> = {};
+    const eventKey = `${binding.registryRoot}\0${binding.sessionId}`;
+    let events = this.nativeEvents.get(eventKey);
+    if (!events) { events = new Map(); this.nativeEvents.set(eventKey, events); }
+    const remember = (event: NativeSessionEvent) => { events!.set(event.id, event); while (events!.size > 128) events!.delete(events!.keys().next().value!); };
     try {
       if (binding.runId) {
         try {
@@ -81,6 +87,14 @@ export class ChannelAdapter implements PiAdapter {
       if (capabilities.includes('conversation') && (this.cache.get(binding.id)?.instance !== instance || this.cache.get(binding.id)?.progress !== progress)) {
         try {
           const page = record(await this.client.requestSession(binding.registryRoot, binding.sessionId, '/conversation?limit=12', undefined, 2500, instance));
+          for (const raw of Array.isArray(page.entries) ? page.entries : []) {
+            const entry = record(raw), at = date(entry.timestamp), id = str(entry.id, 200);
+            if (entry.role !== 'assistant' || !id || !at || !['stop', 'length', 'error', 'aborted'].includes(String(entry.stopReason))) continue;
+            const error = record(managed.modelError), status = Number(error.httpStatus);
+            remember({ id: `${binding.sessionId}:${id}`, at, turnId: null, kind: entry.stopReason === 'error' ? 'provider_error' : entry.stopReason === 'aborted' ? 'interrupted' : 'reply_ended',
+              category: entry.stopReason === 'error' ? status === 402 ? 'credit_or_quota' : ['credit_or_quota', 'authentication', 'timeout'].includes(String(error.category)) ? String(error.category) : 'provider_error' : null,
+              httpStatus: entry.stopReason === 'error' && Number.isInteger(status) && status >= 400 && status <= 599 ? status : null });
+          }
           const recent = publicEntries(page.entries).filter((e) => e.role === 'assistant' && e.text.trim()).at(-1);
           if (recent) latest = { ...recent, text: recent.text.slice(0, 700), truncated: recent.truncated || recent.text.length > 700 };
           this.cache.set(binding.id, { instance, progress, latest });
@@ -93,14 +107,18 @@ export class ChannelAdapter implements PiAdapter {
         source: 'live', stale: age > 15000 || age < -5000, reason: modelError.category ? `模型回報：${str(modelError.category, 100)}` : null,
         model: typeof model.provider === 'string' && typeof model.id === 'string' ? { provider: model.provider, id: model.id } : null,
         usage: managed.usage ? { tokens: number(usage.tokens), reportedCost: number(usage.reportedCost) } : null,
-        capabilities: { conversation: capabilities.includes('conversation'), send: capabilities.includes('send') }, latestMessage: latest };
+        capabilities: { conversation: capabilities.includes('conversation'), send: capabilities.includes('send') }, latestMessage: latest,
+        sessionEvidence: { sessionId: binding.sessionId, evidenceSource: 'live', historyComplete: false, events: [...events.values()] } };
     } catch {
       const model = record(managed.model), usage = record(managed.usage), stopped = managed.lastRecordedPhase === 'stopped';
+      const stoppedAt = date(managed.updatedAt) ?? date(managed.lastProgressAt);
+      if (stopped && stoppedAt) remember({ id: `${binding.sessionId}:managed-stop:${stoppedAt}`, kind: 'interrupted', at: stoppedAt, turnId: null, category: 'managed_stop', httpStatus: null });
       return { ...unavailable(), state: stopped ? 'stopped' : 'unavailable',
         reason: stopped ? '上次管理紀錄為已停止；目前沒有即時連線。' : '目前無法讀取代理；不代表工作已完成。',
         lastProgressAt: date(managed.lastProgressAt),
         model: typeof model.provider === 'string' && typeof model.id === 'string' ? { provider: model.provider, id: model.id } : null,
-        usage: managed.usage ? { tokens: number(usage.tokens), reportedCost: number(usage.reportedCost) } : null };
+        usage: managed.usage ? { tokens: number(usage.tokens), reportedCost: number(usage.reportedCost) } : null,
+        sessionEvidence: { sessionId: binding.sessionId, evidenceSource: stopped ? 'recorded' : 'unavailable', historyComplete: false, events: [...events.values()] } };
     }
   }
   async conversation(binding: AgentBinding, after?: string): Promise<Omit<ConversationView, 'agentId' | 'selectionRevision'>> {

@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ManagerError, type AgentBinding, type ManagerEvent, type OperationStatus, type OperationView, type SendRequest } from './contracts.js';
 import { hash } from './config.js';
+import type { BindingObservationState, OwnerInboxAck, OwnerInboxEvent } from './owner-inbox-contracts.js';
 
 export class ManagerStore {
   private db: DatabaseSync;
@@ -13,13 +14,16 @@ export class ManagerStore {
     for (const suffix of ['-wal', '-shm', '-journal']) if (existsSync(file + suffix) && lstatSync(file + suffix).isSymbolicLink()) throw new Error('Manager sidecar must not be a link');
     this.db = new DatabaseSync(file);
     const version = this.db.prepare('PRAGMA user_version').get()?.user_version;
-    if (version !== 0 && version !== 1) { this.db.close(); throw new Error('Unsupported manager storage version'); }
+    if (version !== 0 && version !== 1 && version !== 2) { this.db.close(); throw new Error('Unsupported manager storage version'); }
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;
       CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, agent_id TEXT NOT NULL, target TEXT NOT NULL, proof_rank INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, agent_id TEXT NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, operation_id TEXT);
       CREATE TABLE IF NOT EXISTS observations(agent_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      PRAGMA user_version=1;`);
+      CREATE TABLE IF NOT EXISTS owner_inbox(id TEXT PRIMARY KEY, work_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS owner_binding_observations(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS owner_inbox_acks(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, event_id TEXT NOT NULL);
+      PRAGMA user_version=2;`);
     // A committed intent followed by a crash is never evidence that no send occurred.
     for (const row of this.db.prepare("SELECT data FROM operations WHERE json_extract(data,'$.status')='prepared'").all()) {
       const operation = JSON.parse(String(row.data)) as OperationView;
@@ -27,6 +31,42 @@ export class ManagerStore {
     }
   }
   close(): void { this.db.close(); }
+  inboxEvents(workId: string, projectId: string, taskId: number, limit = 100): OwnerInboxEvent[] {
+    return this.db.prepare("SELECT data FROM owner_inbox WHERE work_id=? AND json_extract(data,'$.projectId')=? AND json_extract(data,'$.taskId')=? ORDER BY json_extract(data,'$.acknowledgedAt') IS NOT NULL, rowid DESC LIMIT ?").all(workId, projectId, taskId, Math.max(1, Math.min(limit, 201))).map(r => JSON.parse(String(r.data)) as OwnerInboxEvent);
+  }
+  inboxEvent(id: string): OwnerInboxEvent | null {
+    const row = this.db.prepare('SELECT data FROM owner_inbox WHERE id=?').get(id);
+    return row ? JSON.parse(String(row.data)) as OwnerInboxEvent : null;
+  }
+  bindingObservation(id: string): BindingObservationState {
+    const row = this.db.prepare('SELECT data FROM owner_binding_observations WHERE id=?').get(id);
+    return row ? JSON.parse(String(row.data)) as BindingObservationState : { unavailable: false, transition: 0, latestChildEventAt: null };
+  }
+  recordInboxObservation(bindingId: string, state: BindingObservationState, events: OwnerInboxEvent[]): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const event of events) this.db.prepare('INSERT OR IGNORE INTO owner_inbox(id,work_id,data) VALUES(?,?,?)').run(event.id, event.workId, JSON.stringify(event));
+      this.db.prepare('INSERT INTO owner_binding_observations(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(bindingId, JSON.stringify(state));
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  acknowledgeInbox(request: OwnerInboxAck): OwnerInboxEvent {
+    const fingerprint = hash(JSON.stringify(request));
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.db.prepare('SELECT fingerprint FROM owner_inbox_acks WHERE id=?').get(request.actionId);
+      if (existing && existing.fingerprint !== fingerprint) throw new ManagerError('ACK_CONFLICT', '此確認編號已使用於其他內容。', 409);
+      const event = this.inboxEvent(request.eventId);
+      if (!event) throw new ManagerError('NOT_FOUND', '找不到這則通知。', 404);
+      if (event.acknowledgementId && event.acknowledgementId !== request.actionId) throw new ManagerError('ALREADY_ACKNOWLEDGED', '這則通知已確認。', 409);
+      if (!existing) {
+        event.acknowledgedAt = new Date().toISOString(); event.acknowledgementId = request.actionId; event.evidence = request.evidence;
+        this.db.prepare('INSERT INTO owner_inbox_acks(id,fingerprint,event_id) VALUES(?,?,?)').run(request.actionId, fingerprint, request.eventId);
+        this.db.prepare('UPDATE owner_inbox SET data=? WHERE id=?').run(JSON.stringify(event), event.id);
+      }
+      this.db.exec('COMMIT'); return event;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   setting(key: string): string | null { const row = this.db.prepare('SELECT value FROM settings WHERE key=?').get(key); return typeof row?.value === 'string' ? row.value : null; }
   putSetting(key: string, value: string): void { this.db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
   ensureSetting(key: string, value: string): string {

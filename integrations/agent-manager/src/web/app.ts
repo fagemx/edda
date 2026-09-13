@@ -100,7 +100,7 @@ const operationLabels: Record<OperationStatus, string> = { prepared: '已記錄�
 function badge(text: string, tone = ''): HTMLElement { return element('span', text, `badge ${tone}`); }
 function runtimeBadge(agent: AgentView): HTMLElement {
   const tone = agent.stale || ['waiting_user', 'unknown', 'unavailable'].includes(agent.state) ? 'attention' : ['running', 'executing_tool'].includes(agent.state) ? 'active' : '';
-  return badge(runtimeLabels[agent.state] ?? '狀態未知', tone);
+  return badge(`${agent.source === 'recorded' ? '記錄：' : ''}${runtimeLabels[agent.state] ?? '狀態未知'}`, tone);
 }
 function operationBadge(operation: OperationView): HTMLElement {
   return badge(operationLabels[operation.status] ?? '結果不明', operation.status === 'failed' ? 'danger' : ['prepared', 'unknown', 'unconfirmed'].includes(operation.status) ? 'attention' : 'active');
@@ -120,7 +120,7 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
 function errorText(error: unknown): string { return error instanceof ApiError ? error.message : '連線中斷或回應逾時。'; }
 function renderProjects(): void {
   if (!overview) return;
-  for (const agent of overview.agents) { const stamp = agentAges.get(agent.id); if (stamp) stamp.textContent = agent.stale ? '資料已過期' : age(agent.observedAt); }
+  for (const agent of overview.agents) { const stamp = agentAges.get(agent.id); if (stamp) stamp.textContent = agent.source === 'recorded' ? '記錄來源' : agent.stale ? '資料已過期' : age(agent.observedAt); }
   const signature = JSON.stringify([overview.projects.map(project => [project.id, project.name, project.priority]), overview.agents.map(agent => [agent.id, agent.name, agent.projectId, agent.role, agent.state, agent.stale, agent.latestMessage?.text, !!drafts.get(agent.id)?.pending]), selectedId]);
   if (signature === projectSignature) return;
   projectSignature = signature;
@@ -135,7 +135,7 @@ function renderProjects(): void {
     for (const agent of agents) {
       const button = element('button', '', 'agent-option'); button.type = 'button'; button.dataset.agentId = agent.id; button.setAttribute('aria-current', String(agent.id === selectedId));
       const top = element('span', '', 'agent-option-top'); top.append(element('span', agent.name, 'agent-option-name'), element('span', agent.role === 'manager' ? '管理者' : '工作者', 'agent-role'));
-      const stamp = element('span', agent.stale ? '資料已過期' : age(agent.observedAt)); agentAges.set(agent.id, stamp);
+      const stamp = element('span', agent.source === 'recorded' ? '記錄來源' : agent.stale ? '資料已過期' : age(agent.observedAt)); agentAges.set(agent.id, stamp);
       const bottom = element('span', '', 'agent-option-bottom'); bottom.append(runtimeBadge(agent), stamp);
       const pending = drafts.get(agent.id)?.pending;
       button.append(top, element('div', agent.latestMessage?.text || '尚無公開回覆', 'agent-preview'), bottom);
@@ -170,7 +170,7 @@ function renderAgent(): void {
     ...(agent.usage?.tokens !== null && agent.usage?.tokens !== undefined ? [`已回報用量 ${agent.usage.tokens.toLocaleString('zh-TW')} tokens`] : []),
     ...(agent.usage?.reportedCost !== null && agent.usage?.reportedCost !== undefined ? [`已回報成本 ${agent.usage.reportedCost}（供應商單位）`] : []),
   ].map(value => element('span', value)));
-  notice('agent-warning', agent.stale || agent.source === 'unavailable' ? `目前資料${agent.stale ? '已過期' : '無法更新'}。${agent.reason ?? '等待來源恢復；其他代理仍可使用。'}` : agent.reason ?? '');
+  notice('agent-warning', agent.source === 'recorded' ? agent.reason ?? '此為公開紀錄，不能據此判定程序仍在執行。' : agent.stale || agent.source === 'unavailable' ? `目前資料${agent.stale ? '已過期' : '無法更新'}。${agent.reason ?? '等待來源恢復；其他代理仍可使用。'}` : agent.reason ?? '');
   get('latest-response').textContent = agent.latestMessage?.text || '尚無公開回覆。';
   get('recipient').textContent = `${agent.name} (${agent.id})`;
   renderCompose();

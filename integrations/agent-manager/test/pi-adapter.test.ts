@@ -18,10 +18,10 @@ interface ChannelModule { startChannel(options: { root: string; sessionId: strin
 test('real Pi HTTP channel adapter isolates poison records, preserves receipts and rejects replacement', async () => {
   const api = await import(pathToFileURL(join(defaultPiRoot(), 'channel.mjs')).href) as ChannelModule;
   const root = mkdtempSync(join(tmpdir(), 'manager-pi-')), registry = join(root, 'pi'), workspace = join(root, 'project'), sessionId = randomUUID();
-  mkdirSync(workspace); let deliveries = 0, channel: Channel;
+  mkdirSync(workspace); let deliveries = 0, channel: Channel, errorReply = false;
   const page = (query: { after?: string }) => {
     if (query.after && query.after !== 'one') throw new Error('Conversation cursor is not on this branch');
-    return { entries: [{ id: 'one', timestamp: new Date().toISOString(), kind: 'message', role: 'assistant', text: 'Public reply', thinking: 'PRIVATE_THOUGHT', toolCalls: [{ arguments: 'PRIVATE_ARGS' }] }], cursor: 'one', headCursor: 'one', hasMore: false };
+    return { entries: [{ id: errorReply ? 'two' : 'one', timestamp: new Date().toISOString(), kind: 'message', role: 'assistant', text: errorReply ? '' : 'Public reply', stopReason: errorReply ? 'error' : 'stop', errorMessage: 'PRIVATE_PROVIDER_SECRET', thinking: 'PRIVATE_THOUGHT', toolCalls: [{ arguments: 'PRIVATE_ARGS' }] }], cursor: 'one', headCursor: 'one', hasMore: false };
   };
   channel = await api.startChannel({ root: registry, sessionId, cwd: workspace, getConversation: page, deliver: (message) => {
     deliveries++; setTimeout(() => { channel.messageStarted(message); channel.settled(); }, 10);
@@ -32,6 +32,7 @@ test('real Pi HTTP channel adapter isolates poison records, preserves receipts a
     const poison = join(registry, 'a'.repeat(64)); mkdirSync(poison); writeFileSync(join(poison, 'state.json'), Buffer.alloc(16));
     await manager.refresh(); const view = manager.overview().agents[0]!;
     assert.equal(view.source, 'live'); assert.equal(view.latestMessage?.text, 'Public reply');
+    assert.equal(view.sessionEvidence?.events[0]?.kind, 'reply_ended');
     const conversation = await manager.conversation('a');
     assert.ok(!JSON.stringify(conversation).includes('PRIVATE'));
     const ownerFiles = (await import('node:fs')).readdirSync(registry).filter((p) => /^[a-f0-9]{64}$/.test(p) && p !== 'a'.repeat(64));
@@ -43,8 +44,12 @@ test('real Pi HTTP channel adapter isolates poison records, preserves receipts a
     assert.equal(store.operations().length, 0);
     await manager.send('a', request); await manager.send('a', request); await delay(50);
     assert.equal((await manager.operation(request.operationId)).status, 'settled'); assert.equal(deliveries, 1);
-    await channel.close(); channel = await api.startChannel({ root: registry, sessionId, cwd: workspace, getConversation: page, deliver: () => { deliveries++; } });
+    await channel.close(); errorReply = true; channel = await api.startChannel({ root: registry, sessionId, cwd: workspace, getConversation: page, deliver: () => { deliveries++; } });
     await assert.rejects(() => manager.send('a', { ...request, operationId: randomUUID() }), /更換/);
     assert.equal(deliveries, 1);
+    await manager.refresh();
+    const observedError = manager.overview().agents[0]!.sessionEvidence?.events.find(e => e.kind === 'provider_error');
+    assert.ok(observedError); assert.equal(observedError.category, 'provider_error');
+    assert.ok(!JSON.stringify(manager.overview()).includes('PRIVATE'));
   } finally { await manager.stop(); await channel.close(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });

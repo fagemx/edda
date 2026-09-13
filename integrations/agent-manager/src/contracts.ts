@@ -10,6 +10,7 @@ export interface AgentBinding {
   id: string; name: string; projectId: string; role: 'manager' | 'worker';
   registryRoot: string; sessionId: string; runId: string | null; workspace: string;
   summaryFile: string | null;
+  transport?: 'pi' | 'codex'; transcriptFile?: string;
 }
 export interface ManagerConfig { version: 1; projects: ProjectView[]; agents: AgentBinding[]; refreshMs: number; works?: import('./workflow-contracts.js').WorkBinding[] }
 export interface ModelView { provider: string; id: string }
@@ -22,20 +23,21 @@ export interface PublicEntry {
 export interface AgentObservation {
   state: RuntimeState; instanceId: string | null; observedAt: string;
   heartbeatAt: string | null; lastProgressAt: string | null; lastEvent: string | null;
-  source: 'live' | 'unavailable'; stale: boolean; reason: string | null;
+  source: 'live' | 'recorded' | 'unavailable'; stale: boolean; reason: string | null;
   model: ModelView | null; usage: UsageView | null;
   capabilities: { conversation: boolean; send: boolean };
   latestMessage: PublicEntry | null;
+  sessionEvidence?: import('./session-contracts.js').SessionEvidence;
 }
 export interface AgentView extends AgentObservation {
   id: string; name: string; role: 'manager' | 'worker'; projectId: string;
-  workspace: string; transport: 'pi'; selectionRevision: string;
+  workspace: string; transport: 'pi' | 'codex'; selectionRevision: string;
   summary: string | null; summaryUpdatedAt: string | null; summaryError: string | null;
 }
 export interface ConversationView {
   agentId: string; selectionRevision: string; instanceId: string | null;
   entries: PublicEntry[]; cursor: string | null; headCursor: string | null;
-  hasMore: boolean; observedAt: string; source: 'live' | 'unavailable';
+  hasMore: boolean; observedAt: string; source: 'live' | 'recorded' | 'unavailable';
 }
 export interface SendRequest {
   operationId: string; selectionRevision: string; instanceId: string;

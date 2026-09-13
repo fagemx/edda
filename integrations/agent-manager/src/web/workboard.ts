@@ -1,12 +1,14 @@
 import type { AgentView, ConversationView, Overview, SendRequest } from '../contracts.js';
 import type { WorkAction, WorkStage, WorkView, WorksView } from '../workflow-contracts.js';
+import type { OwnerContext, OwnerInboxAck, OwnerInboxView, OwnerInboxEvent } from '../owner-inbox-contracts.js';
 
 type Kind = WorkAction['kind'];
-interface Draft { kind: Kind; agentId: string; message: string; nextStep: string; evidence: string; reason: string; pending: WorkAction | null; rejected?: boolean; basisRevision?: string }
+interface Draft { kind: Kind; agentId: string; message: string; nextStep: string; evidence: string; reason: string; pending: WorkAction | null; rejected?: boolean; basisRevision?: string;
+  role?: 'manager' | 'worker' | 'reviewer'; reviewedSha?: string; nextExpectedAt?: string; bindingId?: string; pendingAck?: OwnerInboxAck | null }
 interface Host { api<T>(path: string, body?: unknown): Promise<T>; openAgent(id: string): void }
 const key = 'edda-manager-work-drafts-v1';
 const labels: Record<WorkStage, string> = { uninitialized: '尚未安排下一步', ready: '待交接', assigned: '已交辦・等待接手', executing: '執行中', awaiting_delivery: '回覆結束・待交付證據', delivered: '已交付・待驗收', accepted: '已記錄驗收', blocked: '有阻塞・需要處理' };
-const actions: Record<Kind, string> = { initialize: '安排下一步', assign: '交辦給代理', intervene: '變更工作指示', acknowledge: '記錄指示已確認', deliver: '記錄交付', accept: '記錄驗收與收尾', block: '回報阻塞' };
+const actions: Record<Kind, string> = { initialize: '安排下一步', assign: '交辦給代理', intervene: '變更工作指示', acknowledge: '記錄指示已確認', deliver: '記錄交付', accept: '記錄驗收與收尾', block: '回報阻塞', bind_session: '登記執行 session', unbind_session: '結束 session 追蹤', handoff_owner: '移交收尾負責人' };
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', cls = ''): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag); node.textContent = text; node.className = cls; return node;
 }
@@ -18,6 +20,8 @@ export class WorkBoard {
   private overview: Overview | null = null;
   private projectId: string | null = null;
   private works: WorkView[] = [];
+  private inbox: OwnerInboxView | null = null;
+  private ownerContext: OwnerContext | null = null;
   private selected = '';
   private drafts: Record<string, Draft> = {};
   private storageOK = true;
@@ -56,7 +60,13 @@ export class WorkBoard {
   async refresh(): Promise<void> {
     if (this.loading) return;
     this.loading = true;
-    try { this.works = (await this.host.api<WorksView>('/api/works')).works; this.render(); }
+    try {
+      const [works, inbox] = await Promise.all([this.host.api<WorksView>('/api/works'), this.host.api<OwnerInboxView>('/api/owner-inbox')]);
+      this.works = works.works; this.inbox = inbox; this.render();
+      const owner = this.current()?.ownerAgentId;
+      if (owner) this.ownerContext = await this.host.api<OwnerContext>(`/api/owners/${encodeURIComponent(owner)}/context`);
+      this.render();
+    }
     catch (error) { this.feedback.textContent = `${err(error)} 既有工作畫面為上次觀測。`; }
     finally { this.loading = false; }
   }
@@ -71,7 +81,7 @@ export class WorkBoard {
   private render(): void {
     const visible = this.works.filter(work => !this.projectId || work.projectId === this.projectId);
     if (!visible.some(work => work.id === this.selected)) { this.selected = visible[0]?.id ?? ''; this.signature = ''; }
-    const signature = JSON.stringify([visible, this.selected, this.overview?.agents.map(a => [a.id, a.name, a.instanceId])]);
+    const signature = JSON.stringify([visible, this.selected, this.inbox?.events, this.ownerContext?.works.map(w => [w.work.id, w.summaryStale]), this.overview?.agents.map(a => [a.id, a.name, a.instanceId, a.state, a.source])]);
     if (signature === this.signature) return;
     this.signature = signature;
     this.cards.replaceChildren();
@@ -102,6 +112,36 @@ export class WorkBoard {
     if (work.taskReceipt) history.append(el('p', `Edda 任務收據：${work.taskReceipt}`, 'public-text'));
     for (const event of work.history) history.append(el('p', `${event.at} · ${event.summary}`, 'public-text'));
     this.details.append(history);
+    const bound = el('section', '', 'bound-sessions'); bound.append(el('h4', '執行 session'));
+    for (const session of work.sessions ?? []) {
+      const source = this.overview?.agents.find(a => a.id === session.agentId);
+      const row = el('article', '', 'session-row');
+      const role = { manager: '管理者', worker: '工作者', reviewer: '審查者' }[session.role];
+      row.append(el('strong', `${this.name(session.agentId)} · ${role}`), el('p', `${session.transport} / ${session.sessionId}`, 'identity'));
+      row.append(el('p', session.unboundAt ? '已結束追蹤（保留歷史）' : source?.selectionRevision !== session.selectionRevision ? '來源綁定已變更，原 session 結果待確認' : source?.source === 'live' ? `即時觀測：${source.state}` : '僅有記錄或來源未知；不能判定程序已停止', 'muted'));
+      row.append(el('p', `預期：${session.expectedEvent}${session.nextExpectedAt ? ` · ${new Date(session.nextExpectedAt).toLocaleString('zh-TW')}` : ' · 未設定期限'}`));
+      if (session.reviewedSha) row.append(el('p', `審查版本：${session.reviewedSha}`, 'identity'));
+      bound.append(row);
+    }
+    if (!work.sessions?.length) bound.append(el('p', '尚未登記執行 session；不代表無人在工作。', 'muted'));
+    this.details.append(bound);
+    if (this.ownerContext?.works.find(w => w.work.id === work.id)?.summaryStale) this.details.append(el('p', '管理摘要已過期：子代理有更新的事件，請先查看下方收件匣。', 'notice'));
+    const inbox = el('section', '', 'owner-inbox'); inbox.append(el('h4', '負責人事件收件匣'));
+    for (const event of this.inbox?.events.filter(e => e.workId === work.id) ?? []) {
+      const row = el('article', '', 'session-row'); row.append(el('strong', event.summary), el('p', `${this.name(event.agentId)} · ${event.at}`, 'muted'));
+      if (event.category) {
+        const categories: Record<string, string> = { quota: '額度或配額限制', authentication: '認證失敗', rate_limit: '請求頻率限制', provider_unavailable: '供應商暫時不可用', network: '連線或逾時', unknown: '原因尚未分類' };
+        row.append(el('p', `${categories[event.category] ?? '原因尚未分類'}${event.httpStatus ? ` · HTTP ${event.httpStatus}` : ''}`, 'notice'));
+      }
+      if (event.acknowledgedAt) row.append(el('p', `已讀：${event.acknowledgedAt}`, 'muted'));
+      else { const ack = el('button', '標記已讀'); ack.type = 'button'; ack.disabled = this.busy; ack.addEventListener('click', () => { void this.acknowledgeEvent(event.id); }); row.append(ack); }
+      inbox.append(row);
+    }
+    if (this.draft().pendingAck) {
+      const retry = el('button', '恢復原事件確認'); retry.type = 'button'; retry.disabled = this.busy;
+      retry.addEventListener('click', () => { void this.acknowledgeEvent(this.draft().pendingAck!.eventId); }); inbox.append(retry);
+    }
+    this.details.append(inbox);
     // Polls update evidence without replacing a form the operator is editing.
     if (this.form.dataset.workId !== work.id) this.renderForm();
     else if (!this.draft().pending) for (const button of this.form.querySelectorAll<HTMLButtonElement>('button[type="submit"]')) button.disabled = this.busy || !!work.error || !this.storageOK;
@@ -126,9 +166,9 @@ export class WorkBoard {
     kind.value = draft.kind; kind.addEventListener('change', () => { draft.kind = kind.value as Kind; draft.basisRevision ??= this.current()?.revision ?? work.revision; this.save(); this.renderForm(); });
     this.form.append(field('工作操作', kind));
     const k = draft.kind;
-    if (k === 'assign') {
+    if (['assign', 'bind_session', 'handoff_owner'].includes(k)) {
       const agent = el('select'); agent.setAttribute('aria-label', '接手代理');
-      for (const a of this.overview?.agents.filter(a => a.projectId === work.projectId) ?? []) { const o = el('option', a.name); o.value = a.id; agent.append(o); }
+      for (const a of this.overview?.agents.filter(a => a.projectId === work.projectId && (k !== 'handoff_owner' || a.role === 'manager')) ?? []) { const o = el('option', a.name); o.value = a.id; agent.append(o); }
       if (draft.agentId) agent.value = draft.agentId;
       if (!agent.value) agent.selectedIndex = 0;
       draft.agentId = agent.value; agent.addEventListener('change', () => { draft.agentId = agent.value; draft.basisRevision ??= this.current()?.revision ?? work.revision; this.save(); }); this.form.append(field('接手代理', agent));
@@ -141,6 +181,24 @@ export class WorkBoard {
     if (['assign', 'intervene'].includes(k)) add('message', k === 'intervene' ? '方向變更內容（傳給目前接手代理）' : '交辦訊息', 4000);
     if (['acknowledge', 'deliver', 'accept'].includes(k)) add('evidence', '證據或結果（摘要、收據位置）', 4000);
     if (k === 'block') add('reason', '等待原因／需要誰回答什麼', 2000);
+    if (k === 'handoff_owner') add('evidence', '移交摘要與證據', 4000);
+    if (k === 'bind_session') {
+      const role = el('select'); role.setAttribute('aria-label', '執行角色');
+      for (const [id, label] of [['worker', '工作者'], ['reviewer', '審查者'], ['manager', '管理者']]) { const o = el('option', label); o.value = id!; role.append(o); }
+      role.value = draft.role ?? 'worker'; role.addEventListener('change', () => { draft.role = role.value as NonNullable<Draft['role']>; this.save(); }); this.form.append(field('執行角色', role));
+      add('nextStep', '預期下一個回報事件', 1000);
+      const sha = el('input'); sha.placeholder = '審查者必填完整 40 字元 SHA'; sha.value = draft.reviewedSha ?? ''; sha.maxLength = 40; sha.setAttribute('aria-label', '審查版本 SHA');
+      sha.addEventListener('input', () => { draft.reviewedSha = sha.value; this.save(); }); this.form.append(field('審查版本 SHA', sha));
+      const deadline = el('input'); deadline.type = 'datetime-local'; deadline.value = draft.nextExpectedAt ?? ''; deadline.setAttribute('aria-label', '預期回報時間');
+      deadline.addEventListener('input', () => { draft.nextExpectedAt = deadline.value; this.save(); }); this.form.append(field('預期回報時間（可留空）', deadline));
+      this.form.append(el('p', '登記只建立關聯，不會啟動或重複派工。逾期只提示疑似停住。', 'muted'));
+    }
+    if (k === 'unbind_session') {
+      const session = el('select'); session.setAttribute('aria-label', '要結束追蹤的 session');
+      for (const s of work.sessions.filter(s => !s.unboundAt)) { const o = el('option', `${this.name(s.agentId)} / ${s.sessionId}`); o.value = s.id; session.append(o); }
+      if (draft.bindingId) session.value = draft.bindingId;
+      draft.bindingId = session.value; session.addEventListener('change', () => { draft.bindingId = session.value; this.save(); }); this.form.append(field('要結束追蹤的 session', session));
+    }
     if (k === 'acknowledge') this.form.append(el('p', '請確認代理已明確回覆接受這次方向變更，再記錄證據；送達不代表理解。', 'muted'));
     if (k === 'accept') this.form.append(el('p', '由收尾負責人確認既有專案驗收条件後記錄。此操作不執行合併，也不改寫 Edda 任務收據。', 'muted'));
     const send = el('button', actions[k], 'primary'); send.type = 'submit'; send.disabled = this.busy || !!work.error; this.form.append(send);
@@ -172,6 +230,10 @@ export class WorkBoard {
           case 'deliver': action = { ...base, kind: 'deliver', evidence: draft.evidence, nextStep: draft.nextStep }; break;
           case 'accept': action = { ...base, kind: 'accept', evidence: draft.evidence }; break;
           case 'block': action = { ...base, kind: 'block', reason: draft.reason, nextStep: draft.nextStep }; break;
+          case 'bind_session': action = { ...base, kind: 'bind_session', agentId: draft.agentId, role: draft.role ?? 'worker', parentAgentId: draft.agentId === work.ownerAgentId ? null : work.ownerAgentId,
+            reviewedSha: draft.reviewedSha?.trim() || null, expectedEvent: draft.nextStep, nextExpectedAt: draft.nextExpectedAt ? new Date(draft.nextExpectedAt).toISOString() : null }; break;
+          case 'unbind_session': action = { ...base, kind: 'unbind_session', bindingId: draft.bindingId ?? '' }; break;
+          case 'handoff_owner': action = { ...base, kind: 'handoff_owner', ownerAgentId: draft.agentId, evidence: draft.evidence }; break;
         }
         draft.pending = action;
         draft.rejected = false;
@@ -187,11 +249,26 @@ export class WorkBoard {
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
       if (draft.pending) {
-        draft.rejected = ['INVALID_DATA', 'INVALID_ID', 'INVALID_REQUEST', 'INVALID_ACTION', 'TOO_LARGE', 'WORK_EVENT_TOO_LARGE', 'STALE_WORK', 'INVALID_TRANSITION', 'WRONG_PROJECT', 'STALE_SELECTION', 'INSTANCE_CHANGED', 'UNAVAILABLE', 'WAITING_USER'].includes(code);
+        draft.rejected = ['INVALID_DATA', 'INVALID_ID', 'INVALID_REQUEST', 'INVALID_ACTION', 'INVALID_ROLE', 'INVALID_SHA', 'INVALID_DEADLINE', 'INVALID_OWNER', 'INVALID_PARENT', 'TOO_LARGE', 'WORK_EVENT_TOO_LARGE', 'STALE_WORK', 'INVALID_TRANSITION', 'WRONG_PROJECT', 'STALE_SELECTION', 'INSTANCE_CHANGED', 'UNAVAILABLE', 'WAITING_USER'].includes(code);
         this.save();
       }
       this.feedback.textContent = `${err(error)}${draft.pending ? draft.rejected ? ' 尚未接受這項操作，可保留草稿重新編輯。' : ' 原始操作編號已保留，請查詢／恢復原操作。' : ''}`;
     }
     finally { this.busy = false; this.renderForm(); }
+  }
+  private async acknowledgeEvent(eventId: string): Promise<void> {
+    if (this.busy || !this.storageOK) return;
+    const draft = this.draft();
+    if (draft.pendingAck && draft.pendingAck.eventId !== eventId) { this.feedback.textContent = '請先恢復前一筆事件確認。'; return; }
+    draft.pendingAck ??= { eventId, actionId: crypto.randomUUID(), evidence: '操作者於工作台確認已讀；不代表任務驗收或指示語意確認。' };
+    if (!this.save()) return;
+    this.busy = true;
+    try {
+      const receipt = await this.host.api<OwnerInboxEvent>('/api/owner-inbox/ack', draft.pendingAck);
+      if (receipt.id !== draft.pendingAck.eventId || receipt.acknowledgementId !== draft.pendingAck.actionId) throw new Error('事件確認回執與原操作不一致。');
+      draft.pendingAck = null; this.save(); this.feedback.textContent = '事件已標記為已讀。';
+    }
+    catch (error) { this.feedback.textContent = `${err(error)} 已保留原事件確認編號。`; }
+    finally { this.busy = false; this.signature = ''; await this.refresh(); }
   }
 }
