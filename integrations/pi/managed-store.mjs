@@ -35,7 +35,7 @@ export function installRuntime(root, source = dirname(fileURLToPath(import.meta.
   const releases = join(resolve(root), 'releases');
   mkdirSync(releases, { recursive: true, mode: 0o700 });
   if (lstatSync(releases).isSymbolicLink()) throw new Error('Release directory must not be a link');
-  const names = readdirSync(source).filter((name) => name === 'package.json' || name.endsWith('.ps1') ||
+  const names = readdirSync(source).filter((name) => name === 'package.json' || name === 'getting-started.md' || name.endsWith('.ps1') ||
     (name.endsWith('.mjs') && !name.endsWith('.test.mjs') && !name.includes('smoke'))).sort();
   const files = {}, bytes = new Map();
   for (const name of names) {

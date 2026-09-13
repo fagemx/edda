@@ -19,3 +19,4 @@ jobs:
         with:
           node-version: '24'
       - run: npm --prefix integrations/pi test
+      - run: npm --prefix integrations/pi run test:package
