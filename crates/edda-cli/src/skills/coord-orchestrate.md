@@ -65,6 +65,7 @@ Use the first matching route.
 | Situation | Next action | Do not add |
 |---|---|---|
 | Assigned worker or reviewer, including a resumed session | Read `edda task show <id>`, its reachable brief, prior results and actual source; perform only that role | new planning, neighbouring tasks or a formation |
+| A user asks an assistant to get a whole background job done | Delegate to one distinct controller per `coord-delegate`, carrying the assistant's return address | a formation, a scheduler, or the assistant becoming the controller |
 | Controller resuming an existing plan | Recover the rail owner, active map, task JSON, dispatch/session handles and source/PR evidence before selecting an action | replacement tasks or a relaunch merely because chat vanished |
 | New request with usable acceptance or a plan | Reuse that acceptance; bind owners, scope and only material prerequisites | repeated discovery or one issue/task per step |
 | Small single-owner change | Use ordinary implementation and the repository's existing review path | a rail, program or formation solely for ceremony |
