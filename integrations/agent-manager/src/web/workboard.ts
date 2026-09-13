@@ -1,5 +1,5 @@
 import type { AgentView, ConversationView, Overview, SendRequest } from '../contracts.js';
-import type { WorkAction, WorkStage, WorkView, WorksView } from '../workflow-contracts.js';
+import type { WorkAction, WorkPhase, WorkStage, WorkView, WorkWaitingFor, WorksView } from '../workflow-contracts.js';
 import type { OwnerContext, OwnerInboxAck, OwnerInboxView, OwnerInboxEvent } from '../owner-inbox-contracts.js';
 import { ContinuationBoard } from './continuation-board.js';
 
@@ -9,6 +9,13 @@ interface Draft { kind: Kind; agentId: string; message: string; nextStep: string
 interface Host { api<T>(path: string, body?: unknown): Promise<T>; openAgent(id: string): void }
 const key = 'edda-manager-work-drafts-v1';
 const labels: Record<WorkStage, string> = { uninitialized: '尚未安排下一步', ready: '待交接', assigned: '已交辦・等待接手', executing: '執行中', awaiting_delivery: '回覆結束・待交付證據', delivered: '已交付・待驗收', accepted: '已記錄驗收', blocked: '有阻塞・需要處理' };
+// Native phase labels (GH1181). Shown first; the manual stage above is secondary.
+const phases: Record<WorkPhase, string> = { uninitialized: '尚未初始化', ready: '待指派', assigned: '已交辦・尚未確認開始', working: '執行中（原生確認）', waiting: '等待中', interrupted: '已中斷／需要確認', delivered: '已交付・待審查', accepted: '已驗收／已完成', blocked: '阻塞', failed: '失敗' };
+const waitTargets: Record<Exclude<WorkWaitingFor, null>, string> = { worker: '等待 worker（執行者）', verifier: '等待 verifier（審查者）', dependency: '等待相依條件', user_decision: '等待使用者決策', tool: '等待工具', none: '無等待對象' };
+// A manual stage that claims a child is executing is stale whenever the native
+// sources cannot confirm a working session — the incident GH1181 fixes. The
+// native phase is shown first and this note is bounded to that disagreement.
+function stageStale(work: WorkView): boolean { return work.stage === 'executing' && work.phase !== 'working'; }
 const actions: Record<Kind, string> = { initialize: '安排下一步', assign: '交辦給代理', intervene: '變更工作指示', acknowledge: '記錄指示已確認', deliver: '記錄交付', accept: '記錄驗收與收尾', block: '回報阻塞', bind_session: '登記執行 session', unbind_session: '結束 session 追蹤', handoff_owner: '移交收尾負責人' };
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', cls = ''): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag); node.textContent = text; node.className = cls; return node;
@@ -92,7 +99,7 @@ export class WorkBoard {
     if (!visible.length) this.cards.append(el('p', '此專案尚未選入工作。先在本機設定加入既有 Edda 任務，代理對話仍可使用。', 'empty'));
     for (const work of visible) {
       const button = el('button', '', 'work-card'); button.type = 'button'; button.setAttribute('aria-pressed', String(work.id === this.selected));
-      button.append(el('strong', `#${work.taskId} ${work.title}`), el('span', work.error ?? labels[work.stage], work.error ? 'danger' : 'work-stage'), el('span', `收尾：${this.name(work.ownerAgentId)} · 執行者：${this.name(work.assigneeAgentId)}`, 'muted'));
+      button.append(el('strong', `#${work.taskId} ${work.title}`), el('span', work.error ?? phases[work.phase], work.error ? 'danger' : 'work-stage'), el('span', `收尾：${this.name(work.ownerAgentId)} · 執行者：${this.name(work.assigneeAgentId)}`, 'muted'));
       button.addEventListener('click', () => { this.selected = work.id; this.signature = ''; this.render(); this.renderForm(); }); this.cards.append(button);
     }
     const work = this.current(); this.details.replaceChildren(); this.form.hidden = !work;
@@ -101,8 +108,13 @@ export class WorkBoard {
     this.details.append(el('p', `下一步：${work.nextStep || '尚未安排；由收尾負責人處理。'}`, 'work-next'));
     const nextOwner = ['assigned', 'executing', 'awaiting_delivery'].includes(work.stage) ? work.assigneeAgentId : work.ownerAgentId;
     this.details.append(el('p', work.stage === 'accepted' ? `收尾紀錄由 ${this.name(work.ownerAgentId)} 負責。` : `目前由 ${this.name(nextOwner)} 接續處理。`, 'muted'));
-    this.details.append(el('p', `Edda 任務狀態：${work.taskStatus} · 工作交接：${labels[work.stage]}`, 'muted'));
-    if (work.waitingReason) this.details.append(el('p', work.waitingReason, 'notice'));
+    // Native phase first: it is the authoritative reading of task/delivery/session/
+    // inbox events. The manual ledger stage stays visible but secondary.
+    this.details.append(el('p', `原生階段：${phases[work.phase]}${work.waitingFor ? ` · ${waitTargets[work.waitingFor]}` : ''}`, 'work-phase'));
+    if (work.waitEvidence) this.details.append(el('p', `原生證據：${work.waitEvidence}`, 'public-text'));
+    this.details.append(el('p', `Edda 任務狀態：${work.taskStatus} · 手動交接紀錄：${labels[work.stage]}`, 'muted'));
+    if (stageStale(work)) this.details.append(el('p', '手動交接紀錄顯示執行中，但原生來源無法確認有子代理正在工作；以原生階段為準。', 'notice'));
+    if (work.waitingReason) this.details.append(el('p', `手動等待原因（次要）：${work.waitingReason}`, 'muted'));
     if (work.error) this.details.append(el('p', work.error, 'notice'));
     if (work.evidence) this.details.append(el('p', `最近證據：${work.evidence}`, 'public-text'));
     if (work.pendingInstruction && !work.pendingInstruction.acknowledgedAt) this.details.append(el('p', `方向變更等待確認：${work.pendingInstruction.message}`, 'notice public-text'));
@@ -124,6 +136,8 @@ export class WorkBoard {
       const role = { manager: '管理者', worker: '工作者', reviewer: '審查者' }[session.role];
       row.append(el('strong', `${this.name(session.agentId)} · ${role}`), el('p', `${session.transport} / ${session.sessionId}`, 'identity'));
       row.append(el('p', session.unboundAt ? '已結束追蹤（保留歷史）' : source?.selectionRevision !== session.selectionRevision ? '來源綁定已變更，原 session 結果待確認' : source?.source === 'live' ? `即時觀測：${source.state}` : '僅有記錄或來源未知；不能判定程序已停止', 'muted'));
+      // Heartbeat / liveness stays a separate process fact: never the wait reason.
+      if (source) row.append(el('p', `程序跡象：來源 ${source.source} · 心跳 ${source.heartbeatAt ? new Date(source.heartbeatAt).toLocaleString('zh-TW') : '無'} · 最近進度 ${source.lastProgressAt ? new Date(source.lastProgressAt).toLocaleString('zh-TW') : '無'}${source.stale ? ' · 已過期' : ''}`, 'muted identity'));
       row.append(el('p', `預期：${session.expectedEvent}${session.nextExpectedAt ? ` · ${new Date(session.nextExpectedAt).toLocaleString('zh-TW')}` : ' · 未設定期限'}`));
       if (session.reviewedSha) row.append(el('p', `審查版本：${session.reviewedSha}`, 'identity'));
       bound.append(row);
