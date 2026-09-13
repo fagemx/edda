@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { AgentManager } from './manager.js';
 import { ManagerStore } from './store.js';
 import { ChannelAdapter, defaultPiRoot, secureRoot } from './pi-adapter.js';
@@ -14,6 +15,7 @@ import type { AgentBinding, ManagerConfig, ProjectView } from './contracts.js';
 import { RuntimeAdapter } from './runtime-adapter.js';
 
 interface Owner { version: 1; pid: number; instanceId: string; origin: string; token: string; configDigest: string; startedAt: string }
+interface Lock { pid: number; instanceId: string }
 const [command = 'help', ...args] = process.argv.slice(2), flags = new Map<string, string>();
 for (let i = 0; i < args.length; i += 2) {
   const name = args[i], value = args[i + 1];
@@ -39,6 +41,40 @@ function owner(): Owner {
   return value as unknown as Owner;
 }
 function alive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ESRCH') return false; throw e; } }
+// SQLite holds the cross-process lifecycle mutex and the OS releases it on crash.
+// A second filesystem lock would itself need racy stale-lock recovery. Never
+// remove this database: its stable identity serializes every lock/owner mutation.
+function lifecycle<T>(action: () => T): T {
+  const file = join(root, 'lifecycle.sqlite');
+  for (const path of [file, file + '-journal', file + '-wal', file + '-shm']) {
+    if (existsSync(path) && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) throw new Error('Lifecycle storage must not be a link');
+  }
+  const db = new DatabaseSync(file);
+  try {
+    db.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
+    const result = action();
+    db.exec('COMMIT'); return result;
+  } finally { db.close(); }
+}
+function lock(): Lock {
+  const value = object(read(lockPath));
+  if (!Number.isSafeInteger(value.pid) || Number(value.pid) <= 0 || typeof value.instanceId !== 'string' || !value.instanceId) throw new Error('Invalid service lock');
+  return value as unknown as Lock;
+}
+function matchingOwner(held: Lock): Owner | null {
+  if (!existsSync(ownerPath)) return null;
+  const current = owner();
+  if (current.instanceId !== held.instanceId || current.pid !== held.pid) throw new Error('Owner generation mismatch');
+  return current;
+}
+// Called only inside lifecycle(). An absent owner is allowed for a crash before
+// readiness; an existing owner must identify this exact lock generation and PID.
+function reclaim(held: Lock): void {
+  const current = matchingOwner(held);
+  if (alive(held.pid)) throw new Error('Cannot prove service owner is dead; no recovery performed');
+  if (current) unlinkSync(ownerPath);
+  unlinkSync(lockPath);
+}
 async function service(record: Owner): Promise<unknown> {
   const response = await fetch(`${record.origin}/api/service`, { headers: { authorization: `Bearer ${record.token}` }, signal: AbortSignal.timeout(2000), redirect: 'error' });
   if (!response.ok) throw new Error('Service authentication failed');
@@ -76,11 +112,9 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ configFile, selectedAgents: config.agents.map((a) => a.id), agentsStarted: false })); return;
   }
   if (command === 'recover') {
-    const lock = object(read(lockPath));
-    if (!Number.isSafeInteger(lock.pid) || Number(lock.pid) <= 0 || alive(Number(lock.pid))) throw new Error('Cannot prove service owner is dead; no recovery performed');
-    if (existsSync(ownerPath) && owner().instanceId !== lock.instanceId) throw new Error('Owner generation mismatch');
-    if (existsSync(ownerPath)) unlinkSync(ownerPath);
-    unlinkSync(lockPath); console.log(JSON.stringify({ recovered: true, agentsChanged: false, operationsReplayed: false })); return;
+    await secureRoot(root, piRoot);
+    lifecycle(() => reclaim(lock()));
+    console.log(JSON.stringify({ recovered: true, agentsChanged: false, operationsReplayed: false })); return;
   }
   if (['status', 'url', 'stop'].includes(command)) {
     const current = owner(), info = await service(current);
@@ -97,35 +131,61 @@ async function main(): Promise<void> {
   const config = loadConfig(configFile), configDigest = hash(JSON.stringify(config));
   await secureRoot(root, piRoot);
   if (command === 'start') {
-    if (existsSync(lockPath)) {
-      const current = owner(); await service(current);
-      if (current.configDigest !== configDigest) throw new Error('Service is running with another configuration; stop it before changing selections');
-      console.log(JSON.stringify({ reused: true, origin: current.origin, url: `${current.origin}/#token=${current.token}` })); return;
+    let recovered = false;
+    const pending = lifecycle(() => {
+      if (existsSync(lockPath)) {
+        const held = lock(); matchingOwner(held);
+        if (alive(held.pid)) return true;
+        reclaim(held); recovered = true;
+      } else if (existsSync(ownerPath)) throw new Error('Owner exists without a service lock; no recovery performed');
+      return false;
+    });
+    const instanceId = randomUUID();
+    let child: ReturnType<typeof spawn> | undefined, spawnError: Error | null = null;
+    if (!pending) {
+      const fd = openSync(join(root, 'service.log'), 'a', 0o600);
+      try {
+        child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'serve', '--root', root, '--config', configFile, '--port', String(port), '--pi-root', piRoot, '--instance', instanceId],
+          { cwd: root, windowsHide: true, detached: true, stdio: ['ignore', fd, fd] });
+        child.on('error', (e) => { spawnError = e; }); child.unref();
+      } finally { closeSync(fd); }
     }
-    const instanceId = randomUUID(), fd = openSync(join(root, 'service.log'), 'a', 0o600);
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'serve', '--root', root, '--config', configFile, '--port', String(port), '--pi-root', piRoot, '--instance', instanceId],
-      { cwd: root, windowsHide: true, detached: true, stdio: ['ignore', fd, fd] });
-    let spawnError: Error | null = null; child.on('error', (e) => { spawnError = e; }); child.unref(); closeSync(fd);
     for (let i = 0; i < 80; i++) {
       if (spawnError) throw spawnError;
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error('Service exited before readiness; inspect private service.log');
-      if (existsSync(ownerPath)) {
-        const current = owner();
-        if (current.instanceId !== instanceId) throw new Error('Another start owns this root; inspect status rather than spawning again');
-        await service(current); console.log(JSON.stringify({ started: true, origin: current.origin, url: `${current.origin}/#token=${current.token}`, pid: current.pid })); return;
+      const state = lifecycle(() => {
+        if (!existsSync(lockPath)) return null;
+        const held = lock(); return { current: matchingOwner(held), live: alive(held.pid) };
+      });
+      if (state?.current) {
+        const current = state.current;
+        if (!state.live) throw new Error('Service exited before readiness; inspect private service.log');
+        await service(current);
+        if (current.configDigest !== configDigest) throw new Error('Service is running with another configuration; stop it before changing selections');
+        console.log(JSON.stringify({ ...(current.instanceId === instanceId ? { started: true } : { reused: true }), recovered,
+          origin: current.origin, url: `${current.origin}/#token=${current.token}`, pid: current.pid })); return;
       }
+      if (!state?.live && (pending || (child && (child.exitCode !== null || child.signalCode !== null)))) throw new Error('Service exited before readiness; inspect private service.log');
       await delay(250);
     }
     throw new Error('Startup is not confirmed; inspect private service.log and status before another start');
   }
   const instanceId = flags.get('--instance') || randomUUID();
-  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, instanceId }), { flag: 'wx', mode: 0o600 });
+  lifecycle(() => {
+    if (existsSync(lockPath)) reclaim(lock());
+    else if (existsSync(ownerPath)) throw new Error('Owner exists without a service lock; no recovery performed');
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, instanceId }), { flag: 'wx', mode: 0o600 });
+  });
   let store: ManagerStore | undefined, manager: AgentManager | undefined, gateway: Awaited<ReturnType<typeof serve>> | undefined, closing = false;
   const shutdown = async (): Promise<void> => {
     if (closing) return; closing = true;
     await manager?.stop(); await gateway?.close(); store?.close();
-    if (existsSync(ownerPath) && owner().instanceId === instanceId) unlinkSync(ownerPath);
-    if (object(read(lockPath)).instanceId === instanceId) unlinkSync(lockPath);
+    lifecycle(() => {
+      if (!existsSync(lockPath)) return;
+      const held = lock();
+      if (held.instanceId !== instanceId || held.pid !== process.pid) return;
+      if (matchingOwner(held)) unlinkSync(ownerPath);
+      unlinkSync(lockPath);
+    });
   };
   try {
     store = new ManagerStore(root); manager = new AgentManager(config, store, await RuntimeAdapter.create(store, piRoot));
@@ -133,7 +193,11 @@ async function main(): Promise<void> {
     const token = randomBytes(32).toString('hex');
     gateway = await serve(manager, token, { port, onStop: () => { void shutdown(); } });
     const record: Owner = { version: 1, pid: process.pid, instanceId, origin: gateway.origin, token, configDigest, startedAt: manager.startedAt };
-    writeFileSync(ownerPath, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+    lifecycle(() => {
+      const held = lock();
+      if (held.instanceId !== instanceId || held.pid !== process.pid) throw new Error('Owner generation mismatch');
+      writeFileSync(ownerPath, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
+    });
     process.once('SIGINT', () => { void shutdown(); }); process.once('SIGTERM', () => { void shutdown(); });
     console.log(`Agent manager: ${gateway.origin}/#token=${token}`);
   } catch (error) { await shutdown(); throw error; }
