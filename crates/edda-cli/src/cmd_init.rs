@@ -16,6 +16,7 @@ const SKILLS: &[(&str, &str)] = &[
         include_str!("skills/coord-orchestrate.md"),
     ),
     ("coord-run", include_str!("skills/coord-run.md")),
+    ("coord-delegate", include_str!("skills/coord-delegate.md")),
     ("continuity-save", include_str!("skills/continuity-save.md")),
     (
         "continuity-restore",
@@ -411,6 +412,13 @@ mod tests {
         let tracked = include_str!("../../../.claude/skills/coord-orchestrate/SKILL.md");
         assert_eq!(tracked, embedded);
         assert!(embedded.contains("delivery-flow/1"));
+    }
+
+    #[test]
+    fn tracked_coord_delegate_projection_matches_embedded_source() {
+        let embedded = include_str!("skills/coord-delegate.md");
+        let tracked = include_str!("../../../.claude/skills/coord-delegate/SKILL.md");
+        assert_eq!(tracked, embedded);
     }
 
     #[test]
