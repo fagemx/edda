@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CodexAdapter } from '../src/codex-adapter.js';
@@ -10,7 +10,7 @@ import type { AgentBinding } from '../src/contracts.js';
 const at = '2026-09-13T01:00:00.000Z';
 const row = (type: string, payload: unknown): string => JSON.stringify({ timestamp: at, type, payload }) + '\n';
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'codex-observer-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'codex-observer-')));
   const file = join(root, 'rollout.jsonl');
   const binding: AgentBinding = { id: 'codex', name: 'Codex', projectId: 'project', role: 'worker', registryRoot: root,
     runId: null, sessionId: 'thread-1', workspace: root, summaryFile: null, transport: 'codex', transcriptFile: file };
@@ -19,6 +19,25 @@ function fixture() {
   const store = new ManagerStore(join(root, 'store'));
   return { root, file, binding, header, store, adapter: new CodexAdapter(store), close() { store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test('Codex native event identity survives truncation and offset changes while public cursor resets', async () => {
+  const f = fixture();
+  try {
+    const end = row('event_msg', { type: 'task_complete', turn_id: 'same-turn' });
+    appendFileSync(f.file, end + row('ignored', { padding: 'x'.repeat(1000) }));
+    const before = await f.adapter.observe(f.binding);
+    writeFileSync(f.file, f.header + end);
+    const shortened = await f.adapter.observe(f.binding);
+    assert.notEqual(shortened.instanceId, before.instanceId);
+    assert.equal(shortened.sessionEvidence!.events[0]!.id, before.sessionEvidence!.events[0]!.id);
+    writeFileSync(f.file, f.header + row('ignored', { padding: 'changed offset' }) + end);
+    const moved = await f.adapter.observe(f.binding);
+    assert.equal(moved.sessionEvidence!.events[0]!.id, before.sessionEvidence!.events[0]!.id);
+    appendFileSync(f.file, row('event_msg', { type: 'task_complete', turn_id: 'different-turn' }));
+    const distinct = await f.adapter.observe(f.binding);
+    assert.notEqual(distinct.sessionEvidence!.events.at(-1)!.id, before.sessionEvidence!.events[0]!.id);
+  } finally { f.close(); }
+});
 
 test('Codex lifecycle, public-only projection, append restart and stable event IDs', async () => {
   const f = fixture();

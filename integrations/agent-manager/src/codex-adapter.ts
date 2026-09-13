@@ -9,7 +9,7 @@ const HEADER = 256 * 1024, BUDGET = 1024 * 1024, LINE = 256 * 1024;
 const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 const pathKey = (value: string): string => process.platform === 'win32' ? normalize(value).toLowerCase() : normalize(value);
 interface Snapshot {
-  version: 1; identity: string; incarnation: string; offset: number; checkpoint: string;
+  version: 2; identity: string; incarnation: string; offset: number; checkpoint: string;
   skipping: boolean; historyComplete: boolean; state: RuntimeState; progress: string | null;
   diagnostic: string | null; entries: PublicEntry[]; events: NativeSessionEvent[];
 }
@@ -55,12 +55,12 @@ export class CodexAdapter implements PiAdapter {
       const saved = this.store.setting(key);
       let state: Snapshot | null = null;
       if (saved) { try { state = JSON.parse(saved) as Snapshot; } catch { /* Rebuild bounded projection. */ } }
-      const reset = !state || state.version !== 1 || state.identity !== identity || state.offset > stat.size ||
+      const reset = !state || state.version !== 2 || state.identity !== identity || state.offset > stat.size ||
         state.checkpoint !== digest(bytes(fd, Math.max(0, state.offset - 64), Math.min(64, state.offset)));
       const allowance = BUDGET - header.length - 128;
       if (reset) {
         const offset = Math.max(end + 1, stat.size - allowance);
-        state = { version: 1, identity, incarnation: randomUUID(), offset, checkpoint: '', skipping: offset > end + 1,
+        state = { version: 2, identity, incarnation: randomUUID(), offset, checkpoint: '', skipping: offset > end + 1,
           historyComplete: offset === end + 1, state: 'unknown', progress: null, diagnostic: saved ? '來源已更換或截斷；重新讀取有限歷史。' : null,
           entries: [], events: [] };
       }
@@ -79,7 +79,7 @@ export class CodexAdapter implements PiAdapter {
         if (current.skipping) { current.skipping = false; position = newline + 1; continue; }
         if (newline - position > LINE) { current.historyComplete = false; current.diagnostic = '略過過大的紀錄；部分歷史不可用。'; }
         else {
-          try { this.consume(current, JSON.parse(chunk.subarray(position, newline).toString('utf8')), current.offset + position); }
+          try { this.consume(current, JSON.parse(chunk.subarray(position, newline).toString('utf8')), current.offset + position, binding.sessionId); }
           catch { current.historyComplete = false; current.diagnostic = '略過損壞的紀錄；部分歷史不可用。'; }
         }
         position = newline + 1;
@@ -94,7 +94,7 @@ export class CodexAdapter implements PiAdapter {
     } finally { if (fd !== undefined) closeSync(fd); }
   }
 
-  private consume(state: Snapshot, raw: unknown, offset: number): void {
+  private consume(state: Snapshot, raw: unknown, offset: number, sessionId: string): void {
     const record = object(raw), payload = object(record?.payload);
     if (!record || !payload) return;
     const at = timestamp(record.timestamp);
@@ -105,7 +105,10 @@ export class CodexAdapter implements PiAdapter {
       const kind = type === 'task_started' ? 'started' : type === 'task_complete' ? 'reply_ended' :
         type === 'turn_aborted' ? 'interrupted' : type === 'item_completed' && item?.type === 'SubAgentActivity' && identifier(item.agent_thread_id) ? 'child_reference' : null;
       if (kind) {
-        state.events.push({ id, kind, at, turnId: identifier(payload.turn_id), category: null, httpStatus: null,
+        // A source reset changes conversation cursors, not the identity of an
+        // already observed native event. Replayed lifecycle evidence deduplicates.
+        const nativeId = `codex:${digest(JSON.stringify([sessionId, kind, identifier(payload.turn_id), at, identifier(payload.id), kind === 'child_reference' ? identifier(item?.id) : null, kind === 'child_reference' ? identifier(item?.agent_thread_id) : null]))}`;
+        state.events.push({ id: nativeId, kind, at, turnId: identifier(payload.turn_id), category: null, httpStatus: null,
           ...(kind === 'child_reference' ? { childSessionId: identifier(item?.agent_thread_id)! } : {}) });
         state.events = state.events.slice(-128);
         state.progress = at;

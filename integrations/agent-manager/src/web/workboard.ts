@@ -249,7 +249,7 @@ export class WorkBoard {
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
       if (draft.pending) {
-        draft.rejected = ['INVALID_DATA', 'INVALID_ID', 'INVALID_REQUEST', 'INVALID_ACTION', 'TOO_LARGE', 'WORK_EVENT_TOO_LARGE', 'STALE_WORK', 'INVALID_TRANSITION', 'WRONG_PROJECT', 'STALE_SELECTION', 'INSTANCE_CHANGED', 'UNAVAILABLE', 'WAITING_USER'].includes(code);
+        draft.rejected = ['INVALID_DATA', 'INVALID_ID', 'INVALID_REQUEST', 'INVALID_ACTION', 'INVALID_ROLE', 'INVALID_SHA', 'INVALID_DEADLINE', 'INVALID_OWNER', 'INVALID_PARENT', 'TOO_LARGE', 'WORK_EVENT_TOO_LARGE', 'STALE_WORK', 'INVALID_TRANSITION', 'WRONG_PROJECT', 'STALE_SELECTION', 'INSTANCE_CHANGED', 'UNAVAILABLE', 'WAITING_USER'].includes(code);
         this.save();
       }
       this.feedback.textContent = `${err(error)}${draft.pending ? draft.rejected ? ' 尚未接受這項操作，可保留草稿重新編輯。' : ' 原始操作編號已保留，請查詢／恢復原操作。' : ''}`;
