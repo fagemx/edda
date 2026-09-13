@@ -9,7 +9,7 @@ import { AgentManager } from '../src/manager.js';
 import { ManagerStore } from '../src/store.js';
 import { parseConfig, hash } from '../src/config.js';
 import { EddaWorkflowLedger, WorkflowLocks, eddaRunner, type WorkflowLedger, type LedgerNote } from '../src/edda-workflow.js';
-import { ContinuationService, type NativeRunner } from '../src/continuation.js';
+import { ContinuationService, nativeContinuityRunner, type NativeRunner } from '../src/continuation.js';
 import type { NativeCapsuleInput, NativeRestore, PortableBundle } from '../src/continuation-contracts.js';
 import type { PiAdapter } from '../src/contracts.js';
 import type { WorkBinding } from '../src/workflow-contracts.js';
@@ -30,21 +30,22 @@ function fixture(root: string, ledger: WorkflowLedger = new Ledger(), workspace 
   return { manager, store, storage, config, adapter, close: async () => { if (!closed) { closed = true; await manager.stop(); store.close(); } } };
 }
 function nativeFixture() {
-  const capsules = new Map<string, NativeRestore>(); let saves = 0, dropResponse = false, failRead = false;
+  const capsules = new Map<string, NativeRestore>(); let saves = 0, dropResponse = false, failRead = false, failList = false;
   const calls: string[][] = [];
-  const run: NativeRunner = async (_workspace, args) => {
+  const run: NativeRunner = async (_workspace, args, context) => {
     calls.push(args);
     if (args.at(-1) === '--help') return { ok: true, stdout: '--file --json CAPSULE_ID --out' };
     if (args[1] === 'save') {
       saves++; const data = JSON.parse(readFileSync(args[3]!, 'utf8')) as NativeCapsuleInput;
       const id = `cap_${saves}`, event = `evt_saved${saves}`;
       capsules.set(id, { data_authority: 'data_only', local_event_id: event, origin_event_id: event, imported: false, legacy_partial: false, warnings: [], capsule: {
-        capsule_version: 1, capsule_id: id, created_at: '2026-09-13T00:00:00Z', source: {}, repository: { portable_repo_id: 'repo_fixture' },
+        capsule_version: 1, capsule_id: id, created_at: '2026-09-13T00:00:00Z', source: context ? { actor: context.actor } : {}, repository: { portable_repo_id: 'repo_fixture' },
         state: { title: '', summary: '', goal: '', current: '', hypotheses: [], rejected: [], open_questions: [], ...data.state }, git: { head_sha: 'a'.repeat(40), dirty_paths_truncated: false }, references: data.references ?? {}, truncation: [],
       } });
       return { ok: !dropResponse, stdout: dropResponse ? '' : JSON.stringify({ status: 'SAVED_LOCAL', data_authority: 'data_only', capsule_id: id }) };
     }
     if (args[1] === 'restore') return { ok: !failRead && capsules.has(args[2]!), stdout: failRead ? '' : JSON.stringify(capsules.get(args[2]!)) };
+    if (args[1] === 'list') return { ok: !failList, stdout: failList ? '' : JSON.stringify({ data_authority: 'data_only', capsules: [...capsules.values()], warnings: [] }) };
     if (args[1] === 'export') {
       const capsule = capsules.get(args[2]!)!.capsule, bytes = JSON.stringify(capsule);
       const bundle: PortableBundle = { bundle_version: 1, portable_repo_id: 'repo_fixture', origin_capsule_id: capsule.capsule_id, origin_event_id: `evt_saved${saves}`, capsule_sha256: hash(bytes), capsule_bytes_hex: Buffer.from(bytes).toString('hex'), bundle_sha256: hash(bytes), data_authority: 'data_only' };
@@ -52,7 +53,7 @@ function nativeFixture() {
     }
     throw new Error(`Unexpected native command ${args[1]}`);
   };
-  return { run, calls, saves: () => saves, drop: () => { dropResponse = true; }, failRead: (value: boolean) => { failRead = value; } };
+  return { run, calls, capsules, saves: () => saves, drop: () => { dropResponse = true; }, failRead: (value: boolean) => { failRead = value; }, failList: (value: boolean) => { failList = value; } };
 }
 
 test('native save wrapper keeps durable intent, native task references and same-ID publication after restart without another save', async () => {
@@ -75,19 +76,44 @@ test('native save wrapper keeps durable intent, native task references and same-
   } finally { await f.close(); if (replacement) { await replacement.manager.stop(); replacement.store.close(); } rmSync(root, { recursive: true, force: true }); }
 });
 
-test('unknown native effect never replays and blocks blind new save; known capsule recovers failed readback and attachment', async () => {
+test('lost stdout and known readback failure recover from latest without original browser or duplicate native save', async () => {
   for (const known of [false, true]) {
     const root = mkdtempSync(join(tmpdir(), 'continuity-recovery-')), f = fixture(root), native = nativeFixture();
     try {
       const service = new ContinuationService(f.manager, { run: native.run, locks: new WorkflowLocks(join(root, 'locks')) });
       const request = { actionId: randomUUID(), revision: (await f.manager.works.continuationSnapshot('w')).view.revision, input };
-      if (known) native.failRead(true); else native.drop();
+      if (known) native.failRead(true); else { native.drop(); native.failList(true); }
       if (known) await assert.rejects(service.publish('w', request), /指定原生/); else assert.equal((await service.publish('w', request)).operation?.status, 'unknown');
-      native.failRead(false);
-      const recovered = await service.publish('w', request); assert.equal(native.saves(), 1); assert.equal(recovered.operation?.status, known ? 'attached' : 'unknown');
-      if (!known) await assert.rejects(service.publish('w', { ...request, actionId: randomUUID() }), /上一份/);
+      native.failRead(false); native.failList(false);
+      const recovered = await service.latest('w'); assert.equal(native.saves(), 1); assert.equal(recovered.operation?.status, 'attached'); assert.equal(recovered.operation?.actionId, request.actionId);
+      await service.publish('w', request); assert.equal(native.saves(), 1);
     } finally { await f.close(); rmSync(root, { recursive: true, force: true }); }
   }
+});
+
+test('exact recovery rejects another capsule or altered state despite actor match, then preserves the original action', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'continuity-exact-recovery-')), f = fixture(root), native = nativeFixture();
+  try {
+    const service = new ContinuationService(f.manager, { run: native.run, locks: new WorkflowLocks(join(root, 'locks')) });
+    const request = { actionId: randomUUID(), revision: (await f.manager.works.continuationSnapshot('w')).view.revision, input };
+    native.drop(); native.failList(true); const pending = await service.publish('w', request); assert.equal(pending.operation?.status, 'unknown');
+    const original = native.capsules.get('cap_1')!;
+    const altered = structuredClone(original); altered.capsule.capsule_id = 'cap_other'; altered.capsule.state.next_action = 'Different'; native.capsules.set('cap_other', altered);
+    await assert.rejects(service.recover('w', { actionId: request.actionId, capsuleId: 'cap_other' }), /不一致/);
+    const recovered = await service.recover('w', { actionId: request.actionId, capsuleId: 'cap_1' });
+    assert.equal(recovered.operation?.status, 'attached'); assert.equal(recovered.operation?.actionId, request.actionId); assert.equal(native.saves(), 1);
+  } finally { await f.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('crash after native save before attachment recovers from persistent known capsule through latest', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'continuity-attach-recovery-')), ledger = new Ledger(), f = fixture(root, ledger), native = nativeFixture();
+  try {
+    const service = new ContinuationService(f.manager, { run: native.run, locks: new WorkflowLocks(join(root, 'locks')) });
+    const request = { actionId: randomUUID(), revision: (await f.manager.works.continuationSnapshot('w')).view.revision, input };
+    ledger.crash = true; await assert.rejects(service.publish('w', request), /crash/);
+    const recovered = await service.latest('w'); assert.equal(recovered.operation?.status, 'attached'); assert.equal(recovered.operation?.actionId, request.actionId);
+    assert.equal(ledger.entries.length, 1); assert.equal(native.saves(), 1);
+  } finally { await f.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('unavailable capability and oversized input do not write a fallback or invoke native save', async () => {
@@ -113,9 +139,11 @@ test('native Edda continuation exports/imports between isolated clones, preservi
     run(source, 'git', ['remote', 'add', 'origin', 'https://example.com/native/continuity.git']); run(destination, 'git', ['remote', 'set-url', 'origin', 'https://example.com/native/continuity.git']);
     for (const dir of [source, destination]) { run(dir, executable, ['init', '--no-hooks']); run(dir, executable, ['task', 'new', 'Continuation fixture']); }
     const ledger = new EddaWorkflowLedger(eddaRunner(executable)), src = fixture(root, ledger, source, 1), dst = fixture(root, ledger, destination, 1); resources.push(src, dst);
-    const opts = { executable, tempRoot: join(root, 'temporary'), locks: new WorkflowLocks(join(root, 'continuity-locks')) }, a = new ContinuationService(src.manager, opts), b = new ContinuationService(dst.manager, opts);
+    let saveCalls = 0; const actual = nativeContinuityRunner(executable);
+    const lossy: NativeRunner = async (cwd, args, context) => { const result = await actual(cwd, args, context); if (args[1] === 'save' && args.at(-1) !== '--help' && ++saveCalls === 1) return { ok: false, stdout: '' }; return result; };
+    const opts = { executable, tempRoot: join(root, 'temporary'), locks: new WorkflowLocks(join(root, 'continuity-locks')) }, a = new ContinuationService(src.manager, { ...opts, run: lossy }), b = new ContinuationService(dst.manager, opts);
     const publication = await a.publish('w', { actionId: randomUUID(), revision: (await src.manager.works.continuationSnapshot('w')).view.revision, input });
-    assert.ok(publication.bundle); assert.equal(publication.context?.data_authority, 'data_only');
+    assert.ok(publication.bundle); assert.equal(publication.context?.data_authority, 'data_only'); assert.equal(saveCalls, 1); assert.match(publication.context!.capsule.source.actor!, /^manager:/);
     const imported = await b.import('w', { actionId: randomUUID(), revision: (await dst.manager.works.continuationSnapshot('w')).view.revision, bundle: publication.bundle! });
     assert.equal(imported.context?.origin_event_id, publication.context?.origin_event_id); assert.equal(imported.context?.imported, true);
     assert.ok(imported.context?.warnings.some(w => w.includes('offline bundle'))); assert.ok(imported.context?.warnings.some(w => w.includes('dirty')));
@@ -135,7 +163,12 @@ test('native Edda continuation exports/imports between isolated clones, preservi
     assert.ok(laterImported.context?.warnings.includes('saved commit is absent from the current clone'));
     run(destination, 'git', ['remote', 'set-url', 'origin', 'https://example.com/different/project.git']);
     const refused = await b.import('w', { actionId: randomUUID(), revision: laterImported.work.revision, bundle: later.bundle! });
-    assert.equal(refused.operation?.nativeStatus, 'refused'); assert.equal(refused.operation?.status, 'unknown'); assert.match(refused.operation!.notice, /儲存庫不同/);
+    assert.equal(refused.operation?.nativeStatus, 'refused'); assert.equal(refused.operation?.status, 'failed'); assert.match(refused.operation!.notice, /儲存庫不同/);
     assert.ok(!refused.operation!.notice.includes(root));
+    run(destination, 'git', ['remote', 'set-url', 'origin', 'https://example.com/native/continuity.git']);
+    const corrected = await b.import('w', { actionId: randomUUID(), revision: refused.work.revision, bundle: later.bundle! }); assert.equal(corrected.operation?.status, 'attached');
+    const malformed = await a.publish('w', { actionId: randomUUID(), revision: (await src.manager.works.continuationSnapshot('w')).view.revision, input: { ...input, state: { ...input.state, unsupported: 'typo' } } as NativeCapsuleInput });
+    assert.equal(malformed.operation?.status, 'failed'); assert.equal(malformed.operation?.nativeStatus, 'SAVE_FAILED');
+    const fixed = await a.publish('w', { actionId: randomUUID(), revision: malformed.work.revision, input }); assert.equal(fixed.operation?.status, 'attached');
   } finally { for (const f of resources) await f.close(); rmSync(root, { recursive: true, force: true }); }
 });

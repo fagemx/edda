@@ -24,10 +24,11 @@ export interface PortableBundle {
   capsule_sha256: string; capsule_bytes_hex: string; bundle_sha256: string; data_authority: 'data_only';
 }
 export interface ContinuityReference { capsuleId: string; localEventId: string; originEventId: string }
-export interface ContinuationOperation { actionId: string; status: 'unknown' | 'saved' | 'attached'; capsuleId: string | null; notice: string; nativeStatus?: string }
+export interface ContinuationOperation { actionId: string; status: 'unknown' | 'saved' | 'attached' | 'failed'; capsuleId: string | null; notice: string; nativeStatus?: string }
 export interface ContinuationPublication { operation: ContinuationOperation | null; context: NativeRestore | null; bundle: PortableBundle | null; work: WorkView }
 export interface ContinuationPublishRequest { actionId: string; revision: string; input: NativeCapsuleInput }
 export interface ContinuationImportRequest { actionId: string; revision: string; bundle: PortableBundle }
 export interface ContinuationTakeoverRequest { actionId: string; revision: string; capsuleId: string; ownerAgentId: string; environmentEvidence: string; releaseEvidence: string }
+export interface ContinuationRecoverRequest { actionId: string; capsuleId?: string }
 export const MAX_CONTINUATION_INPUT_BYTES = 8192;
 export const MAX_CONTINUITY_BUNDLE_BYTES = 256 * 1024 * 2 + 16 * 1024;
