@@ -8,12 +8,15 @@ pub mod continuity;
 pub mod decision;
 pub mod event;
 pub mod git;
+pub mod guided_execution;
 pub mod hash;
 pub mod model_id;
 pub mod paths;
 pub mod policy;
 pub mod review;
 pub mod secret_guard;
+mod task_done_event;
+mod task_session_event;
 pub mod tool_tier;
 pub mod types;
 

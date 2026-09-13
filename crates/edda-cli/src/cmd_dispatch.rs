@@ -45,6 +45,12 @@ pub struct DispatchArgs {
     /// scope, and resume id from this task rather than accepting substitutes.
     #[arg(long)]
     pub task_id: Option<u64>,
+    /// Immutable execution-brief event id for a controlled ACP turn.
+    #[arg(long, requires = "brief_digest")]
+    pub brief_event_id: Option<String>,
+    /// Immutable execution-brief content digest for a controlled ACP turn.
+    #[arg(long, requires = "brief_event_id")]
+    pub brief_digest: Option<String>,
     /// Path to a file containing the prompt (read verbatim). Required
     /// unless --list-models is given.
     #[arg(long)]
@@ -442,8 +448,10 @@ pub fn run(args: DispatchArgs) -> Result<()> {
 #[allow(clippy::too_many_lines)] // 162 lines at #779; split tracked in none
 fn run_inner(args: DispatchArgs) -> Result<i32> {
     let is_acp = args.agent.is_acp();
-    if !is_acp && args.task_id.is_some() {
-        bail!("--task-id is only valid with an ACP agent");
+    if !is_acp
+        && (args.task_id.is_some() || args.brief_event_id.is_some() || args.brief_digest.is_some())
+    {
+        bail!("--task-id and immutable brief identity are only valid with an ACP agent");
     }
     // GH-574 honesty gate: refuse unsupported backend/option combinations
     // instead of accepting them and silently doing nothing. An explicitly
@@ -526,34 +534,30 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             cwd.display()
         );
     }
-    if is_acp {
-        crate::cmd_dispatch_acp::preflight(&args, &cwd)?;
-    }
+    let acp_preflight = if is_acp {
+        Some(crate::cmd_dispatch_acp::preflight(&args, &cwd)?)
+    } else {
+        None
+    };
 
-    // Check GitHub ownership and write the claim before starting any agent,
-    // with every gh read/write bound to the selected dispatch repository
-    // (F2).
-    if let Some((issue, machine, reason)) = claim_guard_refusal(&args, &cwd)? {
-        if args.json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "outcome": "claim_refused",
-                    "error": reason,
-                    "issue": issue,
-                    "machine": machine,
-                })
-            );
-        } else {
-            eprintln!("Error: {reason}");
+    // Non-ACP dispatch checks GitHub ownership and writes the claim before
+    // starting any agent, with every gh read/write bound to the selected
+    // dispatch repository (F2). ACP performs the same check inside its own
+    // module, after the one-live dispatch claim is held and before the turn,
+    // so it is not duplicated here.
+    if !is_acp {
+        if let Some(code) = crate::claim_guard::dispatch_claim_outcome(&args, &cwd)? {
+            return Ok(code);
         }
-        return Ok(2);
     }
 
-    // ACP reaches this point only after the same GitHub ownership check as
-    // legacy dispatch. Its task-derived policy is then applied in its module.
+    // ACP applies its task-derived policy in its own module, after the same
+    // GitHub ownership check and claim lifecycle.
     if is_acp {
-        return crate::cmd_dispatch_acp::run(args);
+        return crate::cmd_dispatch_acp::run(
+            args,
+            acp_preflight.context("ACP preflight guard missing")?,
+        );
     }
 
     let prompt = prompt.context("legacy dispatch prompt missing")?;
@@ -675,78 +679,6 @@ pub(crate) fn ingest_pi_session_post_dispatch(
     edda_bridge_claude::digest::digest_session_manual(&project_id, session_id, &cwd_str, true)?;
 
     Ok(())
-}
-
-/// The cross-machine claim guard for one dispatch (GH-656). `Ok(None)`
-/// means dispatch may proceed; `Ok(Some((issue, machine, reason)))` means
-/// the issue is claimed by another machine and the turn must not start.
-/// Runs only when `--issue` is given; an explicit `--machine` without
-/// `--issue` is refused (it could never fire the guard, so accepting it
-/// would silently drop it — the GH-574 honesty rule). The machine label
-/// must be explicit: `--machine` or `EDDA_MACHINE`, never the hostname.
-fn claim_guard_refusal(
-    args: &DispatchArgs,
-    repo_cwd: &std::path::Path,
-) -> Result<Option<(u64, String, String)>> {
-    let Some(issue) = args.issue else {
-        if args.machine.is_some() {
-            bail!(
-                "--machine is only meaningful with --issue: pass --issue <N> so the \
-                 cross-machine claim guard can check it; an explicit value is never \
-                 silently dropped"
-            );
-        }
-        return Ok(None);
-    };
-    let machine = match args.machine.as_deref() {
-        Some(machine) => machine.to_owned(),
-        None => std::env::var("EDDA_MACHINE").unwrap_or_default(),
-    };
-    if machine.is_empty() {
-        bail!(
-            "--issue {issue} requires an explicit machine identity: pass --machine <machine>/<role> \
-             or set EDDA_MACHINE (the hostname is never guessed)"
-        );
-    }
-    // A malformed identity is a usage error (GH-782: exit 2), not a crash:
-    // route it through the same refusal path as every other admission
-    // failure so --json still prints exactly one JSON object (round 2, F4).
-    if let Err(error) = crate::claim_guard::validate_machine(&machine) {
-        return Ok(Some((issue, machine, error.to_string())));
-    }
-    let state = match crate::claim_guard::fetch_claim_state(issue, &machine, repo_cwd) {
-        Ok(state) => state,
-        Err(error) => return Ok(Some((issue, machine, error.to_string()))),
-    };
-    match state {
-        crate::claim_guard::ClaimState::Unclaimed
-        | crate::claim_guard::ClaimState::ClaimedBySelf => {
-            let already_claimed = state == crate::claim_guard::ClaimState::ClaimedBySelf;
-            match crate::claim_guard::write_claim(issue, &machine, already_claimed, repo_cwd) {
-                Ok(()) => Ok(None),
-                Err(error) => Ok(Some((issue, machine, error.to_string()))),
-            }
-        }
-        crate::claim_guard::ClaimState::InFlight { pr, state } => {
-            Ok(Some((issue, machine, state.refusal(issue, pr))))
-        }
-        crate::claim_guard::ClaimState::ClaimedByOther {
-            machine: other,
-            when,
-            source,
-        } => {
-            let when = when.map(|when| format!(" at {when}")).unwrap_or_default();
-            Ok(Some((
-                issue,
-                machine,
-                format!(
-                    "issue {issue} is already claimed by '{other}' ({source}{when}); \
-                     dispatch refused — leave the claim to that owner \
-                     (fleet.cross-machine-claim)"
-                ),
-            )))
-        }
-    }
 }
 
 /// One turn through the launcher with an empty plan context. Split out from
@@ -1344,8 +1276,8 @@ mod tests {
             "--issue",
             "656",
         ]);
-        let error =
-            claim_guard_refusal(&args, Path::new(".")).expect_err("machine must be explicit");
+        let error = crate::claim_guard::claim_guard_refusal(&args, Path::new("."))
+            .expect_err("machine must be explicit");
         assert!(error.to_string().contains("--machine"), "{error}");
         assert!(error.to_string().contains("EDDA_MACHINE"), "{error}");
     }
@@ -1363,8 +1295,8 @@ mod tests {
             "--machine",
             "docs",
         ]);
-        let error =
-            claim_guard_refusal(&args, Path::new(".")).expect_err("--machine without --issue");
+        let error = crate::claim_guard::claim_guard_refusal(&args, Path::new("."))
+            .expect_err("--machine without --issue");
         assert!(error.to_string().contains("--issue"), "{error}");
     }
 
@@ -1373,9 +1305,11 @@ mod tests {
     #[test]
     fn no_issue_means_no_guard_and_no_gh_call() {
         let args = parse(&["edda", "--agent", "pi", "--prompt-file", "p.txt"]);
-        assert!(claim_guard_refusal(&args, Path::new("."))
-            .unwrap()
-            .is_none());
+        assert!(
+            crate::claim_guard::claim_guard_refusal(&args, Path::new("."))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Whitespace in an identity is refused before any gh call. Round 2
@@ -1394,9 +1328,10 @@ mod tests {
             "--machine",
             "docs lane",
         ]);
-        let (issue, machine, reason) = claim_guard_refusal(&args, Path::new("."))
-            .expect("refusal, not an error")
-            .expect("an ill-formed identity must refuse");
+        let (issue, machine, reason) =
+            crate::claim_guard::claim_guard_refusal(&args, Path::new("."))
+                .expect("refusal, not an error")
+                .expect("an ill-formed identity must refuse");
         assert_eq!(issue, 656);
         assert_eq!(machine, "docs lane");
         assert!(reason.contains("without whitespace"), "{reason}");
@@ -1417,7 +1352,7 @@ mod tests {
             "--machine",
             "4090",
         ]);
-        let (_, _, reason) = claim_guard_refusal(&args, Path::new("."))
+        let (_, _, reason) = crate::claim_guard::claim_guard_refusal(&args, Path::new("."))
             .expect("refusal, not an error")
             .expect("a bare token must refuse");
         assert!(reason.contains("<machine>/<role>"), "{reason}");

@@ -62,6 +62,7 @@ syn = { version = "2", features = ["full", "visit"] }
 jsonschema = { version = "0.33", default-features = false }
 uuid = { version = "1", features = ["v5"] }
 rand = "0.8"
+rustix = { version = "1.1", features = ["process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_usage"] }

@@ -56,6 +56,21 @@ impl SqliteStore {
         )? == 1)
     }
 
+    pub fn renew_task_lease_owned(
+        &self,
+        task_id: u64,
+        attempt: u32,
+        owner: &str,
+        expires_at: &str,
+        heartbeat_at: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE task_leases SET expires_at = ?4, heartbeat_at = ?5
+             WHERE task_id = ?1 AND attempt = ?2 AND owner = ?3",
+            params![task_id, attempt, owner, expires_at, heartbeat_at],
+        )? == 1)
+    }
+
     pub fn delete_task_lease(&self, task_id: u64, attempt: u32) -> anyhow::Result<bool> {
         Ok(self.conn.execute(
             "DELETE FROM task_leases WHERE task_id = ?1 AND attempt = ?2",

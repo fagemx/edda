@@ -12,6 +12,21 @@ fn await_gate(gate: &std::sync::atomic::AtomicBool) {
 }
 
 #[test]
+fn worktree_registration_binds_the_path_and_branch_in_one_porcelain_block() {
+    let listing = "worktree /other/path\nbranch refs/heads/edda/task-7/attempt-2\n\nworktree /expected/path\nbranch refs/heads/main\n";
+    assert!(!worktree_registered_for_branch(
+        listing,
+        std::path::Path::new("/expected/path"),
+        "edda/task-7/attempt-2"
+    ));
+    assert!(worktree_registered_for_branch(
+        listing,
+        std::path::Path::new("/other/path"),
+        "edda/task-7/attempt-2"
+    ));
+}
+
+#[test]
 pub(super) fn git_preparation_failure_leaves_no_phantom_dispatch() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let repo = dir.path().join("not-a-git-repo");
@@ -375,11 +390,19 @@ pub(super) fn stale_runner_cannot_append_session_or_failure_for_replacement() ->
         heartbeat_at: "2026-08-16T01:00:00Z".into(),
     })?;
 
-    assert!(!record_session_if_current(repo, 7, 1, "old-thread", 300)?);
+    assert!(!record_session_if_current(
+        repo,
+        7,
+        1,
+        "old-runner",
+        "old-thread",
+        300,
+    )?);
     finish_runner(
         repo,
         7,
         1,
+        "old-runner",
         Some("old runner"),
         false,
         &ReconcileConfig::test_defaults(),
@@ -409,7 +432,14 @@ pub(super) fn initially_stale_runner_rings_doorbell_without_mutating_replacement
     ledger.upsert_task_lease(&lease(12, 2, "2026-08-16T02:00:00Z"))?;
     DOORBELL_COUNT.store(0, Ordering::SeqCst);
 
-    run_task(repo, 12, 1, &ReconcileConfig::test_defaults(), true)?;
+    run_task(
+        repo,
+        12,
+        1,
+        "runner-12-1",
+        &ReconcileConfig::test_defaults(),
+        true,
+    )?;
 
     assert_eq!(ledger.task_lease(12)?.expect("replacement").attempt, 2);
     assert_eq!(DOORBELL_COUNT.load(Ordering::SeqCst), 1);
@@ -436,6 +466,7 @@ pub(super) fn owned_finalization_records_reason_deletes_only_its_lease_and_rings
         repo,
         8,
         1,
+        "runner-8-1",
         Some("runner-failed: test setup"),
         true,
         &ReconcileConfig::test_defaults(),
@@ -462,10 +493,10 @@ pub(super) fn runner_spawn_failure_is_compensated_without_a_live_lease() -> anyh
     let config = ReconcileConfig::test_defaults();
     let missing = repo.join("missing-runner.exe");
 
-    let error = launch_runner_with(&missing, repo, 9, 1, &config).unwrap_err();
+    let error = launch_runner_with(&missing, repo, 9, 1, "runner-9-1", &config).unwrap_err();
     let reason = format!("runner-spawn-failed: {error:#}");
     DOORBELL_COUNT.store(0, Ordering::SeqCst);
-    finish_runner(repo, 9, 1, Some(&reason), true, &config)?;
+    finish_runner(repo, 9, 1, "runner-9-1", Some(&reason), true, &config)?;
 
     assert!(ledger.task_lease(9)?.is_none());
     assert_eq!(DOORBELL_COUNT.load(Ordering::SeqCst), 1);
@@ -502,11 +533,13 @@ pub(super) fn first_spawn_failure_does_not_prevent_later_plan_launch() -> anyhow
         RunnerPlan {
             task: task_view(&views, 10)?.clone(),
             attempt: 1,
+            lease_owner: "runner-10-1".into(),
             worktree: repo.join("attempt-10"),
         },
         RunnerPlan {
             task: task_view(&views, 11)?.clone(),
             attempt: 1,
+            lease_owner: "runner-11-1".into(),
             worktree: repo.join("attempt-11"),
         },
     ];
@@ -588,7 +621,7 @@ pub(super) fn fake_runner_records_session_in_main_ledger_before_turn_and_fails_w
         allow_fake_turn_after_durable_session(repo.clone(), 1, 1, challenge, allow, deny);
 
     DOORBELL_COUNT.store(0, Ordering::SeqCst);
-    let run_result = run_task(&repo, 1, 1, &config, true);
+    let run_result = run_task(&repo, 1, 1, "runner-1-1", &config, true);
     let observer_result = observer.join();
     std::env::remove_var("EDDA_FAKE_CHALLENGE");
     std::env::remove_var("EDDA_FAKE_ALLOW");
@@ -688,7 +721,9 @@ pub(super) fn periodic_renewal_stops_old_runner_before_failure_after_lease_repla
 
     let runner_repo = repo.clone();
     let runner_config = config.clone();
-    let runner = std::thread::spawn(move || run_task(&runner_repo, 1, 1, &runner_config, false));
+    let runner = std::thread::spawn(move || {
+        run_task(&runner_repo, 1, 1, "runner-1-1", &runner_config, false)
+    });
 
     let outcome = (|| -> anyhow::Result<()> {
         let session_recorded = poll_until(
@@ -782,7 +817,14 @@ pub(super) fn fake_runner_resumes_current_attempt_after_slow_startup_before_turn
     create_task(&ledger, 2, &["src/resume.rs".into()])?;
     append_started(&ledger, 2, 1, 300)?;
     ledger.upsert_task_lease(&lease(2, 1, "2026-08-16T02:00:00Z"))?;
-    assert!(record_session_if_current(&repo, 2, 1, "saved-thread", 300)?);
+    assert!(record_session_if_current(
+        &repo,
+        2,
+        1,
+        "runner-2-1",
+        "saved-thread",
+        300,
+    )?);
     let fake = fake_codex(dir.path(), 0, false)?;
     let mut config = ReconcileConfig::test_defaults();
     config.codex_bin = fake;
@@ -808,7 +850,7 @@ pub(super) fn fake_runner_resumes_current_attempt_after_slow_startup_before_turn
     // merely a fast one.
     std::thread::sleep(std::time::Duration::from_millis(2_100));
 
-    let run_result = run_task(&repo, 2, 1, &config, false);
+    let run_result = run_task(&repo, 2, 1, "runner-2-1", &config, false);
     let observer_result = observer.join();
     std::env::remove_var("EDDA_FAKE_CHALLENGE");
     std::env::remove_var("EDDA_FAKE_ALLOW");
@@ -840,7 +882,8 @@ pub(super) fn fake_permission_request_is_rejected_then_finalized_once() -> anyho
     config.codex_bin = fake_codex(dir.path(), 0, true)?;
     DOORBELL_COUNT.store(0, Ordering::SeqCst);
 
-    let error = run_task(&repo, 5, 1, &config, true).expect_err("permission must fail");
+    let error =
+        run_task(&repo, 5, 1, "runner-5-1", &config, true).expect_err("permission must fail");
 
     assert!(error.to_string().contains("runner-failed"));
     assert!(ledger.task_lease(5)?.is_none());

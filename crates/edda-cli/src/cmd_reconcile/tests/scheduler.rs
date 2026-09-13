@@ -840,6 +840,9 @@ pub(super) fn scheduler_manifest_reentry_runs_against_its_repo_from_an_unrelated
             repo: None,
             run_task: None,
             attempt: None,
+            lease_owner: None,
+            brief_event_id: None,
+            brief_digest: None,
             scheduler_manifest: Some(prepared.path),
         },
     )?;

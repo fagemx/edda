@@ -328,6 +328,23 @@ fn claim_guard_gh_calls_bind_to_the_selected_dispatch_cwd() {
     std::fs::create_dir_all(&dir_a).unwrap();
     std::fs::create_dir_all(&dir_b).unwrap();
     for dir in [&dir_a, &dir_b] {
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fagemx/edda.git",
+            ])
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
         let _ = std::fs::remove_file(f.root.path().join("gh-cwd.txt"));
         let output = f.run_with_prompt(
             &[

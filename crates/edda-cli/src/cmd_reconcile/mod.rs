@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 mod codex_target;
 mod manifest;
 mod plan;
-mod runner;
+pub(crate) mod runner;
 
 #[cfg(any(windows, test))]
 mod scheduler_windows;
@@ -37,12 +37,12 @@ pub struct ReconcileArgs {
     codex_bin: Option<PathBuf>,
     #[arg(
         long,
-        conflicts_with_all = ["uninstall_scheduler", "run_task", "attempt"]
+        conflicts_with_all = ["uninstall_scheduler", "run_task", "attempt", "lease_owner"]
     )]
     install_scheduler: bool,
     #[arg(
         long,
-        conflicts_with_all = ["install_scheduler", "run_task", "attempt"]
+        conflicts_with_all = ["install_scheduler", "run_task", "attempt", "lease_owner"]
     )]
     uninstall_scheduler: bool,
     #[arg(long, hide = true)]
@@ -51,6 +51,13 @@ pub struct ReconcileArgs {
     run_task: Option<u64>,
     #[arg(long, hide = true)]
     attempt: Option<u32>,
+    #[arg(long, hide = true, requires_all = ["run_task", "attempt"])]
+    lease_owner: Option<String>,
+    /// S5 descriptor seam; validates and binds an attempt but never launches it.
+    #[arg(long, hide = true, requires_all = ["run_task", "brief_digest"])]
+    brief_event_id: Option<String>,
+    #[arg(long, hide = true, requires_all = ["run_task", "brief_event_id"])]
+    brief_digest: Option<String>,
     #[arg(
         long,
         hide = true,
@@ -61,6 +68,9 @@ pub struct ReconcileArgs {
             "codex_bin",
             "run_task",
             "attempt",
+            "lease_owner",
+            "brief_event_id",
+            "brief_digest",
             "max_workers",
             "max_attempts",
             "lease_ttl_s"
@@ -75,6 +85,8 @@ pub(super) struct ReconcileConfig {
     pub(super) max_attempts: u32,
     pub(super) lease_ttl_s: u64,
     pub(super) codex_bin: PathBuf,
+    pub(super) brief_event_id: Option<String>,
+    pub(super) brief_digest: Option<String>,
 }
 
 impl ReconcileConfig {
@@ -84,6 +96,8 @@ impl ReconcileConfig {
             max_attempts: 3,
             lease_ttl_s: 300,
             codex_bin: PathBuf::from("codex"),
+            brief_event_id: None,
+            brief_digest: None,
         }
     }
 
@@ -98,6 +112,8 @@ impl ReconcileConfig {
                 .clone()
                 .or_else(|| std::env::var_os("EDDA_CODEX_BIN").map(PathBuf::from))
                 .unwrap_or(defaults.codex_bin),
+            brief_event_id: args.brief_event_id.clone(),
+            brief_digest: args.brief_digest.clone(),
         }
     }
     #[cfg(test)]
@@ -110,6 +126,7 @@ impl ReconcileConfig {
 pub(super) struct RunnerPlan {
     pub(super) task: TaskView,
     pub(super) attempt: u32,
+    pub(super) lease_owner: String,
     pub(super) worktree: PathBuf,
 }
 
@@ -145,11 +162,25 @@ pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
         let attempt = args
             .attempt
             .context("--run-task requires hidden --attempt")?;
-        return run_task(&repo_root, task_id, attempt, &config, true);
+        let lease_owner = args
+            .lease_owner
+            .as_deref()
+            .context("--run-task requires hidden --lease-owner")?;
+        if config.brief_event_id.is_some() || config.brief_digest.is_some() {
+            let descriptor =
+                controlled_attempt_descriptor(&repo_root, task_id, attempt, lease_owner, &config)?;
+            println!("{}", serde_json::to_string(&descriptor)?);
+            return Ok(());
+        }
+        return run_task(&repo_root, task_id, attempt, lease_owner, &config, true);
     }
-    if args.attempt.is_some() {
-        anyhow::bail!("--attempt is valid only with hidden --run-task");
+    if args.attempt.is_some() || args.lease_owner.is_some() {
+        anyhow::bail!("--attempt and --lease-owner are valid only with hidden --run-task");
     }
+    anyhow::ensure!(
+        config.brief_event_id.is_none() && config.brief_digest.is_none(),
+        "controlled reconcile is descriptor-only and requires hidden --run-task identity"
+    );
     let persisted = persist_reconciliation(&repo_root, &config)?;
     let plans = persisted.plans;
     let executable = std::env::current_exe()?;
@@ -284,6 +315,7 @@ pub(super) fn launch_plans_with(
             repo_root,
             plan.task.task_id,
             plan.attempt,
+            &plan.lease_owner,
             config,
         ) {
             let reason = format!("runner-spawn-failed: {error:#}");
@@ -291,6 +323,7 @@ pub(super) fn launch_plans_with(
                 repo_root,
                 plan.task.task_id,
                 plan.attempt,
+                &plan.lease_owner,
                 Some(&reason),
                 true,
                 config,

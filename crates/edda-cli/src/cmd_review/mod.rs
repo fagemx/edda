@@ -1,15 +1,21 @@
 //! Cross-vendor review: the host owns evidence and policy, the engine judges.
 mod args;
 mod brief;
+pub(crate) mod claim;
 mod config;
 mod deliver;
+pub(crate) use deliver::{
+    comments_argv as review_comments_argv, extract as extract_review_comments,
+    parse_comments as parse_review_comments, Comment as ReviewComment,
+};
 mod delivery;
 mod drift;
 mod due;
 mod evidence;
 mod gate;
+pub(crate) use gate::{from_lines as review_lines, union as review_union, Union as ReviewUnion};
 mod git;
-mod github;
+pub(crate) mod github;
 mod identity;
 mod merge;
 mod prepare;

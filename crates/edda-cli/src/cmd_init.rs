@@ -20,6 +20,7 @@ const SKILLS: &[(&str, &str)] = &[
         "continuity-restore",
         include_str!("skills/continuity-restore.md"),
     ),
+    ("task-prepare", include_str!("skills/task-prepare.md")),
 ];
 
 pub fn execute(repo_root: &Path, no_hooks: bool, force_skills: bool) -> anyhow::Result<()> {

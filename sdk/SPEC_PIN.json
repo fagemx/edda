@@ -1,6 +1,6 @@
 {
-  "spec_sha": "a7eaba2cff93e59ceb96d786bbc9f1b4c83dacc2",
-  "spec_ref": "Delivery-first B2 pre-SDK integration tree containing the independently accepted GH-1141 S1/S2 continuity_capsule event contract and S4 native skills on base 56611b58ab8759a9eec6510fcb56c1b3875399ca.",
+  "spec_sha": "e96fdbf7361aa8c3f13c4b8dfaeea8b5b4f2e8c8",
+  "spec_ref": "GH-1141 control-effects integration pre-SDK commit e96fdbf7361aa8c3f13c4b8dfaeea8b5b4f2e8c8 on accepted main d006c7313d71b709f121481476e74236bc1e6e94: adds the S5 execution_brief and the S6a/S6b control_intent/control_manifest/control_receipt event contracts plus the controlled task.done/task.session fields, preserving the accepted continuity_capsule contract.",
   "layout": {
     "schemas": "spec/events/*.schema.json + registry.json + canonical-v1.json",
     "fixtures": "tests/fixtures/events/*.jsonl"

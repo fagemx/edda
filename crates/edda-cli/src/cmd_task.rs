@@ -4,6 +4,7 @@
 //! Every state transition is a hash-chained `task.*` event; `done` without
 //! a receipt does not exist. Status shown anywhere is derived, never stored.
 
+use anyhow::Context;
 use clap::Subcommand;
 use edda_ledger::task_actions::{
     done_task, fail_task, find_view, new_task, start_task, DoneOutcome, NewOutcome, NewTaskArgs,
@@ -11,7 +12,10 @@ use edda_ledger::task_actions::{
 };
 use edda_ledger::tasks::{self, TaskStatus, TaskView};
 use edda_ledger::Ledger;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[path = "cmd_task_guided.rs"]
+mod guided;
 
 #[cfg(test)]
 #[path = "cmd_task_brief_tests.rs"]
@@ -144,10 +148,39 @@ pub enum TaskCmd {
         #[arg(long)]
         fleet: bool,
     },
-    /// Show one task in full (user verb)
-    Show {
-        id: u64,
+    /// Accept an immutable brief through local sealed control authority, or fail closed
+    Prepare {
+        /// Structured ExecutionBriefV1 input
+        #[arg(long)]
+        file: PathBuf,
+        /// Deprecated unauthenticated assertion; never confers prepare authority
+        #[arg(long, hide = true)]
+        author: Option<String>,
+        /// Registered controller session correlated by the local capability
+        #[arg(long)]
+        session: Option<String>,
+        /// Private file containing the issued strong-controller bearer
+        #[arg(long)]
+        authority_token_file: PathBuf,
         /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one task, or an exact accepted brief when ID starts with evt_
+    Show {
+        id: String,
+        /// Required content digest when showing an accepted brief event
+        #[arg(long)]
+        digest: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render one immutable accepted brief for its declared runtime profile
+    Render {
+        event_id: String,
+        #[arg(long)]
+        digest: String,
         #[arg(long)]
         json: bool,
     },
@@ -404,8 +437,37 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        TaskCmd::Show { id, json } => {
-            let v = do_show(repo_root, id)?;
+        TaskCmd::Prepare {
+            file,
+            author,
+            session,
+            authority_token_file,
+            json,
+        } => guided::prepare(
+            repo_root,
+            &file,
+            author.as_deref(),
+            session.as_deref(),
+            &authority_token_file,
+            json,
+        ),
+        TaskCmd::Render {
+            event_id,
+            digest,
+            json,
+        } => guided::render(repo_root, &event_id, &digest, json),
+        TaskCmd::Show { id, digest, json } if id.starts_with("evt_") => {
+            let digest = digest.context("--digest is required for an accepted brief event")?;
+            guided::show(repo_root, &id, &digest, json)
+        }
+        TaskCmd::Show { id, digest, json } => {
+            if digest.is_some() {
+                anyhow::bail!("--digest is valid only when showing an accepted brief event");
+            }
+            let task_id = id
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("task id must be an unsigned integer"))?;
+            let v = do_show(repo_root, task_id)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&v)?);
                 return Ok(());

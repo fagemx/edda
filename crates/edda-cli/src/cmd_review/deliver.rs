@@ -371,7 +371,7 @@ pub(crate) fn comments(repo: &Path, pr: u64) -> Result<Vec<Comment>> {
 /// Map REST issue-comment JSON (a numeric `id`, a string `body`, a string
 /// `author_association`) to [`Comment`]. Split out from [`comments`] so the
 /// mapping is testable without shelling out to `gh`.
-fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
+pub(crate) fn parse_comments(value: &serde_json::Value) -> Vec<Comment> {
     value
         .as_array()
         .map(Vec::as_slice)
