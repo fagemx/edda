@@ -1,7 +1,7 @@
 import { mkdirSync, lstatSync, chmodSync, readFileSync, writeFileSync, renameSync,
-  unlinkSync, readdirSync, existsSync } from 'node:fs';
+  unlinkSync, readdirSync, existsSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -73,15 +73,56 @@ export function readRecord(path) {
   }
 }
 
-export function writeJson(path, data, exclusive = false) {
+// Every record is written to a fresh tmp file and renamed into place, so a
+// reader never sees a half-written *renamed* document; the exclusive path creates
+// the destination directly (`wx`) and relies on the same file flush. The write is
+// only durable once the data is on disk: on NTFS a hard interruption between the
+// tmp write and the rename can leave the target with its recorded length but
+// zero-filled data, which reads back as an all-NUL document (GH-715 saw the same
+// shape; the 2026-09-13 managed registry left four run and eight service
+// `state.json` files all-NUL with normal lengths). Flushing the data before the
+// rename makes a crash leave either the old complete record or the new complete
+// record — never NUL.
+const TOLERATED_DIR_FSYNC = new Set(['EINVAL', 'ENOTSUP', 'EBADF']);
+const fileIo = {
+  open: (path) => openSync(path, 'wx', 0o600),
+  write: (fd, text) => writeFileSync(fd, text),
+  flush: (fd) => fsyncSync(fd),
+  close: (fd) => closeSync(fd),
+  rename: (from, to) => renameSync(from, to),
+  unlink: (path) => unlinkSync(path),
+  // The parent-directory flush is what makes the rename itself durable on POSIX.
+  // Windows cannot open a directory for this, so there the file-data flush above
+  // is the barrier. Some POSIX filesystems reject a directory fsync with a
+  // "not supported here" errno; those are tolerated because the file data is
+  // already durable. Any other failure propagates: the directory entry is not
+  // known to be durable and a coordination writer must not report success.
+  flushDir: (dir) => {
+    if (process.platform === 'win32') return;
+    let fd;
+    try { fd = openSync(dir, 'r'); }
+    catch (error) { if (TOLERATED_DIR_FSYNC.has(error.code)) return; throw error; }
+    try { fsyncSync(fd); }
+    catch (error) { if (!TOLERATED_DIR_FSYNC.has(error.code)) throw error; }
+    finally { try { closeSync(fd); } catch { /* the fsync result already decided */ } }
+  },
+};
+export function writeJson(path, data, exclusive = false, io = fileIo) {
   const text = JSON.stringify(data, null, 2) + '\n';
-  if (exclusive) return writeFileSync(path, text, { flag: 'wx', mode: 0o600 });
+  if (exclusive) {
+    const fd = io.open(path);
+    try { io.write(fd, text); io.flush(fd); } finally { io.close(fd); }
+    io.flushDir(dirname(resolve(path)));
+    return;
+  }
   const tmp = `${path}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(tmp, text, { flag: 'wx', mode: 0o600 });
-    renameSync(tmp, path);
+    const fd = io.open(tmp);
+    try { io.write(fd, text); io.flush(fd); } finally { io.close(fd); }
+    io.rename(tmp, path);
+    io.flushDir(dirname(resolve(path)));
   } finally {
-    try { unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    try { io.unlink(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
 }
 
