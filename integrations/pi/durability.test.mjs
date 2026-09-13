@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { writeJson } from './store.mjs';
 
 // Bounded fault model of the observed NTFS behaviour (GH-715 and the 2026-09-13
@@ -56,4 +59,19 @@ test('the legacy tmp+rename without a flush reproduces the all-NUL record', () =
   const text = io.durable.get('C:/registry/managed/run/state.json');
   assert.ok(text.length > 0 && text.split('').every((c) => c === '\0'),
     'an unflushed rename reproduces the all-NUL record the incident observed');
+});
+
+test('the real fileIo path (fsync + parent-directory flush) writes a parseable record', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-state-durability-'));
+  try {
+    const path = join(dir, 'state.json');
+    writeJson(path, { runId: 'run', phase: 'running' }); // default fileIo: real fsyncSync + flushDir
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { runId: 'run', phase: 'running' });
+    assert.ok(!readdirSync(dir).some((name) => name.endsWith('.tmp')), 'no tmp file left behind');
+    const created = join(dir, 'owner.json');
+    writeJson(created, { instanceId: 'i' }, true); // exclusive branch, also real fileIo
+    assert.deepEqual(JSON.parse(readFileSync(created, 'utf8')), { instanceId: 'i' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

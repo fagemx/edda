@@ -74,13 +74,16 @@ export function readRecord(path) {
 }
 
 // Every record is written to a fresh tmp file and renamed into place, so a
-// reader never sees a half-written document. The rename is only durable once the
-// tmp's data is on disk: on NTFS a hard interruption between the tmp write and
-// the rename can leave the target with its recorded length but zero-filled data,
-// which reads back as an all-NUL document (GH-715 saw the same shape; the
-// 2026-09-13 managed registry left four run and eight service `state.json` files
-// all-NUL with normal lengths). Flushing the tmp before the rename makes a crash
-// leave either the old complete record or the new complete record — never NUL.
+// reader never sees a half-written *renamed* document; the exclusive path creates
+// the destination directly (`wx`) and relies on the same file flush. The write is
+// only durable once the data is on disk: on NTFS a hard interruption between the
+// tmp write and the rename can leave the target with its recorded length but
+// zero-filled data, which reads back as an all-NUL document (GH-715 saw the same
+// shape; the 2026-09-13 managed registry left four run and eight service
+// `state.json` files all-NUL with normal lengths). Flushing the data before the
+// rename makes a crash leave either the old complete record or the new complete
+// record — never NUL.
+const TOLERATED_DIR_FSYNC = new Set(['EINVAL', 'ENOTSUP', 'EBADF']);
 const fileIo = {
   open: (path) => openSync(path, 'wx', 0o600),
   write: (fd, text) => writeFileSync(fd, text),
@@ -90,12 +93,18 @@ const fileIo = {
   unlink: (path) => unlinkSync(path),
   // The parent-directory flush is what makes the rename itself durable on POSIX.
   // Windows cannot open a directory for this, so there the file-data flush above
-  // is the barrier. A failure is propagated, not swallowed: an unconfirmed
-  // directory entry on a coordination path must not be reported as success.
+  // is the barrier. Some POSIX filesystems reject a directory fsync with a
+  // "not supported here" errno; those are tolerated because the file data is
+  // already durable. Any other failure propagates: the directory entry is not
+  // known to be durable and a coordination writer must not report success.
   flushDir: (dir) => {
     if (process.platform === 'win32') return;
-    const fd = openSync(dir, 'r');
-    try { fsyncSync(fd); } finally { closeSync(fd); }
+    let fd;
+    try { fd = openSync(dir, 'r'); }
+    catch (error) { if (TOLERATED_DIR_FSYNC.has(error.code)) return; throw error; }
+    try { fsyncSync(fd); }
+    catch (error) { if (!TOLERATED_DIR_FSYNC.has(error.code)) throw error; }
+    finally { try { closeSync(fd); } catch { /* the fsync result already decided */ } }
   },
 };
 export function writeJson(path, data, exclusive = false, io = fileIo) {
