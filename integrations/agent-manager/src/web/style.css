@@ -816,6 +816,13 @@ select {
 .session-row { padding:12px; background:#f6f8fb; border-left:3px solid #8298b2; display:grid; gap:8px; overflow-wrap:anywhere; }
 .session-row strong { font-size:13px; }
 .session-row button { justify-self:start; font-size:12px; }
+.continuation-board { margin-top:20px; border-top:1px solid var(--line); padding-top:16px; min-width:0; }
+.continuation-board summary { cursor:pointer; font-weight:600; }
+.continuation-board h4 { margin:8px 0 0; }
+.continuation-result { display:grid; gap:10px; margin-top:12px; min-width:0; }
+.continuation-result pre { white-space:pre-wrap; overflow-wrap:anywhere; padding:14px; background:#f6f8fb; border-radius:8px; font-size:12px; }
+.continuation-result button { justify-self:start; }
+.continuation-result textarea { width:100%; min-width:0; box-sizing:border-box; }
 
 @media(prefers-reduced-motion:reduce) {
   *,*::before,*::after {

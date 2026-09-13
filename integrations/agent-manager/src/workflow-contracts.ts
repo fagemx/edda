@@ -1,4 +1,5 @@
 import type { OperationStatus, SendRequest } from './contracts.js';
+import type { ContinuityReference } from './continuation-contracts.js';
 
 export interface WorkBinding { id: string; projectId: string; taskId: number; workspace: string; ownerAgentId: string }
 export type WorkStage = 'uninitialized' | 'ready' | 'assigned' | 'executing' | 'awaiting_delivery' | 'delivered' | 'accepted' | 'blocked';
@@ -17,6 +18,7 @@ export interface WorkView {
   updatedAt: string | null; error: string | null; history: WorkHistory[];
   lastActionId: string | null; confirmedActionId: string | null;
   sessions: WorkSessionBinding[];
+  continuity?: ContinuityReference;
 }
 export interface WorksView { works: WorkView[]; generatedAt: string }
 type ActionBase = { actionId: string; revision: string };
@@ -31,4 +33,5 @@ export type WorkAction = ActionBase & (
   | { kind: 'bind_session'; agentId: string; role: 'manager' | 'worker' | 'reviewer'; parentAgentId: string | null; reviewedSha: string | null; expectedEvent: string; nextExpectedAt: string | null }
   | { kind: 'unbind_session'; bindingId: string }
   | { kind: 'handoff_owner'; ownerAgentId: string; evidence: string }
+  | { kind: 'attach_continuity'; reference: ContinuityReference }
 );
