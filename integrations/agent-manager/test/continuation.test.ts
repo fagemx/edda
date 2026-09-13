@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -116,6 +116,45 @@ test('crash after native save before attachment recovers from persistent known c
   } finally { await f.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('nonplaintext recovery proof verifies native Unicode truncation and rejects changed prefixes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'continuity-hash-proof-')), f = fixture(root), native = nativeFixture();
+  try {
+    const service = new ContinuationService(f.manager, { run: native.run, locks: new WorkflowLocks(join(root, 'locks')) });
+    const data: NativeCapsuleInput = { ...input, state: { ...input.state, title: '界'.repeat(161), current: 'x'.repeat(4001), open_questions: ['y'.repeat(1001)] } };
+    const request = { actionId: randomUUID(), revision: (await f.manager.works.continuationSnapshot('w')).view.revision, input: data };
+    native.drop(); native.failList(true); await service.publish('w', request);
+    const original = native.capsules.get('cap_1')!;
+    original.capsule.state.title = '界'.repeat(160); original.capsule.state.current = 'x'.repeat(4000); original.capsule.state.open_questions = ['y'.repeat(1000)];
+    original.capsule.truncation = [{ field: 'state.title', omitted_chars: 1, omitted_items: 0 }, { field: 'state.current', omitted_chars: 1, omitted_items: 0 }, { field: 'state.open_questions[0]', omitted_chars: 1, omitted_items: 0 }];
+    const altered = structuredClone(original); altered.capsule.capsule_id = 'cap_altered'; altered.capsule.state.current = 'z'.repeat(4000); native.capsules.set('cap_altered', altered);
+    await assert.rejects(service.recover('w', { actionId: request.actionId, capsuleId: 'cap_altered' }), /不一致/);
+    assert.equal((await service.recover('w', { actionId: request.actionId, capsuleId: 'cap_1' })).operation?.status, 'attached');
+    const stored = f.store.setting(`continuity:operation:${request.actionId}`)!;
+    assert.ok(!stored.includes('intendedInput')); assert.ok(!stored.includes('界')); assert.ok(!stored.includes('Read scoped review')); assert.ok(stored.includes('inputProof'));
+  } finally { await f.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('refused request values, unknown property names and bundle hex never enter manager SQLite or WAL', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'continuity-refused-privacy-')), f = fixture(root), native = nativeFixture();
+  const marker = 'sk-abcdefghijklmnopqrstuvwxyz012345', encodedMarker = Buffer.from(marker).toString('hex');
+  try {
+    const run: NativeRunner = async (cwd, args, context) => args.at(-1) === '--help' ? native.run(cwd, args, context) : { ok: false, stdout: JSON.stringify({ data_authority: 'data_only', status: args[1] === 'save' ? 'SAVE_FAILED' : 'refused', error: `secret content refused in ${args[1] === 'save' ? 'continuity input' : 'capsule bytes'} (kind: test)` }) };
+    const service = new ContinuationService(f.manager, { run, locks: new WorkflowLocks(join(root, 'locks')) });
+    const revision = (await f.manager.works.continuationSnapshot('w')).view.revision;
+    for (const state of [{ ...input.state, goal: marker }, { ...input.state, [marker]: 'unknown field' }]) {
+      const request = { actionId: randomUUID(), revision, input: { ...input, state } };
+      const result = await service.publish('w', request); assert.equal(result.operation?.status, 'failed');
+      const stored = f.store.setting(`continuity:operation:${request.actionId}`)!; assert.ok(!stored.includes(marker)); assert.ok(!stored.includes(encodedMarker)); assert.ok(stored.includes('inputProof'));
+    }
+    const actionId = randomUUID();
+    const result = await service.import('w', { actionId, revision, bundle: { capsule_bytes_hex: encodedMarker, capsule_sha256: marker, origin_capsule_id: marker } as unknown as PortableBundle }); assert.equal(result.operation?.status, 'failed');
+    const stored = f.store.setting(`continuity:operation:${actionId}`)!; assert.ok(!stored.includes(marker)); assert.ok(!stored.includes(encodedMarker)); assert.ok(stored.includes('bundleProof'));
+    for (const name of readdirSync(f.storage).filter(name => name.startsWith('manager.sqlite'))) {
+      const bytes = readFileSync(join(f.storage, name)); assert.equal(bytes.includes(Buffer.from(marker)), false); assert.equal(bytes.includes(Buffer.from(encodedMarker)), false);
+    }
+  } finally { await f.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('unavailable capability and oversized input do not write a fallback or invoke native save', async () => {
   const root = mkdtempSync(join(tmpdir(), 'continuity-unavailable-')), f = fixture(root); let calls = 0;
   try {
@@ -141,11 +180,13 @@ test('native Edda continuation exports/imports between isolated clones, preservi
     const ledger = new EddaWorkflowLedger(eddaRunner(executable)), src = fixture(root, ledger, source, 1), dst = fixture(root, ledger, destination, 1); resources.push(src, dst);
     let saveCalls = 0; const actual = nativeContinuityRunner(executable);
     const lossy: NativeRunner = async (cwd, args, context) => { const result = await actual(cwd, args, context); if (args[1] === 'save' && args.at(-1) !== '--help' && ++saveCalls === 1) return { ok: false, stdout: '' }; return result; };
-    const opts = { executable, tempRoot: join(root, 'temporary'), locks: new WorkflowLocks(join(root, 'continuity-locks')) }, a = new ContinuationService(src.manager, { ...opts, run: lossy }), b = new ContinuationService(dst.manager, opts);
+    let importCalls = 0;
+    const lossyImport: NativeRunner = async (cwd, args, context) => { const result = await actual(cwd, args, context); if (args[1] === 'import' && args.at(-1) !== '--help' && ++importCalls === 1) return { ok: false, stdout: '' }; return result; };
+    const opts = { executable, tempRoot: join(root, 'temporary'), locks: new WorkflowLocks(join(root, 'continuity-locks')) }, a = new ContinuationService(src.manager, { ...opts, run: lossy }), b = new ContinuationService(dst.manager, { ...opts, run: lossyImport });
     const publication = await a.publish('w', { actionId: randomUUID(), revision: (await src.manager.works.continuationSnapshot('w')).view.revision, input });
     assert.ok(publication.bundle); assert.equal(publication.context?.data_authority, 'data_only'); assert.equal(saveCalls, 1); assert.match(publication.context!.capsule.source.actor!, /^manager:/);
     const imported = await b.import('w', { actionId: randomUUID(), revision: (await dst.manager.works.continuationSnapshot('w')).view.revision, bundle: publication.bundle! });
-    assert.equal(imported.context?.origin_event_id, publication.context?.origin_event_id); assert.equal(imported.context?.imported, true);
+    assert.equal(imported.context?.origin_event_id, publication.context?.origin_event_id); assert.equal(imported.context?.imported, true); assert.equal(importCalls, 1);
     assert.ok(imported.context?.warnings.some(w => w.includes('offline bundle'))); assert.ok(imported.context?.warnings.some(w => w.includes('dirty')));
     let work = await dst.manager.works.act('w', { kind: 'initialize', actionId: randomUUID(), revision: imported.work.revision, nextStep: 'Review restored context' });
     const takeover = { actionId: randomUUID(), revision: work.revision, capsuleId: imported.context!.capsule.capsule_id, ownerAgentId: 'owner', environmentEvidence: 'Required tools verified; dirty scaffolding understood', releaseEvidence: 'Fixture source has no actor' };
@@ -170,5 +211,28 @@ test('native Edda continuation exports/imports between isolated clones, preservi
     const malformed = await a.publish('w', { actionId: randomUUID(), revision: (await src.manager.works.continuationSnapshot('w')).view.revision, input: { ...input, state: { ...input.state, unsupported: 'typo' } } as NativeCapsuleInput });
     assert.equal(malformed.operation?.status, 'failed'); assert.equal(malformed.operation?.nativeStatus, 'SAVE_FAILED');
     const fixed = await a.publish('w', { actionId: randomUUID(), revision: malformed.work.revision, input }); assert.equal(fixed.operation?.status, 'attached');
+    // Synthetic rejected key, never a real credential. Check logical rows AND
+    // current database/WAL bytes so deleting plaintext after write cannot pass.
+    const rejectedSecret = 'sk-abcdefghijklmnopqrstuvwxyz012345', secretHex = Buffer.from(rejectedSecret).toString('hex');
+    const secretRequest = { actionId: randomUUID(), revision: fixed.work.revision, input: { ...input, state: { ...input.state, goal: rejectedSecret } } };
+    const rejected = await a.publish('w', secretRequest); assert.equal(rejected.operation?.status, 'failed'); assert.equal(rejected.operation?.nativeStatus, 'SAVE_FAILED');
+    function canonical(value: unknown): string {
+      const sort = (v: unknown): unknown => Array.isArray(v) ? v.map(sort) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, item]) => [k, sort(item)])) : v;
+      return JSON.stringify(sort(value));
+    }
+    const capsule = JSON.parse(Buffer.from(publication.bundle!.capsule_bytes_hex, 'hex').toString('utf8')) as { state: { goal: string } }; capsule.state.goal = rejectedSecret;
+    const capsuleBytes = canonical(capsule), badBundle = { ...publication.bundle!, capsule_bytes_hex: Buffer.from(capsuleBytes).toString('hex'), capsule_sha256: hash(capsuleBytes) };
+    const { bundle_sha256: _digest, ...bundleContent } = badBundle; badBundle.bundle_sha256 = hash(canonical(bundleContent));
+    const badImportId = randomUUID(), rejectedImport = await b.import('w', { actionId: badImportId, revision: corrected.work.revision, bundle: badBundle });
+    assert.equal(rejectedImport.operation?.status, 'failed'); assert.match(rejectedImport.operation!.notice, /敏感資訊/);
+    for (const [f, actionId] of [[src, secretRequest.actionId], [dst, badImportId]] as const) {
+      const stored = f.store.setting(`continuity:operation:${actionId}`)!;
+      assert.ok(!stored.includes(rejectedSecret)); assert.ok(!stored.includes(secretHex)); assert.ok(!stored.includes('intendedInput')); assert.ok(!stored.includes('intendedBundle')); assert.ok(!stored.includes('capsule_bytes_hex'));
+      for (const name of readdirSync(f.storage).filter(name => name.startsWith('manager.sqlite'))) {
+        const bytes = readFileSync(join(f.storage, name)); assert.equal(bytes.includes(Buffer.from(rejectedSecret)), false); assert.equal(bytes.includes(Buffer.from(secretHex)), false);
+      }
+    }
+    assert.equal((await a.publish('w', { actionId: randomUUID(), revision: rejected.work.revision, input })).operation?.status, 'attached');
+    assert.equal((await b.import('w', { actionId: randomUUID(), revision: rejectedImport.work.revision, bundle: publication.bundle! })).operation?.status, 'attached');
   } finally { for (const f of resources) await f.close(); rmSync(root, { recursive: true, force: true }); }
 });

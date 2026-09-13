@@ -10,7 +10,13 @@ import { MAX_CONTINUATION_INPUT_BYTES, MAX_CONTINUITY_BUNDLE_BYTES, type Continu
 
 export type NativeRunner = (workspace: string, args: string[], context?: { actor: string }) => Promise<{ ok: boolean; stdout: string }>;
 export interface ContinuationOptions { executable?: string; run?: NativeRunner; tempRoot?: string; locks?: WorkflowLocks }
-interface StoredOperation extends ContinuationOperation { fingerprint: string; bindingDigest: string; sourceTaskKey: string; revision: string; kind: 'save' | 'import'; intendedInput?: NativeCapsuleInput; intendedBundle?: PortableBundle; marker?: string }
+type ValueProof = { kind: 'string'; length: number; digest: string; prefixes: Record<string, string> }
+  | { kind: 'array'; items: ValueProof[] }
+  | { kind: 'object'; fields: Record<string, ValueProof> }
+  | { kind: 'scalar'; digest: string };
+const bundleProofKeys = ['bundle_sha256', 'capsule_sha256', 'origin_capsule_id', 'origin_event_id', 'portable_repo_id'] as const;
+type BundleProof = Record<typeof bundleProofKeys[number], string>;
+interface StoredOperation extends ContinuationOperation { fingerprint: string; bindingDigest: string; sourceTaskKey: string; revision: string; kind: 'save' | 'import'; inputProof?: { state: ValueProof; references: ValueProof }; bundleProof?: BundleProof; marker?: string }
 const capsuleId = (value: unknown): string => { const id = text(value, 100); if (!/^cap_[a-z0-9]+$/.test(id)) throw new ManagerError('INVALID_CAPSULE_ID', '原生 capsule ID 格式不正確。'); return id; };
 const bounded = (value: unknown, size: number): string => { const encoded = JSON.stringify(value); if (!encoded || Buffer.byteLength(encoded) > size) throw new ManagerError('CONTINUITY_TOO_LARGE', `必要上下文超過 ${size} bytes 上限。`, 413); return encoded; };
 
@@ -32,24 +38,51 @@ function parseInput(value: unknown): NativeCapsuleInput {
   text(state.next_action, MAX_CONTINUATION_INPUT_BYTES);
   return JSON.parse(JSON.stringify(value)) as NativeCapsuleInput;
 }
-/** Compare intended input with native output using native-reported truncation.
- * This does not recreate the native schema's limits or canonical digest. */
-function matchesIntended(expected: unknown, actual: unknown, field: string, notices: NonNullable<NativeRestore['capsule']['truncation']>): boolean {
-  if (typeof expected === 'string') {
-    if (typeof actual !== 'string' || !expected.startsWith(actual)) return false;
-    return Array.from(expected).length - Array.from(actual).length === notices.filter(n => n.field === field).reduce((sum, n) => sum + n.omitted_chars, 0);
+/** Only hashes are durable, including hashes of unrecognized JSON property names.
+ * Three bounded prefix receipts cover native V1's 160/1000/4000-char cuts; the
+ * native output must also report the matching truncation. No input text is kept. */
+function valueProof(value: unknown, depth = 0): ValueProof {
+  if (depth > 16) throw new ManagerError('CONTINUITY_TOO_COMPLEX', '上下文結構過深。', 413);
+  if (typeof value === 'string') {
+    const chars = Array.from(value), prefixes: Record<string, string> = {};
+    for (const cut of [160, 1000, 4000]) if (chars.length > cut) prefixes[String(cut)] = hash(chars.slice(0, cut).join(''));
+    return { kind: 'string', length: chars.length, digest: hash(value), prefixes };
   }
-  if (Array.isArray(expected)) {
-    if (actual === undefined && expected.length === 0) return true;
-    if (!Array.isArray(actual) || actual.length > expected.length) return false;
-    if (expected.length - actual.length !== notices.filter(n => n.field === field).reduce((sum, n) => sum + n.omitted_items, 0)) return false;
-    return actual.every((value, index) => matchesIntended(expected[index], value, `${field}[${index}]`, notices));
+  if (Array.isArray(value)) return { kind: 'array', items: value.map(item => valueProof(item, depth + 1)) };
+  if (value && typeof value === 'object') return { kind: 'object', fields: Object.fromEntries(Object.entries(value).map(([key, item]) => [hash(key), valueProof(item, depth + 1)])) };
+  return { kind: 'scalar', digest: hash(JSON.stringify(value) ?? 'undefined') };
+}
+function bundleProof(value: unknown): BundleProof {
+  const input = object(value);
+  return Object.fromEntries(bundleProofKeys.map(key => [key, hash(JSON.stringify(input[key]) ?? 'undefined')])) as BundleProof;
+}
+/** Native schemas/digests remain authoritative. This checks a nonplaintext
+ * receipt of the intended fields against native data and truncation evidence. */
+function matchesIntended(expected: ValueProof, actual: unknown, field: string, notices: NonNullable<NativeRestore['capsule']['truncation']>): boolean {
+  if (expected.kind === 'string') {
+    if (typeof actual !== 'string') return false;
+    const length = Array.from(actual).length, omitted = expected.length - length;
+    if (omitted < 0 || omitted !== notices.filter(n => n.field === field).reduce((sum, n) => sum + n.omitted_chars, 0)) return false;
+    return hash(actual) === (omitted === 0 ? expected.digest : expected.prefixes[String(length)]);
   }
-  if (expected && typeof expected === 'object') {
-    if (!actual || typeof actual !== 'object') return false;
-    return Object.entries(expected).every(([key, value]) => matchesIntended(value, (actual as Record<string, unknown>)[key], field ? `${field}.${key}` : key, notices));
+  if (expected.kind === 'array') {
+    if (actual === undefined && expected.items.length === 0) return true;
+    if (!Array.isArray(actual) || actual.length > expected.items.length) return false;
+    if (expected.items.length - actual.length !== notices.filter(n => n.field === field).reduce((sum, n) => sum + n.omitted_items, 0)) return false;
+    return actual.every((value, index) => matchesIntended(expected.items[index]!, value, `${field}[${index}]`, notices));
   }
-  return expected === actual;
+  if (expected.kind === 'object') {
+    if (!actual || typeof actual !== 'object' || Array.isArray(actual)) return false;
+    const entries = Object.entries(actual);
+    return Object.entries(expected.fields).every(([keyHash, proof]) => {
+      const entry = entries.find(([key]) => hash(key) === keyHash);
+      // Native serde omits empty reference arrays. An omitted empty list is
+      // distinguishable from an unknown field because its proof has no items.
+      if (!entry) return proof.kind === 'array' && proof.items.length === 0;
+      return matchesIntended(proof, entry[1], field ? `${field}.${entry[0]}` : entry[0], notices);
+    });
+  }
+  return hash(JSON.stringify(actual) ?? 'undefined') === expected.digest;
 }
 /** These messages originate before append in cmd_continuity and build/validate.
  * Generic SAVE_FAILED/refused, I/O failures and readback errors are NOT proof. */
@@ -113,7 +146,17 @@ export class ContinuationService {
     });
   }
   private readOperation(actionId: string): StoredOperation | null {
-    const value = this.manager.store.setting(`continuity:operation:${actionId}`); return value ? JSON.parse(value) as StoredOperation : null;
+    const value = this.manager.store.setting(`continuity:operation:${actionId}`); if (!value) return null;
+    const raw = JSON.parse(value) as StoredOperation & { intendedInput?: NativeCapsuleInput; intendedBundle?: PortableBundle };
+    const operation: StoredOperation = { actionId: raw.actionId, status: raw.status, capsuleId: raw.capsuleId, notice: raw.notice, fingerprint: raw.fingerprint,
+      bindingDigest: raw.bindingDigest, sourceTaskKey: raw.sourceTaskKey, revision: raw.revision, kind: raw.kind,
+      ...(raw.nativeStatus ? { nativeStatus: raw.nativeStatus } : {}), ...(raw.marker ? { marker: raw.marker } : {}),
+      ...(raw.inputProof ? { inputProof: raw.inputProof } : raw.intendedInput ? { inputProof: { state: valueProof(raw.intendedInput.state), references: valueProof(raw.intendedInput.references) } } : {}),
+      ...(raw.bundleProof ? { bundleProof: raw.bundleProof } : raw.intendedBundle ? { bundleProof: bundleProof(raw.intendedBundle) } : {}) };
+    // Upgrade unpublished development records without ever carrying their raw
+    // fields into another write. This does not claim forensic erasure of old pages.
+    if (raw.intendedInput || raw.intendedBundle) this.saveOperation(operation);
+    return operation;
   }
   private saveOperation(operation: StoredOperation) { this.manager.store.putSetting(`continuity:operation:${operation.actionId}`, JSON.stringify(operation)); }
   private async response(id: string, operation: StoredOperation | null): Promise<ContinuationPublication> {
@@ -148,8 +191,7 @@ export class ContinuationService {
     if (['attached', 'failed'].includes(operation.status)) return;
     if (operation.capsuleId) { await this.attach(id, operation); return; }
     let selected = exactId;
-    if (!selected && operation.kind === 'import' && operation.intendedBundle) selected = capsuleId(operation.intendedBundle.origin_capsule_id);
-    if (!selected && operation.kind === 'save' && operation.marker) {
+    if (!selected && (operation.kind === 'save' && operation.marker || operation.kind === 'import' && operation.bundleProof)) {
       const workspace = this.binding(id).workspace; await this.capable(workspace, 'list');
       const result = await this.run(workspace, ['continuity', 'list', '--json']);
       if (!result.ok) { operation.notice = '原生清單暫時不可讀；可提供精確 capsule ID 核對原操作，未重複保存。'; this.saveOperation(operation); return; }
@@ -157,7 +199,8 @@ export class ContinuationService {
       if (output.data_authority !== 'data_only' || !Array.isArray(output.capsules)) throw new ManagerError('CONTINUITY_INVALID', '原生 capsule 清單格式無效。', 502);
       const candidates = output.capsules.filter(value => {
         const entry = object(value), capsule = object(entry.capsule), source = object(capsule.source);
-        return entry.imported === false && entry.legacy_partial === false && source.actor === operation.marker;
+        return operation.kind === 'save' ? entry.imported === false && entry.legacy_partial === false && source.actor === operation.marker
+          : hash(JSON.stringify(capsule.capsule_id) ?? 'undefined') === operation.bundleProof!.origin_capsule_id;
       });
       if (candidates.length > 1) throw new ManagerError('CONTINUITY_CONFLICT', '多份原生 capsule 指向同一操作，需精確核對，未自行選取。', 409);
       if (candidates.length === 1) selected = capsuleId(object(object(candidates[0]).capsule).capsule_id);
@@ -166,14 +209,14 @@ export class ContinuationService {
     let context: NativeRestore;
     try { context = await this.restore(id, selected); } catch (error) { if (exactId) throw error; return; }
     let matches = false;
-    if (operation.kind === 'save' && operation.intendedInput && operation.marker) {
+    if (operation.kind === 'save' && operation.inputProof && operation.marker) {
       const notices = context.capsule.truncation ?? [];
       matches = !context.imported && !context.legacy_partial && context.capsule.source.actor === operation.marker
-        && matchesIntended(operation.intendedInput.state, context.capsule.state, 'state', notices)
-        && matchesIntended(operation.intendedInput.references, context.capsule.references, 'references', notices);
-    } else if (operation.kind === 'import' && operation.intendedBundle) {
-      const bundle = await this.exported(id, selected), intended = operation.intendedBundle;
-      matches = bundle !== null && ['bundle_sha256', 'capsule_sha256', 'origin_capsule_id', 'origin_event_id', 'portable_repo_id', 'capsule_bytes_hex'].every(key => bundle[key as keyof PortableBundle] === intended[key as keyof PortableBundle]);
+        && matchesIntended(operation.inputProof.state, context.capsule.state, 'state', notices)
+        && matchesIntended(operation.inputProof.references, context.capsule.references, 'references', notices);
+    } else if (operation.kind === 'import' && operation.bundleProof) {
+      const bundle = await this.exported(id, selected), actual = bundle ? bundleProof(bundle) : null;
+      matches = actual !== null && bundleProofKeys.every(key => actual[key] === operation.bundleProof![key]);
     }
     if (!matches) throw new ManagerError('CONTINUITY_MISMATCH', '此原生 capsule 與原操作的內容或來源證據不一致，未連結。', 409);
     operation.capsuleId = selected; operation.status = 'saved'; operation.notice = '已從原生紀錄核對遺失回覆；保留原操作編號。'; this.saveOperation(operation);
@@ -222,10 +265,10 @@ export class ContinuationService {
       bounded(nativePayload, MAX_CONTINUATION_INPUT_BYTES);
     }
     operation = { actionId, status: 'unknown', capsuleId: null, notice: '原生寫入結果待確認；不會自動重複 save/import。', fingerprint, bindingDigest, sourceTaskKey: state.taskKey, revision, kind,
-      ...(kind === 'save' ? { intendedInput: nativePayload as NativeCapsuleInput, marker: marker! } : { intendedBundle: payload as PortableBundle }) };
+      ...(kind === 'save' ? { inputProof: { state: valueProof((nativePayload as NativeCapsuleInput).state), references: valueProof((nativePayload as NativeCapsuleInput).references) }, marker: marker! } : { bundleProof: bundleProof(payload) }) };
     // ensureSetting is INSERT OR IGNORE: another service using this store cannot
     // claim the same action ID twice, including the gap before the native effect.
-    const proposed = JSON.stringify(operation), stored = this.manager.store.ensureSetting(`continuity:operation:${actionId}`, proposed);
+    const proposed = bounded(operation, 256 * 1024), stored = this.manager.store.ensureSetting(`continuity:operation:${actionId}`, proposed);
     if (stored !== proposed) { const existing = JSON.parse(stored) as StoredOperation; if (existing.fingerprint !== fingerprint) throw new ManagerError('ACTION_CONFLICT', '續作編號已被使用。', 409); return this.response(id, existing); }
     this.manager.store.putSetting(lastKey, actionId);
     const result = await this.temporary(async file => {
