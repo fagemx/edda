@@ -2,7 +2,7 @@ import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { requestSession, listSessions } from './client.mjs';
 import { enroll, readEnrollment } from './supervision.mjs';
-import { readJson, writeJson, sessionDir } from './store.mjs';
+import { readJson, registry, writeJson, sessionDir } from './store.mjs';
 import { dependencyConfiguration } from './dependency-observer.mjs';
 
 export async function followDependencies(root, id, { project, taskIds, notify = false, maxNotifications = 10, scope }) {
@@ -33,19 +33,29 @@ export async function unfollowDependencies(root, id) {
 
 export async function doctor(root, selectedId) {
   const rows = await listSessions(root);
-  // Report which record is unreadable instead of letting it abort diagnosis.
-  const unreadable = rows.filter((r) => r.error?.code === 'record_unavailable').map((r) => ({
-    sessionId: typeof r.sessionId === 'string' ? r.sessionId : null, record: r.error.record || 'state.json' }));
+  // Registry health is read independently of the session inventory so a record
+  // that is unreadable AND has no recoverable identity is still named here.
+  const health = registry(root).map(({ dir, state, owner, stateError, ownerError }) => {
+    const error = stateError || ownerError;
+    if (!error) return null;
+    return { dir, sessionId: owner?.sessionId || state?.sessionId || null, record: error.record, message: error.message };
+  }).filter(Boolean);
+  const unreadable = health.map(({ sessionId, record }) => ({ sessionId, record }));
   const enrolled = (id) => { try { return Boolean(readEnrollment(root, id)?.enabled); } catch { return false; } };
-  const chosen = rows.filter((r) => selectedId ? r.sessionId === selectedId
-    : typeof r.sessionId === 'string' && (r.live || enrolled(r.sessionId)));
-  if (selectedId && !chosen.length) return { status: 'not_registered', sessionId: selectedId, unreadable,
-    nextAction: 'Load the Pi extension and use list to obtain its exact session ID.' };
+  const chosen = rows.filter((r) => selectedId ? r.sessionId === selectedId : r.live || enrolled(r.sessionId));
+  if (selectedId && !chosen.length) {
+    let target = null;
+    try { target = sessionDir(root, selectedId); } catch { /* not a valid session selector */ }
+    if (target && health.some((entry) => entry.dir === target)) return { status: 'record_unavailable', sessionId: selectedId, unreadable,
+      nextAction: 'The record is unreadable and was not repaired; it was preserved as-is.' };
+    return { status: 'not_registered', sessionId: selectedId, unreadable,
+      nextAction: 'Load the Pi extension and use list to obtain its exact session ID.' };
+  }
   const sessions = await Promise.all(chosen.map(async (r) => {
     const base = { sessionId: r.sessionId, name: r.label || basename(r.cwd || '') || r.sessionId,
       cwd: r.cwd, live: r.live, runtimeState: r.state };
     if (r.error?.code === 'record_unavailable') return { ...base, readiness: 'record_unavailable',
-      error: { code: 'record_unavailable', record: r.error.record },
+      error: { ...r.error },
       nextAction: 'The record is unreadable and was not repaired; use the identity shown and the registry list to inspect around it.' };
     if (!r.live) return { ...base, readiness: 'offline', nextAction: 'Inspect the original Pi process; no automatic restart.' };
     if (!r.capabilities?.includes('dependencies')) return { ...base, readiness: 'needs_reload', nextAction: 'Run /reload when idle to load dependency observation.' };

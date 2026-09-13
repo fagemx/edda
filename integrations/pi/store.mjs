@@ -66,7 +66,9 @@ export function readJson(path) {
 export function readRecord(path) {
   try { return { value: readJson(path), error: null }; }
   catch (error) {
-    if (error.code === 'record_unavailable') return { value: null, error: { code: error.code, record: error.record } };
+    if (error.code === 'record_unavailable') {
+      return { value: null, error: { code: error.code, record: error.record, message: error.message } };
+    }
     throw error;
   }
 }

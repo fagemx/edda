@@ -153,7 +153,8 @@ test('a NUL state.json degrades run-status and recovers run-conversation from th
   assert.equal(status.runId, f.runId);
   assert.equal(status.project, config.project);
   assert.deepEqual(status.release, config.release);
-  assert.deepEqual(status.error, { code: 'record_unavailable', record: 'state.json' });
+  assert.deepEqual(status.error, { code: 'record_unavailable', record: 'state.json',
+    message: 'Record unavailable: state.json; it was not repaired' });
   const recovered = await managedConversation(f.registry, f.runId);
   assert.equal(recovered.evidenceSource, 'persisted_session');
   assert.equal(recovered.sessionId, expected.sessionId);

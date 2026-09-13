@@ -62,24 +62,28 @@ export async function prepareHandoff(root, sessionId, manifest, expectedRevision
 }
 
 export async function listSessions(root = defaultRoot()) {
-  return Promise.all(registry(root).map(async ({ state, owner, stateError, ownerError }) => {
+  const rows = await Promise.all(registry(root).map(async ({ state, owner, stateError, ownerError }) => {
     const sessionId = owner?.sessionId || state?.sessionId;
-    // Identity may itself be unrecoverable when both records are unreadable;
-    // still publish a degraded row instead of aborting the whole inventory.
-    if (typeof sessionId !== 'string') return degradedRow(null, stateError || ownerError);
+    // A row with no recoverable identity is not a session-inventory entry and is
+    // deliberately omitted: callers such as adopt match on `sessionId`, and an
+    // unidentifiable entry belongs in doctor's registry health, not the list.
+    if (typeof sessionId !== 'string') return null;
     try { return await requestSession(root, sessionId, '/status'); }
     catch {
-      if (stateError || ownerError || !state) return degradedRow(sessionId, stateError || ownerError, owner);
+      if (stateError || ownerError) return degradedRow(sessionId, stateError || ownerError, owner);
+      // Absent (not corrupt) records keep the pre-existing unreachable/stopped shape.
       return { ...state, sessionId, instanceId: owner?.instanceId || state?.instanceId,
         live: false, state: owner ? 'unreachable' : (state?.state === 'stopped' ? 'stopped' : 'unreachable') };
     }
   }));
+  return rows.filter(Boolean);
 }
 
 function degradedRow(sessionId, error, owner) {
   return { sessionId, instanceId: owner?.instanceId || null, status: 'record_unavailable',
     state: 'record_unavailable', live: false,
-    error: { code: 'record_unavailable', record: error?.record || 'state.json' } };
+    error: error ? { ...error } : { code: 'record_unavailable', record: 'state.json',
+      message: 'Record unavailable: state.json; it was not repaired' } };
 }
 
 export async function getReceipt(root, sessionId, id) {

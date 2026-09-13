@@ -49,17 +49,19 @@ async function managedRun(root, project, { stateKind = 'json', config = {}, stat
   return { runId, dir, sessionId, sessionFile, statePath };
 }
 
-async function serviceSession(root, project, { stateKind = 'json' } = {}) {
+async function serviceSession(root, project, { stateKind = 'json', ownerKind = 'json' } = {}) {
   const sessionId = randomUUID(), dir = sessionDir(root, sessionId);
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, 'owner.json'), JSON.stringify({ sessionId, instanceId: randomUUID(),
-    pid: 4242, port: 9, token: 'b'.repeat(64), cwd: project }));
+  const ownerPath = join(dir, 'owner.json');
+  if (ownerKind === 'json') {
+    await writeFile(ownerPath, JSON.stringify({ sessionId, instanceId: randomUUID(), pid: 4242, port: 9, token: 'b'.repeat(64), cwd: project }));
+  } else if (ownerKind === 'nul') await writeFile(ownerPath, NUL());
   const statePath = join(dir, 'state.json');
   if (stateKind === 'json') {
     await writeFile(statePath, JSON.stringify({ sessionId, state: 'idle', cwd: project, token: 'SECRET-TOKEN' }));
   } else if (stateKind === 'nul') await writeFile(statePath, NUL());
   else if (stateKind === 'invalid') await writeFile(statePath, '{ SECRET-BROKEN-JSON');
-  return { sessionId, dir, statePath };
+  return { sessionId, dir, statePath, ownerPath };
 }
 
 test('run discovery degrades a NUL state per record and keeps config identity', async (t) => {
@@ -96,7 +98,8 @@ test('run-status returns config identity, not a parser error, when state.json is
   assert.equal(result.provider, 'test-provider');
   assert.equal(result.model, 'test-model');
   assert.equal(result.thinking, 'high');
-  assert.deepEqual(result.error, { code: 'record_unavailable', record: 'state.json' });
+  assert.deepEqual(result.error, { code: 'record_unavailable', record: 'state.json',
+    message: 'Record unavailable: state.json; it was not repaired' });
   assert.ok(!parserText(result));
   assert.doesNotMatch(JSON.stringify(result), /SECRET/);
   assert.deepEqual(await readFile(run.statePath), before);
@@ -127,7 +130,8 @@ test('list survives a NUL service state and recovers identity from owner.json', 
   assert.equal(rows[0].status, 'record_unavailable');
   assert.equal(rows[0].state, 'record_unavailable');
   assert.equal(rows[0].live, false);
-  assert.deepEqual(rows[0].error, { code: 'record_unavailable', record: 'state.json' });
+  assert.deepEqual(rows[0].error, { code: 'record_unavailable', record: 'state.json',
+    message: 'Record unavailable: state.json; it was not repaired' });
   assert.ok(!parserText(rows));
   assert.doesNotMatch(JSON.stringify(rows), /SECRET/);
   assert.deepEqual(await readFile(corrupt.statePath), before);
@@ -142,8 +146,30 @@ test('doctor succeeds against a corrupt record and names it', async (t) => {
   assert.deepEqual(result.unreadable, [{ sessionId: corrupt.sessionId, record: 'state.json' }]);
   const selected = await doctor(root, corrupt.sessionId);
   assert.equal(selected.sessions[0].readiness, 'record_unavailable');
-  assert.deepEqual(selected.sessions[0].error, { code: 'record_unavailable', record: 'state.json' });
+  assert.equal(selected.sessions[0].error.code, 'record_unavailable');
+  assert.equal(selected.sessions[0].error.record, 'state.json');
   assert.ok(!parserText(result) && !parserText(selected));
+});
+
+test('a session with no recoverable identity is omitted from list and named by doctor', async (t) => {
+  const { root, project } = await fixture(t);
+  const blind = await serviceSession(root, project, { stateKind: 'nul', ownerKind: 'nul' });
+  assert.deepEqual(await listSessions(root), []);
+  const result = await doctor(root);
+  assert.deepEqual(result.unreadable, [{ sessionId: null, record: 'state.json' }]);
+  const selected = await doctor(root, blind.sessionId);
+  assert.equal(selected.status, 'record_unavailable');
+  assert.equal(selected.sessionId, blind.sessionId);
+});
+
+test('an absent state record keeps the pre-existing unreachable shape, not record_unavailable', async (t) => {
+  const { root, project } = await fixture(t);
+  await serviceSession(root, project, { stateKind: 'missing' });
+  const rows = await listSessions(root);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, 'unreachable');
+  assert.equal(rows[0].error, undefined);
+  assert.deepEqual((await doctor(root)).unreadable, []);
 });
 
 test('a non-NUL invalid record degrades exactly like a NUL record', async (t) => {
