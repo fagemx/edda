@@ -31,12 +31,12 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs watch --conversation
   node integrations/pi/cli.mjs prepare SESSION_ID --manifest FILE [--expected REVISION]
   node integrations/pi/cli.mjs brief SESSION_ID [--budget-bytes 16384]
-  node integrations/pi/cli.mjs compose --project PATH --task ID [--context FILE | --capsule CAPSULE_ID] [--output NEW_FILE] [--edda-bin PATH]
+  node integrations/pi/cli.mjs compose --project PATH --task ID [--context FILE] [--capsule CAPSULE_ID] [--output NEW_FILE] [--edda-bin PATH]
   node integrations/pi/cli.mjs reply SESSION_ID --to CURSOR --message TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor CURSOR --action observed|working|waiting_user|complete|paused --note TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --action paused --note TEXT
   node integrations/pi/cli.mjs doctor [SESSION_ID]
-  node integrations/pi/cli.mjs adopt SESSION_ID_OR_PREFIX --task ID [--project PATH] [--include ID,ID] [--context FILE | --capsule CAPSULE_ID] [--scope TEXT] [--notify] [--max-notifications 10] [--preview] [--expected REVISION] [--edda-bin PATH]
+  node integrations/pi/cli.mjs adopt SESSION_ID_OR_PREFIX --task ID [--project PATH] [--include ID,ID] [--context FILE] [--capsule CAPSULE_ID] [--scope TEXT] [--notify] [--max-notifications 10] [--preview] [--expected REVISION] [--edda-bin PATH]
   node integrations/pi/cli.mjs follow SESSION_ID --project PATH --tasks ID,ID [--scope TEXT] [--notify] [--max-notifications 10]
   node integrations/pi/cli.mjs dependencies SESSION_ID
   node integrations/pi/cli.mjs check-dependencies SESSION_ID

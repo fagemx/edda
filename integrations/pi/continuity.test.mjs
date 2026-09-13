@@ -35,12 +35,12 @@ function envelope({ id = CAPSULE_ID_VALUE, warnings = [], capsuleState = state()
 }
 const command = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-capsule-reader.mjs', import.meta.url))] };
 
-async function fixture(t, { capsuleId = CAPSULE_ID_VALUE, capsuleText = JSON.stringify(envelope()), list = true, writeCapsule = true } = {}) {
+async function fixture(t, { capsuleId = CAPSULE_ID_VALUE, capsuleText = JSON.stringify(envelope()), list = true, writeCapsule = true, listWarnings = [] } = {}) {
   const project = await mkdtemp(join(tmpdir(), 'edda-continuity-test-'));
   t.after(() => rm(project, { recursive: true, force: true }));
   await writeFile(join(project, 'task-17.json'), JSON.stringify(task()));
   await writeFile(join(project, 'capsules-list.json'), JSON.stringify({ data_authority: 'data_only',
-    capsules: list ? [{ capsule: { capsule_id: capsuleId } }] : [], warnings: [] }));
+    capsules: list ? [{ capsule: { capsule_id: capsuleId } }] : [], warnings: listWarnings }));
   if (writeCapsule) await writeFile(join(project, `capsule-${capsuleId}.json`), capsuleText);
   return { project, root: join(project, 'private-cache'), options: { project, id: '17', root: join(project, 'private-cache'), eddaCommand: command } };
 }
@@ -60,6 +60,28 @@ test('envelope validation requires data_only identity and complete bounded state
   assert.throws(() => parseCapsuleEnvelope({ ...envelope(), capsule: { ...envelope().capsule, capsule_version: 2 } }, CAPSULE_ID_VALUE), /version/);
   assert.throws(() => parseCapsuleEnvelope({ ...envelope(), capsule: { ...envelope().capsule, state: state({ goal: 7 }) } }, CAPSULE_ID_VALUE), /state.goal/);
   assert.throws(() => parseCapsuleEnvelope({ ...envelope(), warnings: [1] }, CAPSULE_ID_VALUE), /warnings/);
+  assert.throws(() => parseCapsuleEnvelope({ ...envelope(), warnings: ['x'.repeat(2001)] }, CAPSULE_ID_VALUE), /bound/);
+});
+
+test('unvalidated truncation notices refuse as capsule_invalid instead of crashing the renderer', async (t) => {
+  const capsule = envelope().capsule;
+  for (const truncation of ['not-an-array', [null], [{ field: 'state.summary', omitted_chars: 3 }], [{ field: '', omitted_chars: 1, omitted_items: 1 }], [{ field: 'state.goal', omitted_chars: -1, omitted_items: 0 }]]) {
+    assert.throws(() => parseCapsuleEnvelope({ ...envelope(), capsule: { ...capsule, truncation } }, CAPSULE_ID_VALUE), /truncation/);
+  }
+  const malformed = await fixture(t, { capsuleText: JSON.stringify({ ...envelope(), capsule: { ...capsule, truncation: 'not-an-array' } }) });
+  const restored = await restoreCapsuleContext({ project: malformed.project, capsuleId: CAPSULE_ID_VALUE, eddaCommand: command });
+  assert.equal(restored.status, 'capsule_invalid');
+});
+
+test('truncation notices render and list-level warnings stay visible', async (t) => {
+  const capsule = envelope().capsule;
+  const f = await fixture(t, { listWarnings: ['ambiguous portable repository aliases; confirm the capsule anchor'],
+    capsuleText: JSON.stringify({ ...envelope(), capsule: { ...capsule, truncation: [{ field: 'state.summary', omitted_chars: 12, omitted_items: 2 }] } }) });
+  const restored = await restoreCapsuleContext({ project: f.project, capsuleId: CAPSULE_ID_VALUE, eddaCommand: command });
+  assert.equal(restored.status, 'restored');
+  assert.match(restored.document, /TRUNCATION: state.summary omitted 12 chars \/ 2 items/);
+  assert.deepEqual(restored.capsule.warnings, ['ambiguous portable repository aliases; confirm the capsule anchor']);
+  assert.match(restored.document, /WARNING: ambiguous portable repository aliases/);
 });
 
 test('restored document keeps provenance, warnings and a line-start management block', () => {

@@ -143,8 +143,8 @@ When the necessary context was saved as an Edda native continuity capsule, adopt
 it without restoring prose by hand or creating an intermediate context file:
 
 ```text
-edda-pi adopt <sessionId> --task <taskId> --capsule <capsuleId>
-edda-pi adopt <sessionId> --task <taskId> --capsule <capsuleId> --context <declared-metadata-file>
+edda-pi adopt <sessionId> --task <taskId> --capsule <capsuleId> --scope "<declared scope>"
+edda-pi adopt <sessionId> --task <taskId> --capsule <capsuleId> --context <declared-metadata-file> --scope "<declared scope>"
 ```
 
 The client reads the capsule with the installed `edda continuity restore` and
@@ -153,7 +153,9 @@ merges the data-only restored context into the same bounded context path as
 the `data_only` authority stay visible, and none of that text becomes execution
 authority. The recorded prompt and initial task are never replayed. Add
 `--context <file>` only when the declared `role`/`doneWhen`/`scope` metadata is
-not already inside the capsule. Unavailable, stale, wrong-repository, malformed
+not already inside the capsule. A first adoption of a session that has no prior
+enrollment also needs `--scope` (the capsule's `edda-management` block does not
+substitute for it); later adoptions reuse the recorded scope. Unavailable, stale, wrong-repository, malformed
 or oversize capsules fail with a `capsule_*` status (exit 2) before any
 enrollment, handoff, message or model launch, so uncertain delivery is never
 replayed. `--edda-bin <path>` (or `EDDA_BIN`) selects the native executable.

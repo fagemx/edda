@@ -32,6 +32,22 @@ function requireStringArray(value, label) {
   return value;
 }
 
+// Every rendered truncation notice must be a bounded object before it is
+// iterated: an unvalidated non-array (or a null entry) would throw out of the
+// document renderer, turning a typed `capsule_invalid` refusal into a raw crash.
+function requireTruncations(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('Native continuity capsule truncation is invalid');
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('Native continuity capsule truncation is invalid');
+    if (typeof entry.field !== 'string' || !entry.field) throw new Error('Native continuity capsule truncation is invalid');
+    for (const key of ['omitted_chars', 'omitted_items']) {
+      if (!Number.isSafeInteger(entry[key]) || entry[key] < 0) throw new Error('Native continuity capsule truncation is invalid');
+    }
+  }
+  return value;
+}
+
 /**
  * Strictly validate the public `edda continuity restore --json` envelope.
  * Native schema/digests stay authoritative; this only rejects output that is
@@ -64,6 +80,7 @@ export function parseCapsuleEnvelope(value, requestedId) {
     typeof entry.hypothesis !== 'string' || typeof entry.reason !== 'string')) {
     throw new Error('Native continuity state.rejected is invalid');
   }
+  requireTruncations(capsule.truncation);
   for (const key of ['portable_repo_id', 'display_hint']) {
     if (repository[key] !== undefined && typeof repository[key] !== 'string') throw new Error(`Native continuity repository.${key} is invalid`);
   }
@@ -158,6 +175,15 @@ export async function restoreCapsuleContext({ project, capsuleId, eddaCommand, s
   if (!listValue.capsules.some((entry) => entry?.capsule?.capsule_id === id)) {
     return refusal('capsule_wrong_repository', id, 'The requested capsule is not part of this project repository; no capsule was adopted');
   }
+  // List-level warnings (for example an ambiguous portable repository alias)
+  // are part of what the operator must see; dropping them would falsify the
+  // documented promise that every warning stays visible.
+  let listWarnings = [];
+  if (listValue.warnings !== undefined) {
+    try { listWarnings = requireStringArray(listValue.warnings, 'list warnings'); }
+    catch { return refusal('capsule_invalid', id, 'Native continuity list output carried invalid warnings'); }
+    if (listWarnings.some((warning) => warning.length > 2000)) return refusal('capsule_invalid', id, 'Native continuity list warning exceeds its bound');
+  }
 
   let raw;
   try { raw = await runEdda(cwd, command, ['continuity', 'restore', id, '--json'], signal); }
@@ -176,6 +202,7 @@ export async function restoreCapsuleContext({ project, capsuleId, eddaCommand, s
   let envelope;
   try { envelope = parseCapsuleEnvelope(value, id); }
   catch (error) { return refusal('capsule_invalid', id, error.message); }
+  if (listWarnings.length) envelope = { ...envelope, warnings: [...new Set([...listWarnings, ...envelope.warnings])] };
   if (envelope.warnings.some((warning) => /^saved commit is absent from the current clone/.test(warning))) {
     return refusal('capsule_stale', id, 'The saved commit is absent from the current clone; inspect the capsule anchor before adopting');
   }

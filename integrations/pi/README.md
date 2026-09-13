@@ -217,9 +217,11 @@ authority, and no recorded prompt or initial task is replayed. The operator neve
 copies restored prose or creates an intermediate context file. Use `--context FILE`
 together with `--capsule` when the declared `role`/`doneWhen`/`scope` metadata still
 comes from a file; a capsule that itself contains the `edda-management` block needs
-no separate context file. The declared metadata stays operator input: the client
-never derives `role`, `doneWhen` or `scope` from capsule `state`, `actor` or
-`references`, so restored data cannot become execution authority. A capsule with no
+no separate context file. The declared metadata stays operator input: no capsule
+field is mapped to `role`, `doneWhen` or `scope` — an embedded `edda-management`
+block is read as operator-declared metadata, not as authority the client derives
+from `state`, `actor` or `references` — so restored data cannot become execution
+authority. A capsule with no
 declared block and no `--context` file yields the usual `needs_context` refusal.
 
 Two digests are real and visible: the native read-back `sha256` of the exact
@@ -608,9 +610,10 @@ Their previous bidirectional conversation functions remain usable; `watch` shows
 ## Compose from existing Edda tasks
 
 This adapter is JavaScript; the task engine remains Rust. `compose` executes only
-the installed `edda task show ID --json` with a supplied project directory and
-argument-safe process execution. It never changes a task, launches a session or
-prepares a Pi automatically.
+the installed `edda task show ID --json` — plus, when `--capsule` is given, the
+installed `edda continuity list --json` and `edda continuity restore CAPSULE_ID
+--json` — with a supplied project directory and argument-safe process execution.
+It never changes a task, launches a session or prepares a Pi automatically.
 
 ```powershell
 node integrations/pi/cli.mjs compose --project C:/ai_agent/edda --task 17 --output handoff.json
