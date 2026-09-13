@@ -172,6 +172,14 @@ pub(crate) struct Qualification {
     pub require_model_diversity: bool,
 }
 
+/// Resolve an identity to the canonical id the table keys on, falling back to
+/// the trimmed raw string when it names no known model family. `assess` and
+/// `observed_is_authoritative` share it so the requested and observed halves of
+/// the decision cannot drift.
+fn resolve(model: &str) -> String {
+    canonical_model_id(model).unwrap_or_else(|| model.trim().to_owned())
+}
+
 pub(crate) fn assess(
     files: &[String],
     model_requested: &str,
@@ -179,8 +187,7 @@ pub(crate) fn assess(
     require_model_diversity: bool,
 ) -> Result<Qualification> {
     let (surface, deciding_path) = classify(files)?;
-    let engine =
-        canonical_model_id(model_requested).unwrap_or_else(|| model_requested.trim().to_owned());
+    let engine = resolve(model_requested);
     Ok(Qualification {
         authoritative: is_authoritative(
             &engine,
@@ -200,13 +207,16 @@ pub(crate) fn assess(
 /// entry's provider pin. `assess` decides authority from the requested
 /// identity; the observed identity (`<provider>/<id>`, built by the pi
 /// transport) carries the provider that served the round, and
-/// `canonical_model_id` discards it. Re-applying the engine/transport/surface/
-/// provider decision with the provider taken from the observed identity keeps a
-/// router route from inheriting the authority the brief was measured on
-/// (#1187). Engines whose table entry ignores the provider pin (Opus, sol,
-/// glm) are unaffected.
+/// `canonical_model_id` discards it. The observed identity must therefore name
+/// the **same canonical engine** as the request — an id that resolves to no
+/// known family, or to a different model, is not the engine the brief qualified
+/// — and must name the same official provider the entry was measured on, so a
+/// router route cannot inherit the authority (#1187). Engines whose table entry
+/// ignores the provider pin (Opus, sol, glm) are unaffected beyond the engine
+/// identity they already require.
 pub(crate) fn observed_is_authoritative(engine: &Qualification, model_observed: &str) -> bool {
     engine.authoritative
+        && resolve(model_observed) == engine.engine
         && is_authoritative(
             &engine.engine,
             &engine.transport,
@@ -493,6 +503,14 @@ mod tests {
                 "openrouter/deepseek/deepseek-flash"
             ));
             assert!(!observed_is_authoritative(&engine, "deepseek-flash"));
+            // The observed id must resolve to the qualified engine: an unknown
+            // family (`canonical_model_id` -> None) and a different known model
+            // are both refused, not waved through by the provider segment.
+            assert!(!observed_is_authoritative(&engine, "deepseek/router-xyz"));
+            assert!(!observed_is_authoritative(
+                &engine,
+                "deepseek/deepseek-v4-flash"
+            ));
         }
         // Engines whose entry pins no provider are unaffected by the new check.
         let opus = assessed(&shipping, "claude-opus-5", "claude-code");

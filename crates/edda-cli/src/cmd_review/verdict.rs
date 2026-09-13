@@ -404,6 +404,20 @@ mod tests {
         );
         assert_eq!(exit_code(&payload), 3);
 
+        // An observed id that resolves to no known family escapes the
+        // canonical-id mismatch guard, so the observed-id check must refuse it
+        // on its own (P0 of the #1187 bootstrap round 2).
+        let mut payload = qualified_payload_with_findings(vec![]);
+        payload.reviewer.model_requested = "deepseek/deepseek-flash".into();
+        payload.reviewer.model_observed = "deepseek/router-xyz".into();
+        qualify(&mut payload, &official_deepseek_engine());
+        assert!(!payload.qualified);
+        assert_eq!(
+            payload.disqualifiers,
+            ["observed-engine-not-authoritative".to_owned()]
+        );
+        assert_eq!(exit_code(&payload), 3);
+
         // The same request observed on the official provider stays qualified.
         let mut payload = qualified_payload_with_findings(vec![]);
         payload.reviewer.model_requested = "deepseek/deepseek-flash".into();
