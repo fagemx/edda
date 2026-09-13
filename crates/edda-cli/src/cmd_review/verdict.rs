@@ -1,4 +1,4 @@
-use super::qualification::Qualification;
+use super::qualification::{observed_is_authoritative, Qualification};
 use anyhow::{bail, Context, Result};
 use edda_core::{ReviewChecklistItem, ReviewFinding, ReviewVerdictPayload};
 use serde::Deserialize;
@@ -134,6 +134,12 @@ pub(crate) fn qualify(payload: &mut ReviewVerdictPayload, engine: &Qualification
     let mut reasons = Vec::new();
     if !engine.authoritative {
         reasons.push("engine-not-authoritative".into());
+    } else if !observed_is_authoritative(engine, &payload.reviewer.model_observed) {
+        // The brief qualified the requested identity, but the round that ran
+        // was observed on a different provider (a router route). Refuse it
+        // under its own reason rather than reusing `model-mismatch`, which the
+        // canonical ids hide.
+        reasons.push("observed-engine-not-authoritative".into());
     }
     for (bad, reason) in [
         (payload.verdict == "unreviewed", "unreviewed"),
@@ -329,6 +335,15 @@ mod tests {
         engine
     }
 
+    fn official_deepseek_engine() -> Qualification {
+        let files = ["crates/edda-cli/src/cmd_review/mod.rs".to_owned()];
+        let engine =
+            super::super::qualification::assess(&files, "deepseek/deepseek-flash", "pi", false)
+                .unwrap();
+        assert!(engine.authoritative);
+        engine
+    }
+
     #[test]
     fn authoritative_engine_that_closed_d5_qualifies_and_exits_zero() {
         let mut payload = qualified_payload_with_findings(vec![]);
@@ -371,6 +386,45 @@ mod tests {
             ["engine-not-authoritative".to_owned()]
         );
         assert_eq!(exit_code(&payload), 3);
+    }
+
+    #[test]
+    fn observed_route_off_the_qualified_provider_cannot_qualify() {
+        // The brief qualified the official provider, but the round was
+        // observed on a router route; the canonical ids agree, so this
+        // disqualifier is the only thing that refuses it (#1187 P0).
+        let mut payload = qualified_payload_with_findings(vec![]);
+        payload.reviewer.model_requested = "deepseek/deepseek-flash".into();
+        payload.reviewer.model_observed = "openrouter/deepseek/deepseek-flash".into();
+        qualify(&mut payload, &official_deepseek_engine());
+        assert!(!payload.qualified);
+        assert_eq!(
+            payload.disqualifiers,
+            ["observed-engine-not-authoritative".to_owned()]
+        );
+        assert_eq!(exit_code(&payload), 3);
+
+        // An observed id that resolves to no known family escapes the
+        // canonical-id mismatch guard, so the observed-id check must refuse it
+        // on its own (P0 of the #1187 bootstrap round 2).
+        let mut payload = qualified_payload_with_findings(vec![]);
+        payload.reviewer.model_requested = "deepseek/deepseek-flash".into();
+        payload.reviewer.model_observed = "deepseek/router-xyz".into();
+        qualify(&mut payload, &official_deepseek_engine());
+        assert!(!payload.qualified);
+        assert_eq!(
+            payload.disqualifiers,
+            ["observed-engine-not-authoritative".to_owned()]
+        );
+        assert_eq!(exit_code(&payload), 3);
+
+        // The same request observed on the official provider stays qualified.
+        let mut payload = qualified_payload_with_findings(vec![]);
+        payload.reviewer.model_requested = "deepseek/deepseek-flash".into();
+        payload.reviewer.model_observed = "deepseek/deepseek-flash".into();
+        qualify(&mut payload, &official_deepseek_engine());
+        assert!(payload.qualified, "{:?}", payload.disqualifiers);
+        assert_eq!(exit_code(&payload), 0);
     }
 
     #[test]
