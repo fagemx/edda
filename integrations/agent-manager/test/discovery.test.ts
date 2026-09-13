@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { AgentManager } from '../src/manager.js';
 import { ManagerStore } from '../src/store.js';
@@ -42,18 +42,20 @@ function fixture() {
 }
 
 test('candidate projection deduplicates by session, marks configured runs and never leaks the registry root', () => {
-  const root = 'C:/private/registry', agents = parseConfig({ version: 1, projects: [{ id: 'p', name: 'P' }], agents: [
-    { id: 'known', name: 'Known', role: 'worker', projectId: 'p', registryRoot: root, workspace: 'C:/ws', sessionId: 's1' }] }).agents;
+  const root = join(tmpdir(), 'manager-projection-registry'), workspace = join(tmpdir(), 'manager-projection-ws'), other = join(tmpdir(), 'manager-projection-other');
+  const agents = parseConfig({ version: 1, projects: [{ id: 'p', name: 'P' }], agents: [
+    { id: 'known', name: 'Known', role: 'worker', projectId: 'p', registryRoot: root, workspace, sessionId: 's1' }] }).agents;
   const report: DiscoveryReport = { runs: [
-    { registryRoot: root, sessionId: 's1', runId: null, instanceId: null, state: 'idle', live: false, source: 'recorded', workspace: 'C:/ws', lastProgressAt: null, reason: 'offline' },
-    { registryRoot: root, sessionId: 's2', runId: null, instanceId: null, state: 'stopped', live: false, source: 'recorded', workspace: 'C:/ws', lastProgressAt: null, reason: 'stopped' },
-    { registryRoot: root, sessionId: 's2', runId: null, instanceId: 'i', state: 'running', live: true, source: 'live', workspace: 'C:/ws', lastProgressAt: null, reason: null },
-  ], failures: [{ registryRoot: 'C:/private/other', message: 'unreadable' }] };
+    { registryRoot: root, sessionId: 's1', runId: null, instanceId: null, state: 'idle', live: false, source: 'recorded', workspace, lastProgressAt: null, reason: 'offline' },
+    { registryRoot: root, sessionId: 's2', runId: null, instanceId: null, state: 'stopped', live: false, source: 'recorded', workspace, lastProgressAt: null, reason: 'stopped' },
+    { registryRoot: root, sessionId: 's2', runId: null, instanceId: 'i', state: 'running', live: true, source: 'live', workspace, lastProgressAt: null, reason: null },
+  ], failures: [{ registryRoot: other, message: 'unreadable' }] };
   const view = projectCandidates(report, agents);
   assert.equal(view.candidates.length, 2);
   assert.deepEqual(view.candidates.map((c) => [c.sessionId, c.live, c.configuredAgentId]), [['s2', true, null], ['s1', false, 'known']]);
-  assert.deepEqual(view.issues, [{ label: rootLabel('C:/private/other'), message: 'unreadable' }]);
+  assert.deepEqual(view.issues, [{ label: rootLabel(other), message: 'unreadable' }]);
   assert.ok(!JSON.stringify(view).includes(root));
+  assert.ok(!JSON.stringify(view).includes(basename(root)));
   assert.ok(!JSON.stringify(view).includes('registryRoot'));
 });
 
@@ -147,10 +149,10 @@ test('real Pi session listing discovers live and offline runs read-only', async 
 });
 
 test('managed inventory and its live session merge into one candidate', () => {
-  const root = 'C:/private/registry', runId = '11111111-1111-4111-8111-111111111111';
+  const root = join(tmpdir(), 'manager-merge-registry'), workspace = join(tmpdir(), 'manager-merge-ws'), runId = '11111111-1111-4111-8111-111111111111';
   const report: DiscoveryReport = { runs: [
-    { registryRoot: root, sessionId: 's3', runId, instanceId: null, state: 'unknown', live: false, source: 'recorded', workspace: 'C:/ws', lastProgressAt: '2026-01-01T00:00:00.000Z', reason: 'recorded inventory' },
-    { registryRoot: root, sessionId: 's3', runId: null, instanceId: 'i', state: 'running', live: true, source: 'live', workspace: 'C:/ws', lastProgressAt: null, reason: null },
+    { registryRoot: root, sessionId: 's3', runId, instanceId: null, state: 'unknown', live: false, source: 'recorded', workspace, lastProgressAt: '2026-01-01T00:00:00.000Z', reason: 'recorded inventory' },
+    { registryRoot: root, sessionId: 's3', runId: null, instanceId: 'i', state: 'running', live: true, source: 'live', workspace, lastProgressAt: null, reason: null },
     { registryRoot: root, sessionId: null, runId: '22222222-2222-4222-8222-222222222222', instanceId: null, state: 'stopped', live: false, source: 'recorded', workspace: null, lastProgressAt: null, reason: 'no session yet' },
   ], failures: [] };
   const view = projectCandidates(report, []);
