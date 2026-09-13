@@ -35,12 +35,12 @@ function envelope({ id = CAPSULE_ID_VALUE, warnings = [], capsuleState = state()
 }
 const command = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-capsule-reader.mjs', import.meta.url))] };
 
-async function fixture(t, { capsuleId = CAPSULE_ID_VALUE, capsuleText = JSON.stringify(envelope()), list = true, writeCapsule = true, listWarnings = [] } = {}) {
+async function fixture(t, { capsuleId = CAPSULE_ID_VALUE, capsuleText = JSON.stringify(envelope()), list = true, writeCapsule = true, listWarnings = [], listEntries } = {}) {
   const project = await mkdtemp(join(tmpdir(), 'edda-continuity-test-'));
   t.after(() => rm(project, { recursive: true, force: true }));
   await writeFile(join(project, 'task-17.json'), JSON.stringify(task()));
-  await writeFile(join(project, 'capsules-list.json'), JSON.stringify({ data_authority: 'data_only',
-    capsules: list ? [{ capsule: { capsule_id: capsuleId } }] : [], warnings: listWarnings }));
+  const capsules = listEntries ?? (list ? [{ capsule: { capsule_id: capsuleId } }] : []);
+  await writeFile(join(project, 'capsules-list.json'), JSON.stringify({ data_authority: 'data_only', capsules, warnings: listWarnings }));
   if (writeCapsule) await writeFile(join(project, `capsule-${capsuleId}.json`), capsuleText);
   return { project, root: join(project, 'private-cache'), options: { project, id: '17', root: join(project, 'private-cache'), eddaCommand: command } };
 }
@@ -61,6 +61,9 @@ test('envelope validation requires data_only identity and complete bounded state
   assert.throws(() => parseCapsuleEnvelope({ ...envelope(), capsule: { ...envelope().capsule, state: state({ goal: 7 }) } }, CAPSULE_ID_VALUE), /state.goal/);
   assert.throws(() => parseCapsuleEnvelope({ ...envelope(), warnings: [1] }, CAPSULE_ID_VALUE), /warnings/);
   assert.throws(() => parseCapsuleEnvelope({ ...envelope(), warnings: ['x'.repeat(2001)] }, CAPSULE_ID_VALUE), /bound/);
+  const noRejected = { ...state() };
+  delete noRejected.rejected;
+  assert.doesNotThrow(() => parseCapsuleEnvelope(envelope({ capsuleState: noRejected }), CAPSULE_ID_VALUE));
 });
 
 test('unvalidated truncation notices refuse as capsule_invalid instead of crashing the renderer', async (t) => {
@@ -126,6 +129,13 @@ test('wrong repository, unavailable, malformed, oversize and stale capsules refu
 
   const dangling = await restoreCapsuleContext({ project: t.name, capsuleId: 'not-a-capsule', eddaCommand: command });
   assert.equal(dangling.status, 'capsule_invalid');
+});
+
+test('a repository listing larger than the context bound still verifies membership', async (t) => {
+  const filler = Array.from({ length: 12000 }, (_, index) => ({ capsule: { capsule_id: `cap_filler${index.toString(36).padStart(8, '0')}` } }));
+  const f = await fixture(t, { listEntries: [{ capsule: { capsule_id: CAPSULE_ID_VALUE } }, ...filler] });
+  const restored = await restoreCapsuleContext({ project: f.project, capsuleId: CAPSULE_ID_VALUE, eddaCommand: command });
+  assert.equal(restored.status, 'restored');
 });
 
 test('compose consumes a capsule block and a capsule alongside explicit metadata', async (t) => {

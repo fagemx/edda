@@ -7,6 +7,11 @@ import { digest } from './store.mjs';
 // The restored document is handed to the existing bounded context path, so it
 // uses the same 256 KiB ceiling as an explicit context file.
 export const MAX_CONTINUITY_CONTEXT_BYTES = 262144;
+// `continuity list --json` serializes every capsule in the workspace ledger, so
+// its output is not bounded by the context document bound. The membership
+// preflight still must not grow without bound: verify within this fixed cap and
+// fail closed (capsule_unavailable) beyond it rather than reading indefinitely.
+const MAX_CONTINUITY_LIST_BYTES = 16 * 1024 * 1024;
 const MAX_CAPSULE_ID = 100;
 const CAPSULE_ID = /^cap_[a-z0-9]+$/;
 const exec = promisify(execFile);
@@ -76,7 +81,7 @@ export function parseCapsuleEnvelope(value, requestedId) {
   for (const key of ['title', 'summary', 'goal', 'current', 'next_action']) requireString(state[key], `state.${key}`);
   requireStringArray(state.hypotheses ?? [], 'state.hypotheses');
   requireStringArray(state.open_questions ?? [], 'state.open_questions');
-  if (!Array.isArray(state.rejected ?? []) || state.rejected.some((entry) => !entry || typeof entry !== 'object' ||
+  if (!Array.isArray(state.rejected ?? []) || (state.rejected ?? []).some((entry) => !entry || typeof entry !== 'object' ||
     typeof entry.hypothesis !== 'string' || typeof entry.reason !== 'string')) {
     throw new Error('Native continuity state.rejected is invalid');
   }
@@ -132,9 +137,9 @@ export function capsuleContextDocument(envelope, nativeRevision) {
   return `${lines.join('\n')}\n`;
 }
 
-async function runEdda(project, command, args, signal) {
+async function runEdda(project, command, args, signal, maxBytes = MAX_CONTINUITY_CONTEXT_BYTES * 2) {
   const result = await exec(command.file, [...command.args, ...args], {
-    cwd: project, windowsHide: true, timeout: 15000, maxBuffer: MAX_CONTINUITY_CONTEXT_BYTES * 2,
+    cwd: project, windowsHide: true, timeout: 15000, maxBuffer: maxBytes,
     encoding: 'utf8', signal,
   });
   return result.stdout;
@@ -164,8 +169,8 @@ export async function restoreCapsuleContext({ project, capsuleId, eddaCommand, s
   // selection, so first confirm the capsule belongs to this project through the
   // repository-scoped public list. No substitute capsule is ever selected.
   let listed;
-  try { listed = await runEdda(cwd, command, ['continuity', 'list', '--json'], signal); }
-  catch { return refusal('capsule_unavailable', id, 'The installed edda could not list native continuity capsules for this project; no capsule was adopted'); }
+  try { listed = await runEdda(cwd, command, ['continuity', 'list', '--json'], signal, MAX_CONTINUITY_LIST_BYTES); }
+  catch { return refusal('capsule_unavailable', id, 'The installed edda could not list native continuity capsules for this project within the bounded read; no capsule was adopted'); }
   let listValue;
   try { listValue = JSON.parse(listed); }
   catch { return refusal('capsule_invalid', id, 'Native continuity list output was not JSON'); }
