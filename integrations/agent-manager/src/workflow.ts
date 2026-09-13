@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ManagerError, type AgentBinding } from './contracts.js';
-import { hash, object, parseConfig, parseSend, slug, text, uuid } from './config.js';
+import { hash, object, parseConfig, parseSend, selectionRevision, slug, text, uuid } from './config.js';
 import { EddaWorkflowLedger, WorkflowLocks, type CanonicalTask, type WorkflowLedger } from './edda-workflow.js';
 import type { AgentManager } from './manager.js';
 import type { WorkAction, WorkBinding, WorkView, WorksView } from './workflow-contracts.js';
@@ -18,15 +18,25 @@ export function parseWorkAction(input: unknown): WorkAction {
     case 'deliver': return { ...base, kind: r.kind, evidence: text(r.evidence, 4000), nextStep: text(r.nextStep, 2000) };
     case 'accept': return { ...base, kind: r.kind, evidence: text(r.evidence, 4000) };
     case 'block': return { ...base, kind: r.kind, reason: text(r.reason, 2000), nextStep: text(r.nextStep, 2000) };
+    case 'bind_session': {
+      if (!['manager', 'worker', 'reviewer'].includes(String(r.role))) throw new ManagerError('INVALID_ROLE', '不支援的 session 角色。');
+      const reviewedSha = r.reviewedSha == null ? null : text(r.reviewedSha, 40);
+      if ((reviewedSha !== null && !/^[a-f0-9]{40}$/.test(reviewedSha)) || (r.role === 'reviewer' && reviewedSha === null)) throw new ManagerError('INVALID_SHA', '審查 session 需要完整 SHA。');
+      const nextExpectedAt = r.nextExpectedAt == null ? null : text(r.nextExpectedAt, 40);
+      if (nextExpectedAt !== null && !Number.isFinite(Date.parse(nextExpectedAt))) throw new ManagerError('INVALID_DEADLINE', '預期回報時間無效。');
+      return { ...base, kind: r.kind, agentId: slug(r.agentId), role: r.role as 'manager' | 'worker' | 'reviewer', parentAgentId: r.parentAgentId == null ? null : slug(r.parentAgentId), reviewedSha, expectedEvent: text(r.expectedEvent, 500), nextExpectedAt };
+    }
+    case 'unbind_session': return { ...base, kind: r.kind, bindingId: uuid(r.bindingId) };
+    case 'handoff_owner': return { ...base, kind: r.kind, ownerAgentId: slug(r.ownerAgentId), evidence: text(r.evidence, 4000) };
     default: throw new ManagerError('INVALID_ACTION', '不支援的工作操作。');
   }
 }
 function empty(binding: WorkBinding): WorkView {
   return { id: binding.id, projectId: binding.projectId, taskId: binding.taskId, title: `Edda #${binding.taskId}`, taskStatus: 'unknown', taskReceipt: null,
     ownerAgentId: binding.ownerAgentId, assigneeAgentId: null, nextStep: '設定下一步並開始追蹤。', stage: 'uninitialized', revision: '', evidence: null,
-    waitingReason: null, pendingInstruction: null, deliveryOperationId: null, deliveryStatus: null, updatedAt: null, error: null, history: [], lastActionId: null, confirmedActionId: null };
+    waitingReason: null, pendingInstruction: null, deliveryOperationId: null, deliveryStatus: null, updatedAt: null, error: null, history: [], lastActionId: null, confirmedActionId: null, sessions: [] };
 }
-function apply(view: WorkView, action: WorkAction, at: string): void {
+function apply(view: WorkView, action: WorkAction, at: string, target: AgentBinding | null): void {
   switch (action.kind) {
     case 'initialize': view.stage = 'ready'; view.nextStep = action.nextStep; break;
     case 'assign':
@@ -41,6 +51,11 @@ function apply(view: WorkView, action: WorkAction, at: string): void {
     case 'deliver': view.stage = 'delivered'; view.evidence = action.evidence; view.nextStep = action.nextStep; view.waitingReason = null; break;
     case 'accept': view.stage = 'accepted'; view.evidence = `${view.evidence}\n驗收：${action.evidence}`; view.nextStep = '本次交接已驗收；Edda 任務狀態依原有流程更新。'; break;
     case 'block': view.stage = 'blocked'; view.waitingReason = action.reason; view.nextStep = action.nextStep; break;
+    case 'bind_session':
+      if (!target) throw new ManagerError('LEDGER_INVALID', 'Session 綁定缺少原始身分。', 409);
+      view.sessions.push({ id: action.actionId, agentId: target.id, sessionId: target.sessionId, selectionRevision: selectionRevision(target), transport: target.transport ?? 'pi', role: action.role, parentAgentId: action.parentAgentId, reviewedSha: action.reviewedSha, expectedEvent: action.expectedEvent, nextExpectedAt: action.nextExpectedAt, boundAt: at, unboundAt: null }); break;
+    case 'unbind_session': view.sessions = view.sessions.map(s => s.id === action.bindingId ? { ...s, unboundAt: at } : s); break;
+    case 'handoff_owner': view.ownerAgentId = action.ownerAgentId; break;
   }
   view.updatedAt = at; view.lastActionId = action.actionId;
 }
@@ -97,10 +112,12 @@ export class WorkManager {
         const action = parseWorkAction(raw.action), fingerprint = hash(JSON.stringify(action));
         if (raw.fingerprint !== fingerprint || (raw.previous !== null && typeof raw.previous !== 'string')) throw new Error('chain');
         let target: AgentBinding | null = null;
-        if ('send' in action) {
+        if ('send' in action || action.kind === 'bind_session' || action.kind === 'handoff_owner') {
           const targetInput = object(raw.target);
           target = parseConfig({ version: 1, projects: [{ id: binding.projectId, name: 'Work project' }], agents: [targetInput] }).agents[0]!;
           if (target.projectId !== binding.projectId || ('agentId' in action && target.id !== action.agentId)) throw new Error('target');
+          if (action.kind === 'handoff_owner' && (target.id !== action.ownerAgentId || target.role !== 'manager')) throw new Error('owner');
+          if (action.kind === 'bind_session' && action.role === 'manager' && target.role !== 'manager') throw new Error('manager role');
         } else if (raw.target !== null) throw new Error('unexpected target');
         const priorFailedOperation = raw.priorFailedOperation == null ? null : uuid(raw.priorFailedOperation);
         if (priorFailedOperation && action.kind !== 'assign') throw new Error('unexpected failure');
@@ -125,9 +142,9 @@ export class WorkManager {
       if (event.action.kind === 'intervene' && event.target?.id !== view.assigneeAgentId) throw new ManagerError('LEDGER_INVALID', '指示的執行者與工作不一致。', 409);
       try { this.validate(view, event.action); }
       catch { throw new ManagerError('LEDGER_INVALID', '交接紀錄含不合法的狀態轉換；已停止套用。', 409); }
-      apply(view, event.action, event.at);
+      apply(view, event.action, event.at, event.target);
       view.history.push({ id: event.action.actionId, kind: event.action.kind, at: event.at,
-        summary: event.action.kind === 'intervene' ? event.action.send.message : 'nextStep' in event.action ? event.action.nextStep : event.action.evidence });
+        summary: event.action.kind === 'intervene' ? event.action.send.message : 'nextStep' in event.action ? event.action.nextStep : 'evidence' in event.action ? event.action.evidence : event.action.kind === 'bind_session' ? event.action.expectedEvent : '解除 session 綁定' });
     }
     view.revision = hash(JSON.stringify([binding, task.key, task.updatedAt, previous]));
     if (view.deliveryOperationId) {
@@ -176,6 +193,15 @@ export class WorkManager {
     if (current.view.revision !== action.revision) throw new ManagerError('STALE_WORK', '工作已被更新，請查看最新狀態後再操作。', 409);
     this.validate(current.view, action);
     let target: AgentBinding | null = null;
+    if (action.kind === 'bind_session' || action.kind === 'handoff_owner') {
+      target = this.manager.binding(action.kind === 'bind_session' ? action.agentId : action.ownerAgentId);
+      if (target.projectId !== binding.projectId) throw new ManagerError('WRONG_PROJECT', 'Session 必須屬於同一專案。', 409);
+      if ((action.kind === 'handoff_owner' || action.role === 'manager') && target.role !== 'manager') throw new ManagerError('INVALID_OWNER', '負責人必須是已選取的專案管理者。', 409);
+      if (action.kind === 'bind_session' && action.parentAgentId) {
+        const parent = this.manager.binding(action.parentAgentId);
+        if (parent.projectId !== binding.projectId || parent.id === target.id) throw new ManagerError('INVALID_PARENT', '上層代理必須是同專案的其他代理。', 409);
+      }
+    }
     if (action.kind === 'assign' || action.kind === 'intervene') {
       const agentId = action.kind === 'assign' ? action.agentId : current.view.assigneeAgentId!;
       target = this.manager.binding(agentId);
@@ -209,6 +235,12 @@ export class WorkManager {
     const fail = (message: string): never => { throw new ManagerError('INVALID_TRANSITION', message, 409); };
     if (action.kind === 'initialize') { if (view.stage !== 'uninitialized') fail('工作已開始追蹤。'); return; }
     if (view.stage === 'uninitialized') fail('請先設定此工作的下一步。');
+    if (action.kind === 'bind_session') {
+      if (view.sessions.filter(s => !s.unboundAt).length >= 32 || view.sessions.length >= 128) fail('Session 綁定數量已達上限。');
+      if (view.sessions.some(s => !s.unboundAt && s.agentId === action.agentId)) fail('請先解除此代理的舊 session 綁定。');
+    } else if (action.kind === 'unbind_session') {
+      if (!view.sessions.some(s => s.id === action.bindingId && !s.unboundAt)) fail('此 session 綁定不存在或已解除。');
+    }
     if (action.kind === 'assign') {
       if (view.pendingInstruction && !view.pendingInstruction.acknowledgedAt) fail('先記錄目前指示的接手證據，再轉交工作。');
       if (view.deliveryOperationId && !['delivered', 'accepted'].includes(view.stage) && view.deliveryStatus !== 'failed') fail('上一份交辦尚未交付，請先確認結果，避免重複派工。');

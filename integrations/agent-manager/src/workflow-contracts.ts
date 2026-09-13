@@ -4,6 +4,11 @@ export interface WorkBinding { id: string; projectId: string; taskId: number; wo
 export type WorkStage = 'uninitialized' | 'ready' | 'assigned' | 'executing' | 'awaiting_delivery' | 'delivered' | 'accepted' | 'blocked';
 export interface WorkInstruction { id: string; message: string; operationId: string; acknowledgedAt: string | null; evidence: string | null }
 export interface WorkHistory { id: string; kind: string; at: string; summary: string }
+export interface WorkSessionBinding {
+  id: string; agentId: string; sessionId: string; selectionRevision: string; transport: 'pi' | 'codex';
+  role: 'manager' | 'worker' | 'reviewer'; parentAgentId: string | null; reviewedSha: string | null;
+  expectedEvent: string; nextExpectedAt: string | null; boundAt: string; unboundAt: string | null;
+}
 export interface WorkView {
   id: string; projectId: string; taskId: number; title: string; taskStatus: string; taskReceipt: string | null;
   ownerAgentId: string; assigneeAgentId: string | null; nextStep: string; stage: WorkStage; revision: string;
@@ -11,6 +16,7 @@ export interface WorkView {
   deliveryOperationId: string | null; deliveryStatus: OperationStatus | null;
   updatedAt: string | null; error: string | null; history: WorkHistory[];
   lastActionId: string | null; confirmedActionId: string | null;
+  sessions: WorkSessionBinding[];
 }
 export interface WorksView { works: WorkView[]; generatedAt: string }
 type ActionBase = { actionId: string; revision: string };
@@ -22,4 +28,7 @@ export type WorkAction = ActionBase & (
   | { kind: 'deliver'; evidence: string; nextStep: string }
   | { kind: 'accept'; evidence: string }
   | { kind: 'block'; reason: string; nextStep: string }
+  | { kind: 'bind_session'; agentId: string; role: 'manager' | 'worker' | 'reviewer'; parentAgentId: string | null; reviewedSha: string | null; expectedEvent: string; nextExpectedAt: string | null }
+  | { kind: 'unbind_session'; bindingId: string }
+  | { kind: 'handoff_owner'; ownerAgentId: string; evidence: string }
 );
