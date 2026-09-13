@@ -1,0 +1,236 @@
+import { randomUUID } from 'node:crypto';
+import { ManagerError, type AgentBinding } from './contracts.js';
+import { hash, object, parseConfig, parseSend, slug, text, uuid } from './config.js';
+import { EddaWorkflowLedger, WorkflowLocks, type CanonicalTask, type WorkflowLedger } from './edda-workflow.js';
+import type { AgentManager } from './manager.js';
+import type { WorkAction, WorkBinding, WorkView, WorksView } from './workflow-contracts.js';
+
+const PREFIX = 'edda.manager-work.v1 ';
+interface WorkEvent { version: 1; taskKey: string; previous: string | null; action: WorkAction; fingerprint: string; target: AgentBinding | null; transportStoreId: string; priorFailedOperation: string | null }
+interface ReadWork { task: CanonicalTask; events: Array<WorkEvent & { id: string; at: string }>; view: WorkView }
+export function parseWorkAction(input: unknown): WorkAction {
+  const r = object(input), base = { actionId: uuid(r.actionId), revision: text(r.revision, 64) };
+  switch (r.kind) {
+    case 'initialize': return { ...base, kind: r.kind, nextStep: text(r.nextStep, 2000) };
+    case 'assign': return { ...base, kind: r.kind, agentId: slug(r.agentId), nextStep: text(r.nextStep, 2000), send: parseSend(r.send) };
+    case 'intervene': return { ...base, kind: r.kind, send: parseSend(r.send) };
+    case 'acknowledge': return { ...base, kind: r.kind, instructionId: uuid(r.instructionId), evidence: text(r.evidence, 4000) };
+    case 'deliver': return { ...base, kind: r.kind, evidence: text(r.evidence, 4000), nextStep: text(r.nextStep, 2000) };
+    case 'accept': return { ...base, kind: r.kind, evidence: text(r.evidence, 4000) };
+    case 'block': return { ...base, kind: r.kind, reason: text(r.reason, 2000), nextStep: text(r.nextStep, 2000) };
+    default: throw new ManagerError('INVALID_ACTION', '不支援的工作操作。');
+  }
+}
+function empty(binding: WorkBinding): WorkView {
+  return { id: binding.id, projectId: binding.projectId, taskId: binding.taskId, title: `Edda #${binding.taskId}`, taskStatus: 'unknown', taskReceipt: null,
+    ownerAgentId: binding.ownerAgentId, assigneeAgentId: null, nextStep: '設定下一步並開始追蹤。', stage: 'uninitialized', revision: '', evidence: null,
+    waitingReason: null, pendingInstruction: null, deliveryOperationId: null, deliveryStatus: null, updatedAt: null, error: null, history: [], lastActionId: null, confirmedActionId: null };
+}
+function apply(view: WorkView, action: WorkAction, at: string): void {
+  switch (action.kind) {
+    case 'initialize': view.stage = 'ready'; view.nextStep = action.nextStep; break;
+    case 'assign':
+      view.stage = 'assigned'; view.assigneeAgentId = action.agentId; view.nextStep = action.nextStep;
+      view.deliveryOperationId = action.send.operationId; view.deliveryStatus = 'unknown'; view.evidence = null; view.waitingReason = null; view.pendingInstruction = null; break;
+    case 'intervene':
+      view.pendingInstruction = { id: action.actionId, operationId: action.send.operationId, message: action.send.message, acknowledgedAt: null, evidence: null };
+      view.deliveryOperationId = action.send.operationId; view.deliveryStatus = 'unknown';
+      view.evidence = null; view.stage = 'assigned'; view.waitingReason = null; view.nextStep = '確認方向變更，依新指示交付並回報。'; break;
+    case 'acknowledge':
+      if (view.pendingInstruction) view.pendingInstruction = { ...view.pendingInstruction, acknowledgedAt: at, evidence: action.evidence }; break;
+    case 'deliver': view.stage = 'delivered'; view.evidence = action.evidence; view.nextStep = action.nextStep; view.waitingReason = null; break;
+    case 'accept': view.stage = 'accepted'; view.evidence = `${view.evidence}\n驗收：${action.evidence}`; view.nextStep = '本次交接已驗收；Edda 任務狀態依原有流程更新。'; break;
+    case 'block': view.stage = 'blocked'; view.waitingReason = action.reason; view.nextStep = action.nextStep; break;
+  }
+  view.updatedAt = at; view.lastActionId = action.actionId;
+}
+export class WorkManager {
+  private transportStoreId: string;
+  private cache = new Map<string, { at: number; view: WorkView }>();
+  private reads = new Map<string, Promise<ReadWork>>();
+  private queue = new Map<string, Promise<unknown>>();
+  private refreshing: Promise<void> | null = null;
+  private closing = false;
+  constructor(private manager: AgentManager, private ledger: WorkflowLedger = new EddaWorkflowLedger(), private locks = new WorkflowLocks()) {
+    this.transportStoreId = manager.store.ensureSetting('workflow-transport-id', randomUUID());
+  }
+  private binding(id: string): WorkBinding {
+    const binding = this.manager.config.works?.find((w) => w.id === id);
+    if (!binding) throw new ManagerError('NOT_FOUND', '此工作未加入管理清單。', 404);
+    return binding;
+  }
+  async list(): Promise<WorksView> {
+    const bindings = this.manager.config.works ?? [];
+    if (!this.refreshing && !this.closing) {
+      let index = 0;
+      const worker = async () => { while (index < bindings.length && !this.closing) {
+        const binding = bindings[index++]!;
+        const cached = this.cache.get(binding.id);
+        if (cached && Date.now() - cached.at < 10000) continue;
+        try { await this.read(binding); }
+        catch (error) {
+          const view = { ...(cached?.view ?? empty(binding)), error: error instanceof ManagerError ? error.message : '此工作的 Edda 紀錄暫時無法讀取。' };
+          this.cache.set(binding.id, { at: Date.now(), view });
+        }
+      } };
+      this.refreshing = Promise.all([worker(), worker()]).then(() => {}).finally(() => { this.refreshing = null; });
+    }
+    // Slow/offline projects cannot hold an HTTP response for a whole fleet.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([this.refreshing, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1500); })]);
+    clearTimeout(timer);
+    return { works: bindings.map((b) => this.cache.get(b.id)?.view ?? { ...empty(b), error: '正在取得此工作的 Edda 紀錄。' }), generatedAt: new Date().toISOString() };
+  }
+  async stop(): Promise<void> { this.closing = true; await Promise.allSettled([...this.queue.values(), ...this.reads.values(), ...(this.refreshing ? [this.refreshing] : [])]); }
+  private async read(binding: WorkBinding): Promise<ReadWork> {
+    const pending = this.reads.get(binding.id); if (pending) return pending;
+    const promise = this.doRead(binding).finally(() => this.reads.delete(binding.id)); this.reads.set(binding.id, promise); return promise;
+  }
+  private async doRead(binding: WorkBinding): Promise<ReadWork> {
+    const [task, notes] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding)]);
+    const events: ReadWork['events'] = [];
+    for (const note of notes) {
+      if (!note.text.startsWith(PREFIX)) continue;
+      try {
+        const raw = object(JSON.parse(note.text.slice(PREFIX.length)) as unknown);
+        if (raw.version !== 1 || raw.taskKey !== task.key) throw new Error('task/schema');
+        const action = parseWorkAction(raw.action), fingerprint = hash(JSON.stringify(action));
+        if (raw.fingerprint !== fingerprint || (raw.previous !== null && typeof raw.previous !== 'string')) throw new Error('chain');
+        let target: AgentBinding | null = null;
+        if ('send' in action) {
+          const targetInput = object(raw.target);
+          target = parseConfig({ version: 1, projects: [{ id: binding.projectId, name: 'Work project' }], agents: [targetInput] }).agents[0]!;
+          if (target.projectId !== binding.projectId || ('agentId' in action && target.id !== action.agentId)) throw new Error('target');
+        } else if (raw.target !== null) throw new Error('unexpected target');
+        const priorFailedOperation = raw.priorFailedOperation == null ? null : uuid(raw.priorFailedOperation);
+        if (priorFailedOperation && action.kind !== 'assign') throw new Error('unexpected failure');
+        events.push({ version: 1, taskKey: task.key, previous: raw.previous as string | null, action, fingerprint, target,
+          transportStoreId: uuid(raw.transportStoreId), priorFailedOperation, id: note.id, at: note.at });
+      } catch { throw new ManagerError('LEDGER_INVALID', '工作交接紀錄格式不一致，已停止套用，請檢查原始 Edda 紀錄。', 409); }
+    }
+    const ordered: ReadWork['events'] = []; let previous: string | null = null;
+    while (ordered.length < events.length) {
+      const next = events.filter((e) => e.previous === previous);
+      if (next.length !== 1 || ordered.some((e) => e.id === next[0]?.id)) throw new ManagerError('LEDGER_FORK', '此工作出現衝突或不完整的交接分支，需要代管者裁定；未自行選取其中一份。', 409);
+      ordered.push(next[0]!); previous = next[0]!.id;
+    }
+    if (new Set(ordered.map((e) => e.action.actionId)).size !== ordered.length) throw new ManagerError('LEDGER_FORK', '工作操作編號重複，需要檢查交接紀錄。', 409);
+    const view = empty(binding);
+    view.title = task.title; view.taskStatus = task.status; view.taskReceipt = task.receipt;
+    for (const event of ordered) {
+      if (event.priorFailedOperation) {
+        if (event.priorFailedOperation !== view.deliveryOperationId) throw new ManagerError('LEDGER_INVALID', '交接失敗證據與前次訊息不一致。', 409);
+        view.deliveryStatus = 'failed';
+      }
+      if (event.action.kind === 'intervene' && event.target?.id !== view.assigneeAgentId) throw new ManagerError('LEDGER_INVALID', '指示的執行者與工作不一致。', 409);
+      try { this.validate(view, event.action); }
+      catch { throw new ManagerError('LEDGER_INVALID', '交接紀錄含不合法的狀態轉換；已停止套用。', 409); }
+      apply(view, event.action, event.at);
+      view.history.push({ id: event.action.actionId, kind: event.action.kind, at: event.at,
+        summary: event.action.kind === 'intervene' ? event.action.send.message : 'nextStep' in event.action ? event.action.nextStep : event.action.evidence });
+    }
+    view.revision = hash(JSON.stringify([binding, task.key, task.updatedAt, previous]));
+    if (view.deliveryOperationId) {
+      const event = ordered.findLast((e) => 'send' in e.action && e.action.send.operationId === view.deliveryOperationId);
+      const op = event ? this.associatedOperation(event) : null;
+      view.deliveryStatus = op?.status ?? 'unknown';
+      if (view.stage === 'assigned') {
+        if (op?.status === 'started') view.stage = 'executing';
+        else if (op?.status === 'settled') view.stage = 'awaiting_delivery';
+        else if (op?.status === 'failed') view.waitingReason = op.notice;
+      }
+    }
+    this.cache.set(binding.id, { at: Date.now(), view }); return { task, events: ordered, view };
+  }
+  async act(id: string, input: WorkAction): Promise<WorkView> {
+    if (this.closing) throw new ManagerError('STOPPING', '管理服務正在關閉，請稍後查詢原操作。', 503);
+    const action = parseWorkAction(input), binding = this.binding(id);
+    const prior = this.queue.get(id) ?? Promise.resolve();
+    const promise = prior.catch(() => {}).then(async () => {
+      const task = await this.ledger.task(binding);
+      return this.locks.run(task.key, () => 'send' in action ? this.locks.run(`operation:${action.send.operationId}`, () => this.perform(binding, action)) : this.perform(binding, action));
+    });
+    this.queue.set(id, promise);
+    try { return await promise; } finally { if (this.queue.get(id) === promise) this.queue.delete(id); }
+  }
+  private async perform(binding: WorkBinding, action: WorkAction): Promise<WorkView> {
+    // Await and discard any pre-lock read before obtaining the mutation snapshot.
+    await this.reads.get(binding.id)?.catch(() => {});
+    const current = await this.doRead(binding), fingerprint = hash(JSON.stringify(action));
+    const duplicate = current.events.find((e) => e.action.actionId === action.actionId);
+    if (duplicate) {
+      if (duplicate.fingerprint !== fingerprint) throw new ManagerError('ACTION_CONFLICT', '這個交接編號已有不同內容。', 409);
+      if ('send' in action && current.events.at(-1)?.id === duplicate.id) {
+        const existing = this.associatedOperation(duplicate);
+        if (existing) await this.manager.operation(existing.id).catch(() => {});
+        else if (duplicate.transportStoreId === this.transportStoreId && duplicate.target) {
+          const selected = this.manager.binding(duplicate.target.id);
+          if (JSON.stringify(selected) !== JSON.stringify(duplicate.target)) throw new ManagerError('RECOVERY_TARGET_CHANGED', '原交辦的代理綁定已變更，保留原指示，未傳送給新代理。', 409);
+          // Explicit same-ID recovery only: this very store has no pre-effect
+          // intent, so send() could not have reached the adapter before crash.
+          await this.manager.send(selected.id, action.send);
+        }
+      }
+      return { ...(await this.doRead(binding)).view, confirmedActionId: action.actionId };
+    }
+    if (current.view.revision !== action.revision) throw new ManagerError('STALE_WORK', '工作已被更新，請查看最新狀態後再操作。', 409);
+    this.validate(current.view, action);
+    let target: AgentBinding | null = null;
+    if (action.kind === 'assign' || action.kind === 'intervene') {
+      const agentId = action.kind === 'assign' ? action.agentId : current.view.assigneeAgentId!;
+      target = this.manager.binding(agentId);
+      if (target.projectId !== binding.projectId) throw new ManagerError('WRONG_PROJECT', '只能交辦給同專案已選取的代理。', 409);
+      if (this.manager.store.operation(action.send.operationId) || current.events.some((e) => 'send' in e.action && e.action.send.operationId === action.send.operationId)) throw new ManagerError('OPERATION_CONFLICT', '這則訊息編號已被其他交辦使用。', 409);
+      await this.manager.validateSend(agentId, action.send);
+    }
+    const event: WorkEvent = { version: 1, taskKey: current.task.key, previous: current.events.at(-1)?.id ?? null, action, fingerprint, target, transportStoreId: this.transportStoreId,
+      priorFailedOperation: action.kind === 'assign' && current.view.deliveryStatus === 'failed' ? current.view.deliveryOperationId : null };
+    const encoded = PREFIX + JSON.stringify(event);
+    // Keep the Windows execFile quoted command line bounded even after quote /
+    // backslash expansion. This also bounds each event on every platform.
+    if (encoded.length > 12000) throw new ManagerError('WORK_EVENT_TOO_LARGE', '交接內容與目標資料合計過長，請縮短訊息或證據。', 413);
+    await this.ledger.append(binding, encoded);
+    // Re-read the ledger before the effect: detect an external writer that
+    // ignored the mutex. An uncertain append/send is never retried automatically.
+    const written = await this.doRead(binding);
+    if (written.events.at(-1)?.action.actionId !== action.actionId) throw new ManagerError('LEDGER_CONFLICT', '交接紀錄已被其他管理者更新，尚未傳送訊息。', 409);
+    if (target && (action.kind === 'assign' || action.kind === 'intervene')) {
+      try { await this.manager.send(target.id, action.send); }
+      catch (error) {
+        // Durable ledger intent remains authoritative even if preflight changes
+        // between recording and send. Absence of transport evidence is unknown.
+        const view = (await this.doRead(binding)).view;
+        return { ...view, error: error instanceof ManagerError ? error.message : '傳送結果尚待確認；請查詢原交接編號。', confirmedActionId: action.actionId };
+      }
+    }
+    return { ...(await this.doRead(binding)).view, confirmedActionId: action.actionId };
+  }
+  private validate(view: WorkView, action: WorkAction): void {
+    const fail = (message: string): never => { throw new ManagerError('INVALID_TRANSITION', message, 409); };
+    if (action.kind === 'initialize') { if (view.stage !== 'uninitialized') fail('工作已開始追蹤。'); return; }
+    if (view.stage === 'uninitialized') fail('請先設定此工作的下一步。');
+    if (action.kind === 'assign') {
+      if (view.pendingInstruction && !view.pendingInstruction.acknowledgedAt) fail('先記錄目前指示的接手證據，再轉交工作。');
+      if (view.deliveryOperationId && !['delivered', 'accepted'].includes(view.stage) && view.deliveryStatus !== 'failed') fail('上一份交辦尚未交付，請先確認結果，避免重複派工。');
+    } else if (action.kind === 'intervene') {
+      if (!view.assigneeAgentId) fail('先指定執行者才能介入。');
+      if (view.pendingInstruction && !view.pendingInstruction.acknowledgedAt) fail('上一則指示尚未確認接手，請先追蹤原指示。');
+    } else if (action.kind === 'acknowledge') {
+      if (!view.pendingInstruction || view.pendingInstruction.id !== action.instructionId || view.pendingInstruction.acknowledgedAt) fail('此指示不存在或已確認接手。');
+    } else if (action.kind === 'deliver') {
+      if (!view.assigneeAgentId || view.stage === 'accepted') fail('此工作目前沒有可記錄的交付。');
+      if (view.pendingInstruction && !view.pendingInstruction.acknowledgedAt) fail('指示變更尚未確認接手，請先記錄證據。');
+    } else if (action.kind === 'accept') {
+      if (view.stage !== 'delivered' || !view.evidence) fail('必須先記錄交付證據，才能記錄驗收。');
+      if (view.pendingInstruction && !view.pendingInstruction.acknowledgedAt) fail('仍有尚未確認的指示。');
+    }
+  }
+  private associatedOperation(event: WorkEvent) {
+    if (!event.target || !('send' in event.action) || event.transportStoreId !== this.transportStoreId) return null;
+    try {
+      const operation = this.manager.store.existing(event.target.id, event.action.send);
+      if (operation && JSON.stringify(this.manager.store.target(operation.id)) !== JSON.stringify(event.target)) throw new Error('target mismatch');
+      return operation;
+    } catch { throw new ManagerError('OPERATION_CONFLICT', '交辦與訊息回執的身分不一致，未套用其他工作的進度。', 409); }
+  }
+}

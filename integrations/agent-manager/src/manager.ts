@@ -3,6 +3,8 @@ import { ManagerError, type AgentBinding, type AgentView, type ConversationView,
 import { hash, selectionRevision } from './config.js';
 import { unavailable } from './pi-adapter.js';
 import { ManagerStore } from './store.js';
+import { WorkManager } from './workflow.js';
+import type { WorkflowLedger, WorkflowLocks } from './edda-workflow.js';
 
 const notices: Record<OperationStatus, string> = {
   prepared: '操作已記錄，傳送結果尚未確認。', unconfirmed: '通道已收件，尚未確認代理開始處理。',
@@ -21,13 +23,15 @@ function summary(binding: AgentBinding): Pick<AgentView, 'summary' | 'summaryUpd
   } catch { return { summary: null, summaryUpdatedAt: null, summaryError: '目前沒有可讀取的主管摘要。' }; }
 }
 export class AgentManager {
+  readonly works: WorkManager;
   readonly startedAt = new Date().toISOString();
   private views = new Map<string, AgentView>();
   private refreshing: Promise<void> | null = null;
   private checking = new Map<string, Promise<OperationView>>();
   private timer: ReturnType<typeof setInterval> | undefined;
-  constructor(readonly config: ManagerConfig, readonly store: ManagerStore, private adapter: PiAdapter) {
+  constructor(readonly config: ManagerConfig, readonly store: ManagerStore, private adapter: PiAdapter, workflow?: { ledger?: WorkflowLedger; locks?: WorkflowLocks }) {
     store.putSetting('config', JSON.stringify(config));
+    this.works = new WorkManager(this, workflow?.ledger, workflow?.locks);
   }
   binding(id: string): AgentBinding {
     const binding = this.config.agents.find((a) => a.id === id);
@@ -65,7 +69,7 @@ export class AgentManager {
       .map((op) => this.reconcile(op).catch(() => op)));
   }
   async start(): Promise<void> { await this.refresh(); this.timer = setInterval(() => { void this.refresh().catch(() => {}); }, this.config.refreshMs); }
-  async stop(): Promise<void> { clearInterval(this.timer); if (this.refreshing) await this.refreshing; await Promise.allSettled(this.checking.values()); }
+  async stop(): Promise<void> { clearInterval(this.timer); await this.works.stop(); if (this.refreshing) await this.refreshing; await Promise.allSettled(this.checking.values()); }
   async conversation(id: string, after?: string): Promise<ConversationView> {
     const binding = this.binding(id), result = await this.adapter.conversation(binding, after);
     return { ...result, agentId: id, selectionRevision: selectionRevision(binding) };
@@ -74,12 +78,7 @@ export class AgentManager {
     const binding = this.binding(id);
     const existing = this.store.existing(id, request);
     if (existing) return existing; // Never replay a duplicate, including an uncertain intent.
-    this.adapter.validateMessage?.(request);
-    if (request.selectionRevision !== selectionRevision(binding)) throw new ManagerError('STALE_SELECTION', '代理綁定已變更，請更新畫面後再傳送。', 409);
-    const state = await this.adapter.observe(binding);
-    if (state.source !== 'live' || !state.capabilities.send) throw new ManagerError('UNAVAILABLE', '代理目前無法接收訊息，尚未傳送。', 503);
-    if (state.instanceId !== request.instanceId) throw new ManagerError('INSTANCE_CHANGED', '代理已更換執行實例，請先更新畫面。', 409);
-    if (state.state === 'waiting_user') throw new ManagerError('WAITING_USER', '請先處理代理原介面上的結構化選項，這次尚未傳送。', 409);
+    await this.validateSend(id, request);
     const concurrent = this.store.existing(id, request);
     if (concurrent) return concurrent;
     const operation = this.store.begin(binding, request);
@@ -91,6 +90,15 @@ export class AgentManager {
       const definite = error instanceof ManagerError && ['UNAVAILABLE', 'INSTANCE_CHANGED', 'WAITING_USER'].includes(error.code);
       return this.store.update(operation.id, definite ? 'failed' : 'unknown', definite ? error.message : notices.unknown);
     }
+  }
+  async validateSend(id: string, request: SendRequest): Promise<void> {
+    const binding = this.binding(id);
+    this.adapter.validateMessage?.(request);
+    if (request.selectionRevision !== selectionRevision(binding)) throw new ManagerError('STALE_SELECTION', '代理綁定已變更，請更新畫面後再傳送。', 409);
+    const state = await this.adapter.observe(binding);
+    if (state.source !== 'live' || !state.capabilities.send) throw new ManagerError('UNAVAILABLE', '代理目前無法接收訊息，尚未傳送。', 503);
+    if (state.instanceId !== request.instanceId) throw new ManagerError('INSTANCE_CHANGED', '代理已更換執行實例，請先更新畫面。', 409);
+    if (state.state === 'waiting_user') throw new ManagerError('WAITING_USER', '請先處理代理原介面上的結構化選項，這次尚未傳送。', 409);
   }
   async operation(id: string): Promise<OperationView> {
     const operation = this.store.operation(id);

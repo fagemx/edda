@@ -60,9 +60,16 @@ export function parseConfig(input: unknown): ManagerConfig {
   });
   unique(projects.map((p) => p.id)); unique(agents.map((a) => a.id));
   unique(agents.map((a) => `${a.registryRoot}\0${a.sessionId}`));
+  const works = array(c.works ?? [], 32).map((value) => {
+    const w = object(value), projectId = slug(w.projectId), ownerAgentId = slug(w.ownerAgentId);
+    if (!Number.isSafeInteger(w.taskId) || Number(w.taskId) < 1) throw new ManagerError('INVALID_CONFIG', '工作必須連結有效的 Edda 任務編號。');
+    if (!agents.some((a) => a.id === ownerAgentId && a.projectId === projectId)) throw new ManagerError('INVALID_CONFIG', '工作負責人必須是同專案已選取的代理。');
+    return { id: slug(w.id), projectId, taskId: Number(w.taskId), workspace: path(w.workspace), ownerAgentId };
+  });
+  unique(works.map((w) => w.id)); unique(works.map((w) => `${w.workspace}\0${w.taskId}`));
   const refreshMs = c.refreshMs ?? 3000;
   if (!Number.isSafeInteger(refreshMs) || Number(refreshMs) < 1000 || Number(refreshMs) > 60000) throw new ManagerError('INVALID_CONFIG', '更新間隔必須是 1 到 60 秒。');
-  return { version: 1, projects: projects.sort((a, b) => a.priority - b.priority), agents, refreshMs: Number(refreshMs) };
+  return { version: 1, projects: projects.sort((a, b) => a.priority - b.priority), agents, refreshMs: Number(refreshMs), ...(works.length ? { works } : {}) };
 }
 export function loadConfig(file: string): ManagerConfig {
   const stat = lstatSync(file);
