@@ -10,8 +10,10 @@ import { writeJson } from './store.mjs';
 // zeros. This is a model, not a power loss: it pins the durability barrier.
 function crashModel() {
   const durable = new Map(), pending = new Map();
+  const dirsFlushed = [];
   return {
     durable,
+    dirsFlushed,
     open(path) { pending.set(path, ''); durable.set(path, ''); return { path }; },
     write(fd, text) { pending.set(fd.path, text); durable.set(fd.path, '\0'.repeat(text.length)); },
     flush(fd) { durable.set(fd.path, pending.get(fd.path) ?? ''); },
@@ -21,7 +23,7 @@ function crashModel() {
       durable.delete(from); pending.delete(from);
     },
     unlink(path) { durable.delete(path); pending.delete(path); },
-    flushDir() {},
+    flushDir(dir) { dirsFlushed.push(dir); },
   };
 }
 
@@ -32,6 +34,7 @@ test('writeJson flushes the tmp before rename: a crash leaves the complete recor
   assert.ok(text && text.length > 0, 'the record was renamed into place');
   assert.ok(!text.split('').every((c) => c === '\0'), 'the renamed record must not be all NUL');
   assert.deepEqual(JSON.parse(text), { runId: 'run', phase: 'running' });
+  assert.equal(io.dirsFlushed.length, 1, 'the renamed record is followed by a parent-directory flush');
 });
 
 test('the exclusive write is flushed too, so a crash cannot leave an all-NUL record', () => {
@@ -41,6 +44,7 @@ test('the exclusive write is flushed too, so a crash cannot leave an all-NUL rec
   // Unobservable without the flush: the model leaves a direct, unflushed write zero-filled.
   assert.ok(text && !text.split('').every((c) => c === '\0'), 'the exclusive record must not be all NUL');
   assert.deepEqual(JSON.parse(text), { instanceId: 'i' });
+  assert.equal(io.dirsFlushed.length, 1, 'a create also flushes its parent directory');
 });
 
 test('the legacy tmp+rename without a flush reproduces the all-NUL record', () => {

@@ -88,17 +88,14 @@ const fileIo = {
   close: (fd) => closeSync(fd),
   rename: (from, to) => renameSync(from, to),
   unlink: (path) => unlinkSync(path),
-  // The rename is durable on POSIX once the parent directory is flushed; on
-  // Windows a directory cannot be opened for this, and the file-data flush above
-  // is the barrier. A directory-flush failure is swallowed because the file data
-  // is already durable, so the worst case is that a crash keeps the previous
-  // complete record instead of the new one — never a zero-filled record.
+  // The parent-directory flush is what makes the rename itself durable on POSIX.
+  // Windows cannot open a directory for this, so there the file-data flush above
+  // is the barrier. A failure is propagated, not swallowed: an unconfirmed
+  // directory entry on a coordination path must not be reported as success.
   flushDir: (dir) => {
     if (process.platform === 'win32') return;
-    let fd;
-    try { fd = openSync(dir, 'r'); fsyncSync(fd); }
-    catch { /* best-effort: the file data is already flushed */ }
-    finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* closed */ } } }
+    const fd = openSync(dir, 'r');
+    try { fsyncSync(fd); } finally { closeSync(fd); }
   },
 };
 export function writeJson(path, data, exclusive = false, io = fileIo) {
@@ -106,6 +103,7 @@ export function writeJson(path, data, exclusive = false, io = fileIo) {
   if (exclusive) {
     const fd = io.open(path);
     try { io.write(fd, text); io.flush(fd); } finally { io.close(fd); }
+    io.flushDir(dirname(resolve(path)));
     return;
   }
   const tmp = `${path}.${randomUUID()}.tmp`;
