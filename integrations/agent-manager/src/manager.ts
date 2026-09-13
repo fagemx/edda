@@ -6,6 +6,7 @@ import { ManagerStore } from './store.js';
 import { WorkManager } from './workflow.js';
 import type { WorkflowLedger, WorkflowLocks } from './edda-workflow.js';
 import { OwnerInbox } from './owner-inbox.js';
+import { ContinuationService } from './continuation.js';
 
 const notices: Record<OperationStatus, string> = {
   prepared: '操作已記錄，傳送結果尚未確認。', unconfirmed: '通道已收件，尚未確認代理開始處理。',
@@ -26,6 +27,7 @@ function summary(binding: AgentBinding): Pick<AgentView, 'summary' | 'summaryUpd
 export class AgentManager {
   readonly works: WorkManager;
   readonly ownerInbox: OwnerInbox;
+  readonly continuation: ContinuationService;
   readonly startedAt = new Date().toISOString();
   private views = new Map<string, AgentView>();
   private refreshing: Promise<void> | null = null;
@@ -35,6 +37,7 @@ export class AgentManager {
     store.putSetting('config', JSON.stringify(config));
     this.works = new WorkManager(this, workflow?.ledger, workflow?.locks);
     this.ownerInbox = new OwnerInbox(store);
+    this.continuation = new ContinuationService(this, config.continuityExecutable ? { executable: config.continuityExecutable } : {});
   }
   binding(id: string): AgentBinding {
     const binding = this.config.agents.find((a) => a.id === id);
@@ -74,7 +77,7 @@ export class AgentManager {
   }
   async refreshOwnerInbox(): Promise<void> { this.ownerInbox.refresh(this.overview().agents, await this.works.list()); }
   async start(): Promise<void> { await this.refresh(); this.timer = setInterval(() => { void this.refresh().catch(() => {}); }, this.config.refreshMs); }
-  async stop(): Promise<void> { clearInterval(this.timer); await this.works.stop(); if (this.refreshing) await this.refreshing; await Promise.allSettled(this.checking.values()); }
+  async stop(): Promise<void> { clearInterval(this.timer); await this.continuation.stop(); await this.works.stop(); if (this.refreshing) await this.refreshing; await Promise.allSettled(this.checking.values()); }
   async conversation(id: string, after?: string): Promise<ConversationView> {
     const binding = this.binding(id), result = await this.adapter.conversation(binding, after);
     return { ...result, agentId: id, selectionRevision: selectionRevision(binding) };

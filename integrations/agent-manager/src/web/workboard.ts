@@ -1,8 +1,9 @@
 import type { AgentView, ConversationView, Overview, SendRequest } from '../contracts.js';
 import type { WorkAction, WorkStage, WorkView, WorksView } from '../workflow-contracts.js';
 import type { OwnerContext, OwnerInboxAck, OwnerInboxView, OwnerInboxEvent } from '../owner-inbox-contracts.js';
+import { ContinuationBoard } from './continuation-board.js';
 
-type Kind = WorkAction['kind'];
+type Kind = Exclude<WorkAction['kind'], 'attach_continuity'>;
 interface Draft { kind: Kind; agentId: string; message: string; nextStep: string; evidence: string; reason: string; pending: WorkAction | null; rejected?: boolean; basisRevision?: string;
   role?: 'manager' | 'worker' | 'reviewer'; reviewedSha?: string; nextExpectedAt?: string; bindingId?: string; pendingAck?: OwnerInboxAck | null }
 interface Host { api<T>(path: string, body?: unknown): Promise<T>; openAgent(id: string): void }
@@ -33,7 +34,10 @@ export class WorkBoard {
   private form = el('form', '', 'work-form');
   private feedback = el('p', '', 'notice');
   private title = el('h3', '工作交接');
+  private continuationRoot = el('section', '', 'continuation-board');
+  private continuation: ContinuationBoard;
   constructor(private root: HTMLElement, private host: Host) {
+    this.continuation = new ContinuationBoard(this.continuationRoot, host);
     try {
       const raw = localStorage.getItem(key);
       if (raw) {
@@ -47,7 +51,7 @@ export class WorkBoard {
         }
       }
     } catch { this.storageOK = false; this.feedback.textContent = '工作草稿無法讀取；原始資料已保留，請先恢復瀏覽器儲存。'; }
-    root.append(this.title, el('p', '交接由工作負責人持續追蹤；代理停止不等於工作完成。', 'muted'), this.cards, this.details, this.form, this.feedback);
+    root.append(this.title, el('p', '交接由工作負責人持續追蹤；代理停止不等於工作完成。', 'muted'), this.cards, this.details, this.form, this.feedback, this.continuationRoot);
     this.feedback.setAttribute('role', 'status');
     this.form.addEventListener('submit', event => { event.preventDefault(); void this.submit(); });
     window.addEventListener('storage', event => { if (event.key === key) { this.storageOK = false; this.feedback.textContent = '另一分頁更新了工作操作，請重新載入以讀取原始請求。'; this.renderForm(); } });
@@ -92,6 +96,7 @@ export class WorkBoard {
       button.addEventListener('click', () => { this.selected = work.id; this.signature = ''; this.render(); this.renderForm(); }); this.cards.append(button);
     }
     const work = this.current(); this.details.replaceChildren(); this.form.hidden = !work;
+    this.continuation.update(work ?? null, this.overview?.agents ?? []);
     if (!work) return;
     this.details.append(el('p', `下一步：${work.nextStep || '尚未安排；由收尾負責人處理。'}`, 'work-next'));
     const nextOwner = ['assigned', 'executing', 'awaiting_delivery'].includes(work.stage) ? work.assigneeAgentId : work.ownerAgentId;

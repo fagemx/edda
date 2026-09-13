@@ -283,3 +283,66 @@ This binds the real isolated Pi session before assignment, observes its native e
 event in the owner's inbox and acknowledges it twice with one durable result before
 independent delivery/acceptance. Synthetic Codex tests cover file and event boundaries;
 a selected actual Codex rollout was also observed read-only without exposing content.
+
+## Native necessary context and recovery
+
+The workbench now reuses native Edda continuity. Configure the optional absolute
+`continuityExecutable` path in local config when PATH has an older executable.
+A missing native capability is reported; no alternative capsule format is written.
+Keep the configured executable pinned outside mutable build output.
+
+Open **必要上下文與接手** on a selected work. Save goal/current evidence/next action,
+copy readable text for a new session, or copy the native JSON to another configured
+workspace. Native import checks repository identity and integrity. Restore displays
+native warnings, including missing commits and dirty files; warnings do not silently
+change into extra execution gates. Required artifacts still need to be accessible.
+The capsule is data only and never imports runtime authority or starts a worker.
+
+After checking the destination and old writer release, **記錄接手** reuses the existing
+owner handoff. The original task lifecycle and next execution action stay under their
+existing owner. Ordinary work assignment remains the separate work action.
+
+Saving and importing persist the original request before the native effect. After
+an interrupted response, reopening this panel reads native capsule records and
+reconciles verifiable saved state without repeating save. Known pre-write validation
+refusals allow editing a new request; ambiguous I/O remains visible with its original
+ID. **核對原生紀錄並恢復連結** accepts an exact capsule ID when bounded discovery cannot
+find it, and verifies correlation before attachment. Browser reload preserves inputs
+and pending requests. Clipboard-denied environments have a selectable JSON view.
+
+`start` now automatically reclaims a demonstrably dead, matching console owner under
+a cross-process lifecycle mutex. It preserves config, SQLite and pending operations.
+A live/reused PID or mismatched generation is refused without killing a process.
+This is recovery when start is invoked; it does not install an OS startup task or
+restart downstream agents. Existing receipt reconciliation resumes automatically.
+
+Authenticated additions:
+
+- `GET/POST /api/works/:id/continuation`: read/reconcile or save native input.
+- `POST /api/works/:id/continuation/import`: import a native bundle.
+- `GET /api/works/:id/continuation/:capsuleId`: exact native restore.
+- `POST /api/works/:id/continuation/recover`: reconcile original action and optional capsule ID.
+- `POST /api/works/:id/continuation/takeover`: record existing owner handoff.
+
+The import body limit accommodates the native 528 KiB bundle plus request metadata;
+ordinary message limits remain unchanged. Generic work actions cannot attach an
+unchecked capsule reference. Executable and workspace come only from local config.
+
+### Layer ownership after capability audit
+
+The console is a view/intervention adapter, not a replacement scheduler. Native
+controlled tasks remain owned by `edda control` (sealed manifest, lease, attempt,
+dispatch identity, receipts and adjudication). Existing Pi managed/supervised tasks
+remain owned by their managed run/supervisor. Host/manual tasks retain their actual
+host/controller. A missing session map does not authorize a new lifecycle or writer.
+
+`crates/edda-cli/src/skills/coord-orchestrate.md` is the canonical strong-planning
+skill; `coord-run.md` guides the native runtime loop. Installed `.agents` copies
+can lag behind the canonical source because initialization preserves existing files.
+Development controller/worker/verifier roles are not another product scheduler.
+
+The current workbench observes interruption/provider/deadline events and stores the
+owner inbox, but this does not prove owner wake delivery or lossless Pi event capture
+while offline. Native controlled advancement, Pi supervisor routing, automatic worker
+restart, OS boot scheduling and cross-machine synchronization are distinct downstream
+capabilities; this change does not replace or claim to implement them.

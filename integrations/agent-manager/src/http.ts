@@ -8,20 +8,21 @@ import { ManagerError, MAX_BODY_BYTES } from './contracts.js';
 import { parseSend, uuid } from './config.js';
 import { parseWorkAction } from './workflow.js';
 import { object, text, slug } from './config.js';
+import { MAX_CONTINUITY_BUNDLE_BYTES, type ContinuationPublishRequest, type ContinuationImportRequest, type ContinuationTakeoverRequest, type ContinuationRecoverRequest } from './continuation-contracts.js';
 
 function authorized(header: string | undefined, token: string): boolean {
   const expected = Buffer.from(`Bearer ${token}`), value = Buffer.from(header || '');
   return expected.length === value.length && timingSafeEqual(expected, value);
 }
-async function body(req: IncomingMessage): Promise<unknown> {
-  if (Number(req.headers['content-length'] || 0) > MAX_BODY_BYTES) throw new ManagerError('TOO_LARGE', '請縮短訊息後再傳送。', 413);
+async function body(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> {
+  if (Number(req.headers['content-length'] || 0) > limit) throw new ManagerError('TOO_LARGE', '請求超過此入口的大小上限。', 413);
   if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) throw new ManagerError('INVALID_REQUEST', '請使用 JSON 格式。', 400);
   const buffer = await new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = []; let length = 0, overflow = false;
     req.on('data', (chunk: Buffer) => {
       if (overflow) return;
       length += chunk.length;
-      if (length > MAX_BODY_BYTES) { overflow = true; chunks.length = 0; reject(new ManagerError('TOO_LARGE', '請縮短訊息後再傳送。', 413)); }
+      if (length > limit) { overflow = true; chunks.length = 0; reject(new ManagerError('TOO_LARGE', '請求超過此入口的大小上限。', 413)); }
       else chunks.push(chunk);
     });
     req.once('end', () => { if (!overflow) resolve(Buffer.concat(chunks)); });
@@ -38,6 +39,7 @@ export async function serve(manager: AgentManager, token: string, options: { por
     ['/', { file: join(root, 'src/web/index.html'), type: 'text/html; charset=utf-8' }],
     ['/app.js', { file: join(root, 'dist/src/web/app.js'), type: 'text/javascript; charset=utf-8' }],
     ['/workboard.js', { file: join(root, 'dist/src/web/workboard.js'), type: 'text/javascript; charset=utf-8' }],
+    ['/continuation-board.js', { file: join(root, 'dist/src/web/continuation-board.js'), type: 'text/javascript; charset=utf-8' }],
     ['/contracts.js', { file: join(root, 'dist/src/contracts.js'), type: 'text/javascript; charset=utf-8' }],
     ['/style.css', { file: join(root, 'src/web/style.css'), type: 'text/css; charset=utf-8' }],
   ]);
@@ -79,7 +81,21 @@ export async function serve(manager: AgentManager, token: string, options: { por
         json(200, work); return;
       }
       const work = /^\/api\/works\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/actions$/.exec(url.pathname);
-      if (req.method === 'POST' && work?.[1]) { json(200, await manager.works.act(work[1], parseWorkAction(await body(req)))); return; }
+      if (req.method === 'POST' && work?.[1]) {
+        const action = parseWorkAction(await body(req));
+        if (action.kind === 'attach_continuity') throw new ManagerError('INVALID_REQUEST', '請透過原生上下文入口連結 capsule。');
+        json(200, await manager.works.act(work[1], action)); return;
+      }
+      const continuation = /^\/api\/works\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/continuation(?:\/(import|takeover|recover|cap_[a-z0-9]+))?$/.exec(url.pathname);
+      if (continuation?.[1]) {
+        const id = continuation[1], action = continuation[2];
+        if (req.method === 'GET' && !action) { json(200, await manager.continuation.latest(id)); return; }
+        if (req.method === 'GET' && action?.startsWith('cap_')) { json(200, await manager.continuation.restore(id, action)); return; }
+        if (req.method === 'POST' && !action) { json(200, await manager.continuation.publish(id, await body(req) as ContinuationPublishRequest)); return; }
+        if (req.method === 'POST' && action === 'import') { json(200, await manager.continuation.import(id, await body(req, MAX_CONTINUITY_BUNDLE_BYTES + 4096) as ContinuationImportRequest)); return; }
+        if (req.method === 'POST' && action === 'takeover') { json(200, await manager.continuation.takeover(id, await body(req) as ContinuationTakeoverRequest)); return; }
+        if (req.method === 'POST' && action === 'recover') { json(200, await manager.continuation.recover(id, await body(req) as ContinuationRecoverRequest)); return; }
+      }
       if (req.method === 'GET' && url.pathname === '/api/service') { json(200, { version: 1, startedAt: manager.startedAt, agents: manager.config.agents.length }); return; }
       const agent = /^\/api\/agents\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\/(conversation|messages)$/.exec(url.pathname);
       if (agent?.[1] && agent[2] === 'conversation' && req.method === 'GET') {
