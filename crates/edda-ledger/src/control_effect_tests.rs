@@ -559,6 +559,18 @@ fn production_workspace_lock_selects_one_live_signed_claim() {
                 other.charter_digest = "f".repeat(64);
                 other.review_bundle_ref = format!("blob:sha256:{}", "f".repeat(64));
                 let two = ledger.seal_control_review_claim(other)?;
+                // A claim without its audit artifact is intentionally repairable.
+                // Model two complete live claims, not that recovery state. This
+                // ledger API checks artifact presence; bundle validation has its
+                // own CLI tests and is not replaced by this fixture marker.
+                let artifacts = root.join(".edda/control-local/review-bundles");
+                std::fs::create_dir_all(&artifacts)?;
+                for claim in [&one, &two] {
+                    std::fs::write(
+                        artifacts.join(format!("{}.json", claim.charter_digest)),
+                        b"published audit artifact fixture",
+                    )?;
+                }
                 let gate = root.join("claim-start-gate");
                 let one_path = root.join("claim-one.json");
                 let two_path = root.join("claim-two.json");
@@ -607,6 +619,14 @@ fn production_workspace_lock_selects_one_live_signed_claim() {
                         .count()
                         == 1,
                     "exactly one contender must be refused live: {outcomes:?}"
+                );
+                let persisted = ledger
+                    .control_review_claim_for_subject(&one.repository, one.pr_number, &one.head_sha)?
+                    .expect("winning signed claim is persisted");
+                let winner = if outcomes[0] == "won" { &one } else { &two };
+                anyhow::ensure!(
+                    &persisted == winner,
+                    "persisted subject must retain the winning signed claim"
                 );
                 ControlEffectResultV1::applied(request.intent.action_kind, "claim_recorded")
             },
