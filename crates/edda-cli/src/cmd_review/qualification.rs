@@ -129,16 +129,17 @@ fn is_authoritative(
     }
 }
 
-/// Whether a request names the official DeepSeek provider rather than a router.
-/// `canonical_model_id` strips the provider segment, so `deepseek/deepseek-flash`
-/// and `openrouter/deepseek/deepseek-flash` share one canonical id and the id
-/// alone cannot tell them apart. A request that names no provider is left to
-/// pi, which resolves it to the official provider.
+/// Whether an identity names the official DeepSeek provider rather than a
+/// router. `canonical_model_id` strips the provider segment, so
+/// `deepseek/deepseek-flash` and `openrouter/deepseek/deepseek-flash` share one
+/// canonical id and the id alone cannot tell them apart. The provider segment
+/// must be present and be `deepseek`: a bare id names no provider, so it fails
+/// closed like every other unnamed form instead of assuming pi resolves it.
 fn names_official_provider(model_requested: &str) -> bool {
     model_requested
         .trim()
         .split_once('/')
-        .is_none_or(|(provider, _)| provider.eq_ignore_ascii_case("deepseek"))
+        .is_some_and(|(provider, _)| provider.eq_ignore_ascii_case("deepseek"))
 }
 
 /// The engines R22 makes authoritative for `surface`. This is the authoritative
@@ -193,6 +194,25 @@ pub(crate) fn assess(
         transport: transport.to_owned(),
         require_model_diversity,
     })
+}
+
+/// Whether the engine that actually **ran** the round still satisfies the
+/// entry's provider pin. `assess` decides authority from the requested
+/// identity; the observed identity (`<provider>/<id>`, built by the pi
+/// transport) carries the provider that served the round, and
+/// `canonical_model_id` discards it. Re-applying the engine/transport/surface/
+/// provider decision with the provider taken from the observed identity keeps a
+/// router route from inheriting the authority the brief was measured on
+/// (#1187). Engines whose table entry ignores the provider pin (Opus, sol,
+/// glm) are unaffected.
+pub(crate) fn observed_is_authoritative(engine: &Qualification, model_observed: &str) -> bool {
+    engine.authoritative
+        && is_authoritative(
+            &engine.engine,
+            &engine.transport,
+            engine.surface,
+            names_official_provider(model_observed),
+        )
 }
 
 fn classify(files: &[String]) -> Result<(Surface, Option<String>)> {
@@ -418,12 +438,13 @@ mod tests {
                 "{path}"
             );
         }
-        // A bare request is left to pi, which resolves it to the official
-        // provider, so it keeps the qualification on both surfaces.
-        assert!(assessed(&shipping, "deepseek-flash", "pi").authoritative);
+        // A bare request names no provider, so it fails closed on both
+        // surfaces rather than assuming pi resolves it to the official
+        // provider (P1 of the #1187 bootstrap review).
+        assert!(!assessed(&shipping, "deepseek-flash", "pi").authoritative);
         for path in internal_tool {
             assert!(
-                assessed(&[path], "deepseek-flash", "pi").authoritative,
+                !assessed(&[path], "deepseek-flash", "pi").authoritative,
                 "{path}"
             );
         }
@@ -452,6 +473,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn observed_identity_must_satisfy_the_entrys_provider_pin() {
+        let shipping = ["crates/edda-cli/src/cmd_review/mod.rs"];
+        let internal_tool = ["docs/reference/cli.md"];
+        // Official deepseek-flash on pi is authoritative on both surfaces, and
+        // the observed identity must name the same official provider.
+        for files in [&shipping[..], &internal_tool[..]] {
+            let engine = assessed(files, "deepseek/deepseek-flash", "pi");
+            assert!(engine.authoritative, "{files:?}");
+            assert!(observed_is_authoritative(
+                &engine,
+                "deepseek/deepseek-flash"
+            ));
+            assert!(!observed_is_authoritative(
+                &engine,
+                "openrouter/deepseek/deepseek-flash"
+            ));
+            assert!(!observed_is_authoritative(&engine, "deepseek-flash"));
+        }
+        // Engines whose entry pins no provider are unaffected by the new check.
+        let opus = assessed(&shipping, "claude-opus-5", "claude-code");
+        assert!(observed_is_authoritative(&opus, "anthropic/claude-opus-5"));
+        let sol = assessed(&shipping, "openai-codex/gpt-5.6-sol", "pi");
+        assert!(observed_is_authoritative(&sol, "openai-codex/gpt-5.6-sol"));
+        let glm = assessed(&internal_tool, "openrouter/z-ai/glm-5.3-flash", "pi");
+        assert!(observed_is_authoritative(
+            &glm,
+            "openrouter/z-ai/glm-5.3-flash"
+        ));
+        // An entry the brief already refused stays refused whatever is observed.
+        let routed = assessed(&shipping, "openrouter/deepseek/deepseek-flash", "pi");
+        assert!(!routed.authoritative);
+        assert!(!observed_is_authoritative(
+            &routed,
+            "deepseek/deepseek-flash"
+        ));
     }
 
     #[test]
