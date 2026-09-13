@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentManager } from '../src/manager.js';
@@ -259,5 +259,6 @@ test('the manager wires native task/session/inbox evidence into the projected ph
     assert.match(interrupted.waitEvidence ?? '', /inbox:interrupted/);
   } finally {
     await manager.stop(); store.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });

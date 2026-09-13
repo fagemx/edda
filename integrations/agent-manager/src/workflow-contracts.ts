@@ -12,7 +12,10 @@ export type WorkPhase = 'uninitialized' | 'ready' | 'assigned' | 'working' | 'wa
 // will not name a target, and `waitEvidence` says which case it is: the session
 // relation is unlinked/unavailable, or the recorded stage leaves the next actor
 // to the operator (uninitialized/ready, a delivery with no reviewer bound, an
-// interruption, a failure). A role is never guessed.
+// interruption). A role is never guessed. Native terminal facts name their own
+// target: `task failed` is `'none'`, `delivery failed` is `'user_decision'`.
+// `'tool'` is reserved for a genuine wait-on-tool case; no current input path
+// produces it (a live child using a tool is `working`, which is `'none'`).
 // `'worker'` is the executing party, which a manager-role controller can also be
 // when it executes the work directly; `'verifier'` is the reviewing party.
 export type WorkWaitingFor = 'worker' | 'verifier' | 'dependency' | 'user_decision' | 'tool' | 'none' | null;
