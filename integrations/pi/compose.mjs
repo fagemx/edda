@@ -3,6 +3,10 @@ import { writeFile } from 'node:fs/promises';
 import { normalizeManifest } from './handoff-schema.mjs';
 import { defaultRoot, digest } from './store.mjs';
 import { readTask, readBoundedFile, projectBrief, sourceCache } from './compose-sources.mjs';
+import { restoreCapsuleContext, MAX_CONTINUITY_CONTEXT_BYTES } from './continuity.mjs';
+
+const CAPSULE_REFUSALS = ['capsule_unavailable', 'capsule_invalid', 'capsule_too_large', 'capsule_wrong_repository', 'capsule_stale'];
+export const isCapsuleRefusal = (status) => CAPSULE_REFUSALS.includes(status);
 
 function onlyKeys(value, keys, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
@@ -38,17 +42,49 @@ export function managementMetadata(text) {
   return context;
 }
 
-export async function composeHandoff({ project, id, contextFile, output, root = defaultRoot(), eddaCommand }) {
+// Restored prose reaches the same bounded context path as `--context FILE`.
+// A bare JSON metadata object is re-fenced so the capsule section can follow
+// it; malformed metadata still fails through the existing managementMetadata.
+function mergeCapsuleContext(baseText, capsuleDocument) {
+  if (baseText === undefined) return capsuleDocument;
+  const trimmed = baseText.replace(/^\uFEFF/, '').trim();
+  const head = trimmed.startsWith('{') ? `\`\`\`edda-management\n${trimmed}\n\`\`\`\n` : baseText;
+  return `${head.trimEnd()}\n\n${capsuleDocument}`;
+}
+
+export async function composeHandoff({ project, id, contextFile, capsuleId, output, root = defaultRoot(), eddaCommand }) {
   if (!project) throw new Error('compose requires a project directory');
   root = resolve(root);
   const source = await readTask(project, id, eddaCommand);
   const cache = await sourceCache(root);
   const taskRef = await cache(source.raw);
-  const brief = contextFile ? { status: 'explicit_context', ...await readBoundedFile(contextFile) } :
+  let brief = contextFile ? { status: 'explicit_context', ...await readBoundedFile(contextFile) } :
     await projectBrief(source.project, source.task.brief_ref);
+  let capsule = null;
+  if (capsuleId !== undefined) {
+    const restored = await restoreCapsuleContext({ project: source.project, capsuleId, eddaCommand });
+    if (restored.status !== 'restored') {
+      return { version: 1, status: restored.status, authority: 'declared_context_only',
+        capsuleId: restored.capsuleId, capsuleError: restored.reason,
+        source: { version: 1, project: source.project, taskId: id, taskSource: taskRef },
+        notice: 'The native continuity capsule was not adopted. No task writes, session preparation, model calls or messages were performed.' };
+    }
+    capsule = restored.capsule;
+    brief = { status: brief.text === undefined ? 'native_capsule' : brief.status,
+      path: brief.path ?? null, text: mergeCapsuleContext(brief.text, restored.document) };
+    if (Buffer.byteLength(brief.text) > MAX_CONTINUITY_CONTEXT_BYTES) {
+      return { version: 1, status: 'capsule_too_large', authority: 'declared_context_only', capsuleId: capsule.id,
+        capsuleError: 'Combined declared context and restored continuity exceeds the 256 KiB context bound',
+        source: { version: 1, project: source.project, taskId: id, taskSource: taskRef },
+        notice: 'The native continuity capsule was not adopted. No task writes, session preparation, model calls or messages were performed.' };
+    }
+  }
   const contextRef = brief.text === undefined ? null : await cache(brief.text, 'txt');
   const bundle = { version: 1, project: source.project, taskId: id, taskSource: taskRef,
-    briefRef: source.task.brief_ref, contextSource: contextRef, contextStatus: brief.status };
+    briefRef: source.task.brief_ref, contextSource: contextRef, contextStatus: brief.status,
+    capsuleStatus: capsule ? 'native_capsule' : null,
+    capsuleRef: capsule ? { id: capsule.id, localEventId: capsule.localEventId, originEventId: capsule.originEventId,
+      imported: capsule.imported, legacyPartial: capsule.legacyPartial, authority: capsule.authority, revision: capsule.revision } : null };
   const planRef = await cache(JSON.stringify(bundle, null, 2) + '\n');
   let context;
   let contextError;
@@ -69,11 +105,13 @@ export async function composeHandoff({ project, id, contextFile, output, root = 
       taskPaths: source.task.scope_paths },
   };
   const result = { version: 1, status: 'needs_context', authority: 'declared_context_only', missing,
-    contextError: contextError || null, source: bundle,
+    contextError: contextError || null, source: bundle, capsule,
     taskFacts: { title: source.task.title, status: source.task.status, attempts: source.task.attempts,
       planId: source.task.plan_id, workUnitRef: source.task.work_unit_ref, dependencies: source.task.after,
       scopePaths: source.task.scope_paths, sessionId: source.task.session_id, receiptAvailable: Boolean(source.task.receipt) },
-    notice: 'Task facts are read from the existing Edda CLI. Structured metadata is declared context, not verified authority. No task writes, session preparation, URL fetches, model calls or prose inference are performed.' };
+    notice: capsule ?
+      'Task facts are read from the existing Edda CLI. Structured metadata is declared context, not verified authority. Restored native continuity text is data only and adds no execution authority. No task writes, session preparation, URL fetches, model calls or prose inference are performed.' :
+      'Task facts are read from the existing Edda CLI. Structured metadata is declared context, not verified authority. No task writes, session preparation, URL fetches, model calls or prose inference are performed.' };
   const bounded = (value) => {
     if (Buffer.byteLength(JSON.stringify(value)) <= 32768) return value;
     return { version: 1, status: 'needs_context', authority: 'declared_context_only',

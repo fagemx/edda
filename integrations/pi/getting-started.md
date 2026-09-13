@@ -137,6 +137,27 @@ when an old process may still be alive, a lock is ambiguous or the session is
 missing/corrupt. Preserve the record. Do not delete locks or reset the registry
 as an onboarding shortcut. Same-session recovery is not automatic crash recovery.
 
+## Continue a session from a saved native capsule
+
+When the necessary context was saved as an Edda native continuity capsule, adopt
+it without restoring prose by hand or creating an intermediate context file:
+
+```text
+edda-pi adopt <sessionId> --task <taskId> --capsule <capsuleId>
+edda-pi adopt <sessionId> --task <taskId> --capsule <capsuleId> --context <declared-metadata-file>
+```
+
+The client reads the capsule with the installed `edda continuity restore` and
+merges the data-only restored context into the same bounded context path as
+`--context`. Warnings, repository/Git provenance, the native read-back digest and
+the `data_only` authority stay visible, and none of that text becomes execution
+authority. The recorded prompt and initial task are never replayed. Add
+`--context <file>` only when the declared `role`/`doneWhen`/`scope` metadata is
+not already inside the capsule. Unavailable, stale, wrong-repository, malformed
+or oversize capsules fail with a `capsule_*` status (exit 2) before any
+enrollment, handoff, message or model launch, so uncertain delivery is never
+replayed. `--edda-bin <path>` (or `EDDA_BIN`) selects the native executable.
+
 ## What happens across lifecycle boundaries
 
 | Boundary | Current supported behavior | Not implied |
@@ -146,7 +167,7 @@ as an onboarding shortcut. Same-session recovery is not automatic crash recovery
 | Controller changes | New controller uses this entry and the same registry; inspects existing work | Old controller authority transferred |
 | Pi intentionally stopped | `run-resume`, inspect, then explicit message | Initial prompt replay or automatic work restart |
 | Controller/Pi crashes | Recorded state visible; explicit same-session recovery where safe | Guaranteed automatic restart or power-loss recovery |
-| Session file unusable | Preserve it; use native Edda continuity when previously saved | Silent fresh worker or reconstructed private history |
+| Session file unusable | Preserve it; use `edda-pi adopt --capsule` or native Edda continuity when previously saved | Silent fresh worker or reconstructed private history |
 | Working client upgraded | Existing runs keep their pinned runtime | In-place upgrade of running sessions |
 | Workbench unavailable | These commands continue independently | Workbench is a required gate |
 

@@ -31,12 +31,12 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs watch --conversation
   node integrations/pi/cli.mjs prepare SESSION_ID --manifest FILE [--expected REVISION]
   node integrations/pi/cli.mjs brief SESSION_ID [--budget-bytes 16384]
-  node integrations/pi/cli.mjs compose --project PATH --task ID [--context FILE] [--output NEW_FILE] [--edda-bin PATH]
+  node integrations/pi/cli.mjs compose --project PATH --task ID [--context FILE | --capsule CAPSULE_ID] [--output NEW_FILE] [--edda-bin PATH]
   node integrations/pi/cli.mjs reply SESSION_ID --to CURSOR --message TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --cursor CURSOR --action observed|working|waiting_user|complete|paused --note TEXT
   node integrations/pi/cli.mjs checkpoint SESSION_ID --action paused --note TEXT
   node integrations/pi/cli.mjs doctor [SESSION_ID]
-  node integrations/pi/cli.mjs adopt SESSION_ID_OR_PREFIX --task ID [--project PATH] [--include ID,ID] [--context FILE] [--scope TEXT] [--notify] [--max-notifications 10] [--preview] [--expected REVISION]
+  node integrations/pi/cli.mjs adopt SESSION_ID_OR_PREFIX --task ID [--project PATH] [--include ID,ID] [--context FILE | --capsule CAPSULE_ID] [--scope TEXT] [--notify] [--max-notifications 10] [--preview] [--expected REVISION] [--edda-bin PATH]
   node integrations/pi/cli.mjs follow SESSION_ID --project PATH --tasks ID,ID [--scope TEXT] [--notify] [--max-notifications 10]
   node integrations/pi/cli.mjs dependencies SESSION_ID
   node integrations/pi/cli.mjs check-dependencies SESSION_ID
@@ -89,9 +89,9 @@ async function main(args) {
     receipt: ['--id'], recover: ['--instance'],
     conversation: ['--after', '--limit'], enroll: ['--scope'], watch: ['--conversation'],
     prepare: ['--manifest', '--expected'], brief: ['--budget-bytes'],
-    compose: ['--project', '--task', '--context', '--output', '--edda-bin'],
+    compose: ['--project', '--task', '--context', '--capsule', '--output', '--edda-bin'],
     doctor: [], follow: ['--project', '--tasks', '--scope', '--notify', '--max-notifications'],
-    adopt: ['--task', '--project', '--include', '--context', '--scope', '--notify', '--max-notifications', '--preview', '--expected'],
+    adopt: ['--task', '--project', '--include', '--context', '--capsule', '--scope', '--notify', '--max-notifications', '--preview', '--expected', '--edda-bin'],
     dependencies: [], 'check-dependencies': [], unfollow: [],
     inbox: ['--consumer', '--limit', '--after'], 'inbox-read': ['--consumer', '--budget-bytes'], 'inbox-ack': ['--consumer'],
     'authorization-record': ['--record', '--consumer'], 'authorization-revoke': ['--consumer'],
@@ -143,16 +143,17 @@ async function main(args) {
   }
   if (command === 'doctor') result = await doctor(root, sessionId);
   if (command === 'adopt') result = await adoptSession(root, sessionId, { id: options['--task'], project: options['--project'],
-    include: options['--include']?.split(',').map((s) => s.trim()), contextFile: options['--context'], scope: options['--scope'],
-    notify: options['--notify'] === true, maxNotifications: Number(options['--max-notifications'] ?? 10),
-    preview: options['--preview'] === true, expectedRevision: options['--expected'] });
+    include: options['--include']?.split(',').map((s) => s.trim()), contextFile: options['--context'], capsuleId: options['--capsule'],
+    scope: options['--scope'], notify: options['--notify'] === true, maxNotifications: Number(options['--max-notifications'] ?? 10),
+    preview: options['--preview'] === true, expectedRevision: options['--expected'],
+    eddaCommand: options['--edda-bin'] ? { file: options['--edda-bin'], args: [] } : undefined });
   if (command === 'follow') result = await followDependencies(root, sessionId, { project: options['--project'],
     taskIds: options['--tasks']?.split(',').map((s) => s.trim()), scope: options['--scope'],
     notify: options['--notify'] === true, maxNotifications: Number(options['--max-notifications'] || 10) });
   if (command === 'dependencies' || command === 'check-dependencies') result = await dependencyStatus(root, sessionId, command === 'check-dependencies');
   if (command === 'unfollow') result = await unfollowDependencies(root, sessionId);
   if (command === 'compose') result = await composeHandoff({ project: options['--project'], id: options['--task'],
-    contextFile: options['--context'], output: options['--output'], root,
+    contextFile: options['--context'], capsuleId: options['--capsule'], output: options['--output'], root,
     eddaCommand: options['--edda-bin'] ? { file: options['--edda-bin'], args: [] } : undefined });
   if (command === 'list') result = await listSessions(root);
   if (command === 'status') result = await requestSession(root, sessionId, '/status');
@@ -183,7 +184,8 @@ async function main(args) {
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable', 'needs_reload', 'needs_enrollment', 'not_registered',
     'ambiguous_session', 'invalid_selector', 'needs_pi', 'offline', 'busy', 'source_changed', 'needs_expected_revision', 'adoption_incomplete', 'unsupported',
-    'runner_unreachable', 'launch_pending', 'stop_pending', 'exited'].includes(result?.status)) process.exitCode = 2;
+    'runner_unreachable', 'launch_pending', 'stop_pending', 'exited', 'capsule_unavailable', 'capsule_invalid', 'capsule_too_large',
+    'capsule_wrong_repository', 'capsule_stale'].includes(result?.status)) process.exitCode = 2;
 }
 
 main(process.argv.slice(2)).catch((error) => {

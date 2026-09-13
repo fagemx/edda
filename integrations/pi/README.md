@@ -207,6 +207,37 @@ also count. Project defaults to that live session's working directory. Add
 roots, or `--context FILE` for structured metadata when the task brief is prose.
 The metadata format is documented under task-to-handoff composition below.
 
+Add `--capsule CAPSULE_ID` to consume an Edda native continuity capsule directly.
+Adoption reads it through the public installed `edda continuity restore CAPSULE_ID
+--json` (and repository-scoped `continuity list` to confirm the capsule belongs to
+this project) and merges the restored data-only text into the same bounded context
+path. Warnings, repository/Git provenance, the native read-back digest and the
+`data_only` authority remain visible; none of that text is converted into execution
+authority, and no recorded prompt or initial task is replayed. The operator never
+copies restored prose or creates an intermediate context file. Use `--context FILE`
+together with `--capsule` when the declared `role`/`doneWhen`/`scope` metadata still
+comes from a file; a capsule that itself contains the `edda-management` block needs
+no separate context file. The declared metadata stays operator input: the client
+never derives `role`, `doneWhen` or `scope` from capsule `state`, `actor` or
+`references`, so restored data cannot become execution authority. A capsule with no
+declared block and no `--context` file yields the usual `needs_context` refusal.
+
+Two digests are real and visible: the native read-back `sha256` of the exact
+`restore --json` bytes (`capsule.revision`) and the existing `sources/`
+content-cache `sha256` of the combined bounded context text
+(`source.contextSource.revision`). The native envelope carries no capsule content
+digest, so none is claimed. Existing file-based adoption (`--context FILE` without
+`--capsule`) is unchanged.
+
+An unavailable, stale, wrong-repository, malformed or oversize capsule refuses with
+`capsule_unavailable`, `capsule_stale`, `capsule_wrong_repository`, `capsule_invalid`
+or `capsule_too_large` (exit 2) during preflight, before any enrollment, handoff,
+observation or message, so nothing is launched and uncertain delivery is never
+replayed. Branch mismatch, a detached/dirty checkout and imported/legacy flags are
+surfaced verbatim as warnings; only the native `saved commit is absent from the
+current clone` warning is treated as `capsule_stale`. `--edda-bin PATH` (or
+`EDDA_BIN`) selects the native executable.
+
 Adoption reads all prerequisites before applying setup, with an eight-task maximum.
 Cycles, missing tasks and overflow fail visibly; use `follow --tasks` to deliberately
 select a smaller observation set. Coverage is an `explicit_after_snapshot`: new
@@ -584,8 +615,15 @@ prepares a Pi automatically.
 ```powershell
 node integrations/pi/cli.mjs compose --project C:/ai_agent/edda --task 17 --output handoff.json
 node integrations/pi/cli.mjs compose --project C:/ai_agent/edda --task 17 --context management.md --output handoff.json
+node integrations/pi/cli.mjs compose --project C:/ai_agent/edda --task 17 --capsule cap_01m2cq3520bn5j96b28m7gj364 --output handoff.json
 node integrations/pi/cli.mjs prepare SESSION_ID --manifest handoff.json
 ```
+
+`--capsule CAPSULE_ID` reuses the same native-continuity pipe as `adopt`: the
+capsule is restored through the public installed `edda`, its data-only text is
+merged into the bounded context path, and its provenance/warnings stay in the
+result. A capsule refusal returns a `capsule_*` status (exit 2) and writes no
+output file.
 
 Replace the example project/task with your intended source. The separate prepare
 step selects the destination session. `--edda-bin PATH` (or `EDDA_BIN`) selects a

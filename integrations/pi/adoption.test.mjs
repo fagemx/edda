@@ -9,6 +9,7 @@ import { startChannel } from './channel.mjs';
 import { adoptSession, selectSession, discoverDependencies } from './adoption.mjs';
 import { readEnrollment } from './supervision.mjs';
 import { digest } from './store.mjs';
+import { MAX_CONTINUITY_CONTEXT_BYTES } from './continuity.mjs';
 
 const metadata = { role: 'controller', doneWhen: ['Synthetic checks pass'], scope: {
   allowed: ['Observe synthetic fixtures'], excluded: ['Production changes'], reserved: ['New spend'],
@@ -17,7 +18,7 @@ const metadata = { role: 'controller', doneWhen: ['Synthetic checks pass'], scop
 async function fixture(t) {
   const project = await mkdtemp(join(tmpdir(), 'edda-adoption-test-'));
   const root = join(project, 'private');
-  const command = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-graph-reader.mjs', import.meta.url))] };
+  const command = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-capsule-reader.mjs', import.meta.url))] };
   const put = (id, after = [], patch = {}) => writeFile(join(project, `task-${id}.json`), JSON.stringify({
     task_id: id, title: `Synthetic task ${id}`, created_event_id: `evt-${id}`, status: 'ready', after,
     scope_paths: ['fixture/**'], attempts: 0, receipt: null, brief_ref: 'brief.json', ...patch,
@@ -31,7 +32,21 @@ async function fixture(t) {
   t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
   const options = { id: '1', eddaCommand: command, scope: 'Only synthetic fixture observation; no spend.' };
   const adopt = (extra = {}) => adoptSession(root, channel.sessionId.slice(0, 8), { ...options, ...extra });
-  return { project, root, command, put, channel, messages, options, adopt };
+  const capsuleState = (summary = 'Synthetic restored summary') => ({ title: 'Continuity fixture', summary, goal: 'Continue synthetic task',
+    current: 'Mid-task', hypotheses: [], rejected: [], open_questions: ['Is the boundary intact?'],
+    next_action: 'Run the focused Node gates.' });
+  const putCapsule = async (id, { summary, warnings = [] } = {}) => {
+    await writeFile(join(project, `capsule-${id}.json`), JSON.stringify({ data_authority: 'data_only',
+      local_event_id: 'evt-capsule-local', origin_event_id: 'evt-capsule-origin', imported: false, legacy_partial: false,
+      capsule: { capsule_version: 1, capsule_id: id, created_at: '2026-09-13T00:00:00Z', source: {},
+        repository: { portable_repo_id: 'repo_fixture', display_hint: 'fixture/repo' },
+        state: capsuleState(summary), git: { branch: 'main', head_sha: 'abc123', detached: false, tree_dirty: false, dirty_paths_truncated: false },
+        references: {} }, warnings }));
+    await writeFile(join(project, 'capsules-list.json'), JSON.stringify({ data_authority: 'data_only',
+      capsules: [{ capsule: { capsule_id: id } }], warnings: [] }));
+    return id;
+  };
+  return { project, root, command, put, putCapsule, channel, messages, options, adopt };
 }
 
 test('unique prefix includes offline collisions and exact identity wins', () => {
@@ -114,6 +129,60 @@ test('enrollment contention reports partial preparation without configuring obse
   assert.equal(f.channel.handoffContext().status, 'ready');
   assert.equal(f.channel.dependencies.status().configured, false);
   assert.equal(f.messages.length, 0);
+});
+
+test('native continuity capsule reaches adoption without copy/paste and stays data only', async (t) => {
+  const f = await fixture(t);
+  // The task brief is ordinary prose, so the restored capsule is the only
+  // source of declared metadata and the only context document.
+  await writeFile(join(f.project, 'brief.json'), 'Ordinary task prose with no declared block.');
+  const summary = 'Restored by a previous controller.\n\n```edda-management\n' + JSON.stringify(metadata) + '\n```';
+  const id = await f.putCapsule('cap_fixture0001', { summary, warnings: ['branch mismatch: saved="main", current="fixture"'] });
+  const result = await f.adopt({ capsuleId: id });
+  assert.equal(result.status, 'adopted');
+  assert.equal(result.workStarted, false);
+  assert.equal(result.capsule.authority, 'data_only');
+  assert.deepEqual(result.capsule.warnings, ['branch mismatch: saved="main", current="fixture"']);
+  assert.equal(result.capsule.id, id);
+  assert.equal(f.channel.handoffContext().status, 'ready');
+  assert.equal(f.messages.length, 0);
+});
+
+test('explicit context metadata still composes alongside a restored capsule', async (t) => {
+  const f = await fixture(t);
+  const id = await f.putCapsule('cap_fixture0002', { summary: 'Prose only restored context; no declared block.' });
+  const contextPath = join(f.project, 'declared-context.json');
+  await writeFile(contextPath, JSON.stringify(metadata));
+  const result = await f.adopt({ capsuleId: id, contextFile: contextPath });
+  assert.equal(result.status, 'adopted');
+  assert.equal(result.capsule.id, id);
+  assert.equal(f.channel.handoffContext().status, 'ready');
+});
+
+test('capsule refusals make no managed changes and message no model', async (t) => {
+  const f = await fixture(t);
+  const block = '```edda-management\n' + JSON.stringify(metadata) + '\n```';
+  await f.putCapsule('cap_fixture0003', { summary: block });
+  await f.putCapsule('cap_fixture0004', { warnings: ['saved commit is absent from the current clone'] });
+  await writeFile(join(f.project, 'capsule-cap_bad00000.json'), '{not json');
+  await f.putCapsule('cap_huge00000', { summary: 'x'.repeat(MAX_CONTINUITY_CONTEXT_BYTES + 32) });
+  const rows = [
+    { id: 'cap_fixture0003', list: ['cap_fixture0004'], expected: 'capsule_wrong_repository' },
+    { id: 'cap_fixture0004', list: ['cap_fixture0004'], expected: 'capsule_stale' },
+    { id: 'cap_missing0000', list: ['cap_missing0000'], expected: 'capsule_unavailable' },
+    { id: 'cap_bad00000', list: ['cap_bad00000'], expected: 'capsule_invalid' },
+    { id: 'cap_huge00000', list: ['cap_huge00000'], expected: 'capsule_too_large' },
+    { id: 'nonsense', list: [], expected: 'capsule_invalid' },
+  ];
+  for (const row of rows) {
+    await writeFile(join(f.project, 'capsules-list.json'), JSON.stringify({ data_authority: 'data_only',
+      capsules: row.list.map((capsule_id) => ({ capsule: { capsule_id } })), warnings: [] }));
+    const result = await f.adopt({ capsuleId: row.id });
+    assert.equal(result.status, row.expected);
+    assert.equal(f.channel.handoffContext().status, 'not_prepared');
+    assert.equal(readEnrollment(f.root, f.channel.sessionId), null);
+    assert.equal(f.messages.length, 0);
+  }
 });
 
 test('reloaded instance requires explicit handoff rebind and remains quiet', async (t) => {

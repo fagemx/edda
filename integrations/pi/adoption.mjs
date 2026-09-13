@@ -1,7 +1,7 @@
 import { digest } from './store.mjs';
 import { listSessions, requestSession } from './client.mjs';
 import { readTask, taskId } from './compose-sources.mjs';
-import { composeHandoff } from './compose.mjs';
+import { composeHandoff, isCapsuleRefusal } from './compose.mjs';
 import { readEnrollment, enroll, validateScope } from './supervision.mjs';
 import { dependencyConfiguration, dependencyFact } from './dependency-observer.mjs';
 
@@ -49,7 +49,7 @@ function semanticManifest(manifest) {
   return digest(JSON.stringify(rest));
 }
 
-export async function adoptSession(root, selector, { id, project, include = [], contextFile, scope,
+export async function adoptSession(root, selector, { id, project, include = [], contextFile, capsuleId, scope,
   notify = false, maxNotifications = 10, preview = false, expectedRevision, eddaCommand } = {}) {
   taskId(id);
   if (!Array.isArray(include)) throw new Error('include must be a list of task IDs');
@@ -72,10 +72,15 @@ export async function adoptSession(root, selector, { id, project, include = [], 
   // Resolve and validate all sources before changing enrollment, handoff or follow.
   const dependencies = await discoverDependencies(project, [id, ...include], eddaCommand);
   const config = await dependencyConfiguration({ project, taskIds: dependencies.taskIds, notify, maxNotifications });
-  const composition = await composeHandoff({ project: config.project, id, contextFile, root, eddaCommand });
-  if (composition.status !== 'ready') return { ...base, status: 'needs_context', missing: composition.missing,
-    contextError: composition.contextError, source: composition.source,
-    nextAction: 'Provide declared role/doneWhen/scope metadata via --context, then repeat adopt. No managed changes were made.' };
+  const composition = await composeHandoff({ project: config.project, id, contextFile, capsuleId, root, eddaCommand });
+  if (composition.status !== 'ready') {
+    if (isCapsuleRefusal(composition.status)) return { ...base, status: composition.status, capsuleId: composition.capsuleId,
+      contextError: composition.capsuleError, source: composition.source,
+      nextAction: 'Inspect the named native continuity capsule; no managed changes or messages were made.' };
+    return { ...base, status: 'needs_context', missing: composition.missing,
+      contextError: composition.contextError, source: composition.source,
+      nextAction: 'Provide declared role/doneWhen/scope metadata via --context, then repeat adopt. No managed changes were made.' };
+  }
   if (composition.source.taskSource.revision !== `sha256:${dependencies.sourceRevisions[id]}`) {
     return { ...base, status: 'source_changed', nextAction: 'Task changed during preflight; inspect and repeat adopt.' };
   }
@@ -92,7 +97,7 @@ export async function adoptSession(root, selector, { id, project, include = [], 
   }
   const manifest = manifestReused ? handoff.manifest : composition.manifest;
   const detail = { ...base, project: config.project, dependencies, manifestReused,
-    manifestRevision: digest(JSON.stringify(manifest)), planRef: manifest.planRef,
+    manifestRevision: digest(JSON.stringify(manifest)), planRef: manifest.planRef, capsule: composition.capsule,
     notify, maxNotifications, scope: chosenScope, workStarted: notify ? null : false };
   if (preview) return { ...detail, status: 'preview', nextAction: 'Repeat without --preview to apply this declared scope. No managed changes or messages were made.' };
   const steps = [];
