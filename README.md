@@ -269,6 +269,24 @@ Every ledger query runs locally against SQLite — same answer every time, in mi
 
 ## Integration
 
+**Pi managed sessions** — install the optional Node client to launch, inspect and
+explicitly resume owned Pi sessions from any shell or new controller session:
+
+```text
+npm pack ./integrations/pi --ignore-scripts
+npm install --global --ignore-scripts ./edda-pi-session-channel-0.8.0.tgz
+edda-pi runtime-info
+edda-pi runs
+```
+
+Run the first two commands from an Edda checkout; the installed `edda-pi` command
+needs no checkout. Requires Node 24+ and an installed Pi. Follow the
+[activation and fresh-session guide](integrations/pi/getting-started.md) for
+launch, result inspection, explicit continuation, upgrade and removal. Installation
+is not automatic task recovery; the guide lists exact lifecycle boundaries.
+This client is distinct from Rust `edda dispatch --agent pi` and does not require
+a workbench or a second supervisor model.
+
 **Claude Code** — fully supported via bridge hooks. Auto-captures decisions, digests sessions, injects context.
 
 ```bash

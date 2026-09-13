@@ -1,0 +1,91 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm, writeFile, readdir, symlink, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { runtimeInfo, listManagedRuns } from './activation.mjs';
+
+const exec = promisify(execFile), cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+async function fixture(t) {
+  const dir = await mkdtemp(join(tmpdir(), 'edda-activation-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+async function record(root, id, values = {}) {
+  const dir = join(root, 'managed', id);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ version: 1, runId: id, root: resolve(root), project: root,
+    prompt: 'SECRET-PROMPT', ...values.config }));
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ runId: id, phase: 'stopped', sessionId: randomUUID(),
+    updatedAt: '2026-09-13T00:00:00.000Z', error: 'SECRET-ERROR', token: 'SECRET-TOKEN', ...values.state }));
+}
+
+test('runtime-info and runs are read-only and publish honest capabilities', async (t) => {
+  const dir = await fixture(t), root = join(dir, 'absent');
+  const info = runtimeInfo(root);
+  assert.equal(info.registryRoot, root);
+  assert.equal(info.capabilities.automaticProcessRestart, false);
+  assert.equal(info.capabilities.managedFork, false);
+  assert.match(await readFile(info.guide, 'utf8'), /new session/i);
+  assert.deepEqual(listManagedRuns(root).runs, []);
+  assert.deepEqual(await readdir(dir), []);
+  const result = await exec(process.execPath, [cli, 'runtime-info'], { env: { ...process.env, EDDA_PI_CHANNEL_DIR: root }, cwd: dir })
+    .catch((error) => { assert.equal(error.code, 2); return error; });
+  assert.equal(JSON.parse(result.stdout).registryRoot, root);
+  assert.deepEqual(await readdir(dir), []);
+});
+
+test('run discovery preserves corrupt records and does not leak prompt/token/provider error', async (t) => {
+  const root = await fixture(t), good = randomUUID(), bad = randomUUID();
+  await record(root, good); await record(root, bad);
+  const badFile = join(root, 'managed', bad, 'state.json');
+  await writeFile(badFile, '{ SECRET-BROKEN-JSON');
+  const result = listManagedRuns(root);
+  assert.equal(result.runs.length, 2);
+  const healthy = result.runs.find((r) => r.runId === good), corrupt = result.runs.find((r) => r.runId === bad);
+  assert.equal(healthy.recordedPhase, 'stopped');
+  assert.equal(healthy.observedLive, null);
+  assert.equal(corrupt.recordedPhase, 'unknown');
+  assert.ok(corrupt.error);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+  assert.equal(await readFile(badFile, 'utf8'), '{ SECRET-BROKEN-JSON');
+});
+
+test('runs paginate deterministically, validate input and do not traverse nested registries', async (t) => {
+  const root = await fixture(t), ids = [randomUUID(), randomUUID(), randomUUID()].sort();
+  for (const id of ids) await record(root, id);
+  await record(join(root, 'unselected'), randomUUID());
+  const first = listManagedRuns(root, { limit: 2 });
+  assert.deepEqual(first.runs.map((r) => r.runId), ids.slice(0, 2));
+  assert.equal(first.hasMore, true); assert.equal(first.nextAfter, ids[1]);
+  const next = listManagedRuns(root, { after: first.nextAfter, limit: 2 });
+  assert.deepEqual(next.runs.map((r) => r.runId), ids.slice(2));
+  assert.equal(next.hasMore, false); assert.equal(next.nextAfter, null);
+  assert.throws(() => listManagedRuns(root, { limit: 0 }), /limit/);
+  assert.throws(() => listManagedRuns(root, { limit: 101 }), /limit/);
+  assert.throws(() => listManagedRuns(root, { after: '../outside' }), /UUID/);
+});
+
+test('linked or mismatched run records remain unknown instead of being adopted', async (t) => {
+  const root = await fixture(t), wrong = randomUUID(), linked = randomUUID(), outside = join(root, 'outside');
+  await record(root, wrong, { config: { root: 'other-registry' } });
+  await mkdir(outside);
+  await symlink(outside, join(root, 'managed', linked), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.ok(listManagedRuns(root).runs.every((r) => r.error && r.sessionId === null));
+});
+
+test('installed-style help and argument errors keep machine-readable discovery usable', async (t) => {
+  const root = await fixture(t), env = { ...process.env, EDDA_PI_CHANNEL_DIR: join(root, 'registry') };
+  const help = (await exec(process.execPath, [cli, '--help'], { env, cwd: root })).stdout;
+  assert.match(help, /edda-pi runs/); assert.match(help, /edda-pi runtime-info/);
+  assert.match((await exec(process.execPath, [cli, '--version'], { env })).stdout, /^edda-pi \d+\.\d+\.\d+/);
+  assert.deepEqual(JSON.parse((await exec(process.execPath, [cli, 'runs'], { env, cwd: root })).stdout).runs, []);
+  await assert.rejects(exec(process.execPath, [cli, 'launch'], { env }), (error) => {
+    assert.match(error.stderr, /requires --project/); assert.doesNotMatch(error.stderr, /Run ID:/); return true;
+  });
+  assert.deepEqual(await readdir(root), []);
+});
