@@ -29,6 +29,22 @@ struct PortableAliasRegistryV1 {
     repositories: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
 }
 
+/// Derive the canonical network remote hint independently of a configured
+/// portable repository key. Consumers that first authenticate the portable ID
+/// can use this only as an explicit, validated service address.
+pub fn derive_portable_repository_remote_hint(checkout: &Path) -> Option<String> {
+    let remotes = git_lines(checkout, &["remote"]).unwrap_or_default();
+    let remote_name = if remotes.iter().any(|name| name == "origin") {
+        Some("origin".to_string())
+    } else if remotes.len() == 1 {
+        remotes.first().cloned()
+    } else {
+        None
+    }?;
+    let raw_remote = git_text(checkout, &["remote", "get-url", &remote_name])?;
+    canonical_remote_identity(raw_remote.trim())
+}
+
 pub fn derive_portable_repository_identity(
     checkout: &Path,
     project_config: &Path,
@@ -96,6 +112,15 @@ pub fn record_portable_alias(portable_repo_id: &str, checkout: &Path) -> anyhow:
     let bytes = serde_json::to_vec_pretty(&registry)?;
     edda_core::continuity::validate_raw_secrets(&bytes, "portable repository alias registry")?;
     write_atomic(&alias_path(), &bytes)
+}
+
+pub fn portable_alias_contains(portable_repo_id: &str, checkout: &Path) -> anyhow::Result<bool> {
+    let registry = load_aliases()?;
+    let local_project_id = project_id(checkout);
+    Ok(registry
+        .repositories
+        .get(portable_repo_id)
+        .is_some_and(|locals| locals.contains_key(&local_project_id)))
 }
 
 pub fn resolve_portable_aliases(checkout: &Path) -> anyhow::Result<PortableAliasResolution> {
@@ -334,6 +359,32 @@ mod tests {
         assert_eq!(
             canonical_remote_identity("https://example.com/org/../repo.git"),
             None
+        );
+    }
+
+    #[test]
+    fn remote_hint_remains_available_when_a_configured_identity_key_takes_precedence() {
+        let checkout = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(checkout.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ])
+            .current_dir(checkout.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            derive_portable_repository_remote_hint(checkout.path()).as_deref(),
+            Some("github.com/owner/repo")
         );
     }
 

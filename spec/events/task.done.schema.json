@@ -17,6 +17,28 @@
       "items": {
         "type": "string"
       }
+    },
+    "controlled_completion": {
+      "type": "object",
+      "properties": {
+        "attempt": { "type": "integer", "minimum": 1 },
+        "lease_owner": { "type": "string", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 },
+        "agent_kind": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "brief_event_id": { "type": "string", "pattern": "^evt_[a-z0-9]+$", "maxLength": 68 },
+        "brief_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "outcome_code": { "type": "string", "minLength": 1, "maxLength": 160 }
+      },
+      "required": [
+        "attempt",
+        "lease_owner",
+        "session_id",
+        "agent_kind",
+        "brief_event_id",
+        "brief_digest",
+        "outcome_code"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

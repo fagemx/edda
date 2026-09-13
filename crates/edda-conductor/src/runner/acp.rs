@@ -7,8 +7,7 @@
 use acp::Agent as _;
 use agent_client_protocol as acp;
 use anyhow::{Context, Result};
-use edda_core::event::{finalize_event, new_note_event, new_task_session_event};
-use edda_ledger::lock::WorkspaceLock;
+#[cfg(test)]
 use edda_ledger::Ledger;
 use serde::Serialize;
 use std::future::Future;
@@ -217,6 +216,9 @@ fn path_is_within(candidate: &Path, root: &Path) -> bool {
 /// Durable audit sink for ACP lifecycle and permission decisions.
 pub trait AcpAudit: Send + Sync {
     fn session_created(&self, task_id: u64, session_id: &str) -> Result<()>;
+    fn session_ready(&self, _task_id: u64, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
     fn decision(&self, task_id: u64, kind: &'static str, allowed: bool) -> Result<()>;
     fn update(&self, task_id: u64, kind: &'static str) -> Result<()>;
     /// Persist only the measured-ness and numeric usage facts, never a raw
@@ -224,95 +226,8 @@ pub trait AcpAudit: Send + Sync {
     fn usage(&self, task_id: u64, usage: Option<&AcpUsage>) -> Result<()>;
 }
 
-/// Ledger-backed ACP audit. The session event is written immediately after a
-/// successful `session/new`, before any prompt can make side effects.
-pub struct LedgerAcpAudit {
-    workspace: PathBuf,
-}
-
-impl LedgerAcpAudit {
-    pub fn new(workspace: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace: workspace.into(),
-        }
-    }
-
-    fn append_note(&self, task_id: u64, kind: &'static str, allowed: bool) -> Result<()> {
-        let ledger = Ledger::open(&self.workspace).context("opening ACP task ledger")?;
-        let _lock = WorkspaceLock::acquire(&ledger.paths).context("locking ACP task ledger")?;
-        let branch = ledger.head_branch().context("reading ACP ledger branch")?;
-        let parent = ledger
-            .last_event_hash()
-            .context("reading ACP ledger head")?;
-        let tags = vec!["acp".to_string(), kind.to_string()];
-        let mut event = new_note_event(
-            &branch,
-            parent.as_deref(),
-            "agent",
-            "ACP policy decision",
-            &tags,
-        )?;
-        event.payload["acp"] = serde_json::json!({
-            "task_id": task_id,
-            "kind": kind,
-            "allowed": allowed,
-        });
-        finalize_event(&mut event)?;
-        ledger
-            .append_event(&event)
-            .context("appending ACP audit event")?;
-        Ok(())
-    }
-}
-
-impl AcpAudit for LedgerAcpAudit {
-    fn session_created(&self, task_id: u64, session_id: &str) -> Result<()> {
-        let ledger = Ledger::open(&self.workspace).context("opening ACP task ledger")?;
-        let _lock = WorkspaceLock::acquire(&ledger.paths).context("locking ACP task ledger")?;
-        let branch = ledger.head_branch().context("reading ACP ledger branch")?;
-        let parent = ledger
-            .last_event_hash()
-            .context("reading ACP ledger head")?;
-        let event = new_task_session_event(&branch, parent.as_deref(), task_id, session_id)?;
-        ledger
-            .append_event(&event)
-            .context("appending task.session")?;
-        Ok(())
-    }
-
-    fn decision(&self, task_id: u64, kind: &'static str, allowed: bool) -> Result<()> {
-        self.append_note(task_id, kind, allowed)
-    }
-
-    fn update(&self, task_id: u64, kind: &'static str) -> Result<()> {
-        self.append_note(task_id, kind, true)
-    }
-
-    fn usage(&self, task_id: u64, usage: Option<&AcpUsage>) -> Result<()> {
-        let ledger = Ledger::open(&self.workspace).context("opening ACP task ledger")?;
-        let _lock = WorkspaceLock::acquire(&ledger.paths).context("locking ACP task ledger")?;
-        let branch = ledger.head_branch().context("reading ACP ledger branch")?;
-        let parent = ledger
-            .last_event_hash()
-            .context("reading ACP ledger head")?;
-        let mut event = new_note_event(
-            &branch,
-            parent.as_deref(),
-            "agent",
-            "ACP usage receipt",
-            &["acp".into(), "usage".into()],
-        )?;
-        event.payload["acp"] = serde_json::json!({
-            "task_id": task_id,
-            "measured": usage.is_some(),
-            "usage": usage,
-        });
-        finalize_event(&mut event)?;
-        ledger
-            .append_event(&event)
-            .context("appending ACP usage receipt")
-    }
-}
+mod audit;
+pub use audit::LedgerAcpAudit;
 
 /// Real ACP runner. It is intentionally separate from the old `claude -p`
 /// launcher; integration selects this type explicitly rather than changing
@@ -431,6 +346,7 @@ impl AcpRunner {
                     audit.session_created(request.task_id, &session_id)?;
                     session_id
                 };
+                audit.session_ready(request.task_id, &session_id)?;
                 let prompt =
                     acp::PromptRequest::new(session_id.clone(), vec![request.prompt.into()]);
                 let response = if let Some(prompt_timeout) = request.prompt_timeout {
@@ -477,7 +393,18 @@ impl acp::Client for AcpClient {
         &self,
         request: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        let selected = self.policy.select_option(&request);
+        // Permission is an action-authority boundary, not merely an audit
+        // write. Revalidate the exact task/session/attempt/lease/brief before
+        // selecting any allow option; stale or unreadable state fails closed.
+        let current = self
+            .audit
+            .session_ready(self.task_id, request.session_id.0.as_ref())
+            .is_ok();
+        let selected = if current {
+            self.policy.select_option(&request)
+        } else {
+            reject_option(&request.options)
+        };
         let allowed = request.options.iter().any(|option| {
             selected.as_deref() == Some(option.option_id.0.as_ref())
                 && matches!(option.kind, acp::PermissionOptionKind::AllowOnce)
@@ -627,6 +554,10 @@ mod tests {
             Ok(())
         }
 
+        fn session_ready(&self, _task_id: u64, _session_id: &str) -> Result<()> {
+            Ok(())
+        }
+
         fn decision(&self, _task_id: u64, kind: &'static str, allowed: bool) -> Result<()> {
             self.push(format!("{kind}:allow={allowed}"));
             Ok(())
@@ -641,6 +572,74 @@ mod tests {
             self.push(format!("usage:measured={}", usage.is_some()));
             Ok(())
         }
+    }
+
+    #[test]
+    fn controlled_ledger_audit_binds_new_session_to_brief_identity() {
+        let root = tempfile::tempdir().unwrap();
+        Ledger::ensure_initialized(root.path()).unwrap();
+        let ledger = Ledger::open(root.path()).unwrap();
+        ledger
+            .append_event(
+                &edda_core::event::new_task_created_event(&edda_core::event::TaskCreatedParams {
+                    branch: "main",
+                    parent_hash: None,
+                    task_id: 7,
+                    title: "controlled ACP",
+                    assignee: None,
+                    agent_kind: Some("acp:grok"),
+                    after: &[],
+                    plan_id: None,
+                    work_unit_ref: None,
+                    brief_ref: None,
+                    idempotency_key: None,
+                    scope_paths: &["src".into()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let parent = ledger.last_event_hash().unwrap();
+        ledger
+            .append_event(
+                &edda_core::event::new_task_started_event("main", parent.as_deref(), 7, 300, 1)
+                    .unwrap(),
+            )
+            .unwrap();
+        let lease_owner = format!(
+            "controlled-brief:evt_controlled:{}:dispatch",
+            "a".repeat(64)
+        );
+        ledger
+            .upsert_task_lease(&edda_ledger::TaskLease {
+                task_id: 7,
+                attempt: 1,
+                owner: lease_owner.clone(),
+                expires_at: "2999-01-01T00:00:00Z".into(),
+                heartbeat_at: "2026-09-11T00:00:00Z".into(),
+            })
+            .unwrap();
+        LedgerAcpAudit::new(root.path())
+            .with_execution_brief(
+                "evt_controlled",
+                "a".repeat(64),
+                1,
+                &lease_owner,
+                "acp:grok",
+            )
+            .session_created(7, "acp-session")
+            .unwrap();
+
+        let event = Ledger::open(root.path())
+            .unwrap()
+            .task_events()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(event.payload["brief_event_id"], "evt_controlled");
+        assert_eq!(event.payload["brief_digest"], "a".repeat(64));
+        assert_eq!(event.payload["attempt"], 1);
+        assert_eq!(event.payload["lease_owner"], lease_owner);
+        assert_eq!(event.payload["agent_kind"], "acp:grok");
     }
 
     /// What the fake agent's one prompt handler does.

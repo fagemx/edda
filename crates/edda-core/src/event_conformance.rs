@@ -151,7 +151,12 @@ fn production_event_types_cannot_silently_escape_registration() {
         .iter()
         .map(|e| e["type"].as_str().unwrap().to_owned())
         .collect();
-    let emitted = sources::inventory(&root().join("crates"));
+    let mut emitted = sources::inventory(&root().join("crates"));
+    // `execution_brief` remains registered for typed import-as-data and
+    // historical readability, but S5 intentionally has no production event
+    // constructor: a future S6 authority seam must add an authenticated writer
+    // explicitly rather than inheriting a caller-mintable constructor.
+    emitted.insert("execution_brief".to_owned());
     assert_eq!(
         emitted, registered,
         "update payload schema, registry, fixture and specification together"

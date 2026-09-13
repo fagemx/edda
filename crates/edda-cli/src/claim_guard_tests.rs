@@ -10,6 +10,8 @@ fn issue(comments: &[(&str, &str)]) -> GhIssue {
                 created_at: Some((*created_at).to_owned()),
             })
             .collect(),
+        labels: Vec::new(),
+        state: None,
     }
 }
 
@@ -48,6 +50,46 @@ fn gh782_bare_machine_cannot_alias_two_worker_roles() {
         claim_state("4090/worker-1", &issue(&[("t", "taking: 4090")])),
         ClaimState::ClaimedByOther { .. }
     ));
+}
+
+#[test]
+fn control_claim_nonce_distinguishes_same_identity_racers_and_keeps_first_winner() {
+    let first = format!("action_{}", "a".repeat(64));
+    let second = format!("action_{}", "b".repeat(64));
+    let issue = issue(&[
+        (
+            "2026-09-12T00:00:00Z",
+            &format!("taking: machine/worker at t control-action={first}"),
+        ),
+        (
+            "2026-09-12T00:00:01Z",
+            &format!("taking: machine/worker at t control-action={second}"),
+        ),
+    ]);
+    let claims = control_claims(&issue);
+    assert_eq!(claims.len(), 2);
+    assert_eq!(claims[0].identity, "machine/worker");
+    assert_eq!(claims[0].action_id, Some(first.as_str()));
+    assert_ne!(claims[0].action_id, claims[1].action_id);
+}
+
+#[test]
+fn control_claim_readback_requires_claimed_stage_and_rechecks_holds() {
+    let mut subject = issue(&[]);
+    subject.labels = vec![GhLabel {
+        name: "fleet:claimed".into(),
+    }];
+    assert!(post_claim_label_refusal(&subject, &["hold".into()]).is_none());
+    subject.labels.push(GhLabel {
+        name: "hold".into(),
+    });
+    assert_eq!(
+        post_claim_label_refusal(&subject, &["hold".into()]).as_deref(),
+        Some("ISSUE_HELD_BY_LABEL:hold")
+    );
+    subject.labels.remove(0);
+    assert!(post_claim_label_refusal(&subject, &["pause".into()])
+        .is_some_and(|reason| reason == "ISSUE_STAGE_NOT_ADMITTED"));
 }
 
 #[test]
@@ -148,8 +190,6 @@ fn merged_delivery_wins_over_an_open_duplicate() {
         })
     );
 }
-
-static GH_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn fetch_fails_closed_when_gh_is_missing() {

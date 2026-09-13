@@ -174,16 +174,16 @@ impl Ledger {
     }
 
     // ── Events ──────────────────────────────────────────────────────
-
     /// Append an event to the ledger. Append-only (CONTRACT LEDGER-02).
     pub fn append_event(&self, event: &Event) -> anyhow::Result<()> {
+        let _task_guard = crate::lock::task_generation_guard(&self.paths, event)?;
         self.sqlite
             .append_event(event)
             .with_context(|| format!("Ledger::append_event({})", event.event_id))
     }
-
     /// Append an event idempotently. Returns `true` if inserted, `false` if duplicate.
     pub fn append_event_idempotent(&self, event: &Event) -> anyhow::Result<bool> {
+        let _task_guard = crate::lock::task_generation_guard(&self.paths, event)?;
         self.sqlite
             .append_event_idempotent(event)
             .with_context(|| format!("Ledger::append_event_idempotent({})", event.event_id))

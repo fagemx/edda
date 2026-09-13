@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "control_manifest payload",
+  "description": "Locally sealed ControlManifestV1 compile or adjudication record.",
+  "type": "object",
+  "properties": {
+    "control_manifest": {
+      "type": "object",
+      "properties": {
+        "record_version": { "const": 1 },
+        "manifest_event_id": { "type": "string", "pattern": "^evt_[a-z0-9]+$", "maxLength": 68 },
+        "manifest_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "canonical_bytes_hex": { "type": "string", "pattern": "^[0-9a-f]+$", "maxLength": 1048576 },
+        "manifest": { "$ref": "#/$defs/manifest" },
+        "authority": { "$ref": "#/$defs/authority" },
+        "adjudication": { "$ref": "#/$defs/adjudication" }
+      },
+      "required": ["record_version", "manifest_event_id", "manifest_digest", "canonical_bytes_hex", "manifest", "authority"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["control_manifest"],
+  "additionalProperties": true,
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "short": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "item": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "authority": {
+      "type": "object",
+      "properties": {
+        "capability_id": { "type": "string", "pattern": "^cap_[0-9a-f]{64}$" },
+        "principal_id": { "$ref": "#/$defs/short" },
+        "session_id": { "$ref": "#/$defs/short" },
+        "command_profile": { "const": "strong" },
+        "local_project_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "portable_repo_id": { "type": "string", "pattern": "^repo_[0-9a-f]{64}$" },
+        "github_repository": { "type": "string", "pattern": "^[a-z0-9._-]{1,100}/[a-z0-9._-]{1,100}$" },
+        "permitted_action": { "enum": ["control_compile", "control_adjudicate"] },
+        "expires_at": { "type": "string", "minLength": 20, "maxLength": 64 },
+        "seal": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "HMAC over authority, manifest identity/digest/version, and the complete adjudication provenance when present." }
+      },
+      "required": ["capability_id", "principal_id", "session_id", "command_profile", "local_project_id", "permitted_action", "expires_at", "seal"],
+      "additionalProperties": false
+    },
+    "briefIdentity": {
+      "type": "object",
+      "properties": {
+        "brief_id": { "type": "string", "pattern": "^brief_[a-z0-9]+$" },
+        "brief_event_id": { "type": "string", "pattern": "^evt_[a-z0-9]+$" },
+        "content_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "required": ["brief_id", "brief_event_id", "content_digest"],
+      "additionalProperties": false
+    },
+    "task": {
+      "type": "object",
+      "properties": {
+        "task_key": { "type": "string", "pattern": "^step_[a-z0-9]+$" },
+        "task_id": { "type": "integer", "minimum": 1 },
+        "depends_on": { "type": "array", "maxItems": 64, "items": { "type": "string" } },
+        "exact_input_sha": { "$ref": "#/$defs/sha" },
+        "brief": { "$ref": "#/$defs/briefIdentity" },
+        "allowed_outcome_codes": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "pattern": "^[A-Z0-9_]+$", "maxLength": 64 } },
+        "runtime_profile": { "enum": ["strong", "flash"] },
+        "model_target": { "$ref": "#/$defs/short" },
+        "owned_paths": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 512 } },
+        "build_lane": { "$ref": "#/$defs/short" },
+        "issue_binding": { "$ref": "#/$defs/item" },
+        "local_only": { "type": "boolean" },
+        "execution_host_affinity": { "$ref": "#/$defs/short" },
+        "required_delivery": { "enum": ["local_only", "commit", "branch", "pull_request"] }
+      },
+      "required": ["task_key", "exact_input_sha", "brief", "allowed_outcome_codes", "runtime_profile", "model_target", "owned_paths", "local_only", "execution_host_affinity", "required_delivery"],
+      "additionalProperties": false
+    },
+    "manifest": {
+      "type": "object",
+      "properties": {
+        "control_version": { "const": 1 },
+        "manifest_version": { "type": "integer", "minimum": 1 },
+        "control_id": { "type": "string", "pattern": "^control_[a-z0-9]+$" },
+        "program_id": { "type": "string", "pattern": "^program_[a-z0-9]+$" },
+        "command_profile": { "const": "strong" },
+        "goal": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "exclusions": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/item" } },
+        "basis": {
+          "type": "object",
+          "properties": {
+            "portable_repo_id": { "type": "string", "pattern": "^repo_[0-9a-f]{64}$" },
+            "github_repository": { "type": "string", "pattern": "^[a-z0-9._-]{1,100}/[a-z0-9._-]{1,100}$" },
+            "base_full_sha": { "$ref": "#/$defs/sha" },
+            "references": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/item" } }
+          },
+          "required": ["base_full_sha"],
+          "additionalProperties": false
+        },
+        "tasks": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/task" } },
+        "capacity": {
+          "type": "object",
+          "properties": { "max_workers": { "type": "integer", "minimum": 1 }, "verifier_capacity": { "type": "integer", "minimum": 1 } },
+          "required": ["max_workers", "verifier_capacity"],
+          "additionalProperties": false
+        },
+        "admission_policy": {
+          "type": "object",
+          "properties": {
+            "allowed_issue_stage_labels": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/short" } },
+            "forbidden_hold_labels": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/short" } },
+            "claim_identity": { "$ref": "#/$defs/short" },
+            "winner_readback_required": { "type": "boolean" },
+            "existing_claim_check_required": { "type": "boolean" },
+            "delivery_pr_check_required": { "type": "boolean" }
+          },
+          "required": ["claim_identity", "winner_readback_required", "existing_claim_check_required", "delivery_pr_check_required"],
+          "additionalProperties": false
+        },
+        "routes": {
+          "type": "array", "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "task_key": { "type": "string" },
+              "outcome_code": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
+              "next_action": { "enum": ["admit_and_claim_issue", "prepare_attempt", "dispatch_task", "wait_for_workers", "bind_delivery", "claim_verification", "request_verification", "route_known_fix", "merge_delegated", "complete", "needs_decision", "control_error"] }
+            },
+            "required": ["task_key", "outcome_code", "next_action"],
+            "additionalProperties": false
+          }
+        },
+        "retry_cost_policy": {
+          "type": "object",
+          "properties": {
+            "per_action_preflight_cost_microusd": { "type": "integer", "minimum": 0 },
+            "per_action_incremental_cap_microusd": { "type": "integer", "minimum": 0 },
+            "aggregate_stop_microusd": { "type": "integer", "minimum": 0 },
+            "missing_cost_needs_decision": { "type": "boolean" },
+            "retry_cap": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["per_action_preflight_cost_microusd", "per_action_incremental_cap_microusd", "aggregate_stop_microusd", "missing_cost_needs_decision", "retry_cap"],
+          "additionalProperties": false
+        },
+        "review_policy": {
+          "type": "object",
+          "properties": {
+            "verifier_identity": { "$ref": "#/$defs/item" },
+            "verifier_profile": { "$ref": "#/$defs/item" },
+            "frozen_surface_source": { "$ref": "#/$defs/item" },
+            "one_live_claim_per_pr_head": { "type": "boolean" }
+          },
+          "required": ["verifier_identity", "verifier_profile", "frozen_surface_source", "one_live_claim_per_pr_head"],
+          "additionalProperties": false
+        },
+        "merge_policy": {
+          "type": "object",
+          "properties": {
+            "required": { "type": "boolean" },
+            "pr_number": { "type": "integer", "minimum": 1 },
+            "expected_head_sha": { "$ref": "#/$defs/sha" },
+            "expected_base_sha": { "$ref": "#/$defs/sha" },
+            "eligibility_product_verb": { "$ref": "#/$defs/item" }
+          },
+          "required": ["required", "eligibility_product_verb"],
+          "additionalProperties": false
+        },
+        "return_for_decision": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^[A-Z0-9_]+$", "maxLength": 64 } },
+        "completion_condition": { "enum": ["local_preparation_only", "verification_succeeded", "delegated_merge_succeeded"] }
+      },
+      "required": ["control_version", "manifest_version", "control_id", "program_id", "command_profile", "goal", "basis", "capacity", "admission_policy", "retry_cost_policy", "review_policy", "merge_policy", "completion_condition"],
+      "additionalProperties": false
+    },
+    "adjudication": {
+      "type": "object",
+      "properties": {
+        "adjudication_version": { "const": 1 },
+        "reason_code": { "type": "string", "pattern": "^[A-Z0-9_]+$", "maxLength": 64 },
+        "evidence": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/item" } },
+        "prior_state_version": { "type": "integer", "minimum": 1 },
+        "prior_manifest_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "required": ["adjudication_version", "reason_code", "evidence", "prior_state_version", "prior_manifest_digest"],
+      "additionalProperties": false
+    }
+  }
+}

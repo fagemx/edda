@@ -842,6 +842,8 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 |--------|-------------|
 | `--agent AGENT` | Backend that runs the turn: `claude` (default), `pi`, or `codex` |
 | `--task-id ID` | Task-rail id whose brief the ACP prompt is derived from: an ACP dispatch takes prompt, scope, and resume id from the task instead of a prompt file. Only valid with an ACP agent (`acp:*`); paired with a non-ACP agent it is an error (`--task-id is only valid with an ACP agent`), not a silent no-op. Requires the task to be running |
+| `--brief-event-id ID` | Immutable execution-brief event id for a controlled ACP turn. Requires `--brief-digest` and an ACP agent; the pair must match an accepted brief, the task scope, the frozen base, and the live task lease, and the rendered brief replaces the mutable task brief reference |
+| `--brief-digest SHA256` | Immutable execution-brief content digest bound with `--brief-event-id`. Non-ACP dispatch accepts the pair only as an error (`--task-id and immutable brief identity are only valid with an ACP agent`) |
 | `--prompt-file FILE` | Path to the file containing the prompt, read verbatim (required) |
 | `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call. pi and codex resume a prior conversation by repeating the id; claude refuses an id that already exists (`Session ID <id> is already in use`) and needs `--resume` |
 | `--resume` | Continue the conversation `--session-id` names instead of starting a new one (`claude --resume <id>`). claude only — pi and codex resume by repeating `--session-id` alone and refuse this flag. Requires `--session-id` |
@@ -944,6 +946,42 @@ Error: --prompt-file not readable: missing.txt
 Caused by:
     系統找不到指定的檔案。 (os error 2)
 ```
+
+### `edda control`
+
+Durable local control manifests, compare-and-swap state, actions, and receipts.
+A control manifest is compiled under a sealed local authority, projected
+read-only, and advanced one token-bound action at a time. Every effect binds
+the portable repository key and canonical GitHub `owner/repo` sealed at
+compile; delegated merge stays unavailable before its intent
+(`CONTROL_UNAVAILABLE`), because the provider cannot atomically bind an exact
+base and head.
+
+```bash
+edda control authority issue --principal <P> --session <S> --profile strong \
+  --expires-at <RFC3339> --issuer-token-file <FILE> --token-out <FILE>
+edda control compile <FILE> --authority-token-file <FILE>
+edda control status <CONTROL_ID>
+edda control next <CONTROL_ID>
+edda control apply <CONTROL_ID> --token <TOKEN>
+edda control adjudicate <CONTROL_ID> --state-version <N> --decision <FILE> \
+  --authority-token-file <FILE>
+edda control authorize-merge <CONTROL_ID> --source <S> --principal <P> \
+  --session <S> --expires-at <RFC3339> --issuer-token-file <FILE>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `authority issue` | Provision the owner-only local control capability after actor/session/RBAC checks. Its HMAC seal is stored outside the ledger and is never carried in a portable manifest. `--profile flash` is refused: only a strong profile can compile or adjudicate control policy |
+| `compile FILE` | Strong path: atomically accept the immutable brief inputs and one control manifest, failing closed on any validation error. `--session` is correlation only; `--authority-token-file` is the sealed bearer |
+| `status CONTROL_ID` | Read-only complete projection; never mutates the ledger or cleans up artifacts |
+| `next CONTROL_ID` | Read-only next action with a state/target/expiry-bound opaque token, or an explicit unavailability reason (for example `DELEGATED_MERGE_ATOMIC_BASE_PRECONDITION_UNAVAILABLE`) |
+| `apply CONTROL_ID --token TOKEN` | Apply exactly one token-bound local or bounded product action. An expired or replayed token performs zero mutation; a durable pending intent is adopted on recovery instead of re-executed |
+| `adjudicate CONTROL_ID --state-version N --decision FILE` | Strong path: append a versioned, authority-bound adjudication that can supersede a prior generation |
+| `authorize-merge CONTROL_ID` | Bind a sealed host-local merge capability to an exact control subject. It is only usable with a product-readable, digest-validated repository standing rule; otherwise merge remains unavailable |
+
+Exit codes: `0` success, `1` failure (including a refused or unavailable action),
+`2` usage or cannot-judge. `--json` prints exactly one object.
 
 ### `edda verdict`
 

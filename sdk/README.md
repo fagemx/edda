@@ -22,8 +22,8 @@ sdk/
 | Generators (TS + Py) | ready — consume pinned spec on controller handoff |
 | Canon/hash (TS + Py) | implemented, independently; verify all golden fixtures |
 | Transports (MCP/HTTP) | implemented; MCP writes, HTTP read-only, typed timeout/cancel |
-| Contract tests | both languages + cross-language equivalence runner (task/receipt/claim/verify included) |
-| Spec pin | pinned: `a7eaba2cff93e59ceb96d786bbc9f1b4c83dacc2` (sdk/SPEC_PIN.json) |
+| Contract tests | both languages + cross-language equivalence runner (task/receipt/claim/verify plus generated control manifest/intent/receipt types) |
+| Spec pin | pinned: `e96fdbf7361aa8c3f13c4b8dfaeea8b5b4f2e8c8` (sdk/SPEC_PIN.json) |
 | Publication | packages are publishable; **the publish itself needs the operator's registry accounts** — see below |
 
 See `SDK_HANDOFF.md` at the repo root for open controller decisions.

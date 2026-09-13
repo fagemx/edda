@@ -5,6 +5,7 @@ use edda_ledger::{Ledger, TaskLease};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod guided;
 mod manifest;
 mod plan;
 mod runner;
@@ -105,6 +106,8 @@ pub(super) fn scheduler_config(codex_bin: &str) -> ReconcileConfig {
         max_attempts: 3,
         lease_ttl_s: 300,
         codex_bin: PathBuf::from(codex_bin),
+        brief_event_id: None,
+        brief_digest: None,
     }
 }
 
@@ -160,6 +163,8 @@ pub(super) fn scheduler_manifest_fixture() -> anyhow::Result<SchedulerManifestFi
         max_attempts: 4,
         lease_ttl_s: 300,
         codex_bin: codex.clone(),
+        brief_event_id: None,
+        brief_digest: None,
     };
     Ok(SchedulerManifestFixture {
         _store_guard: store_guard,
@@ -237,6 +242,9 @@ pub(super) fn task(id: u64, status: TaskStatus, scope: &[&str]) -> TaskView {
         session_id: None,
         session_agent_kind: None,
         session_attempt: None,
+        session_lease_owner: None,
+        session_brief_event_id: None,
+        session_brief_digest: None,
         failure_reason: None,
         created_ts: "2026-08-16T00:00:00Z".into(),
         updated_ts: "2026-08-16T00:00:00Z".into(),

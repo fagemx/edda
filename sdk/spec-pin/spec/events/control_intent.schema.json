@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "control_intent payload",
+  "description": "Durable sealed intent for an S6a local ledger transition.",
+  "type": "object",
+  "properties": {
+    "control_intent": {
+      "type": "object",
+      "properties": {
+        "intent_version": { "const": 1 },
+        "control_id": { "type": "string", "pattern": "^control_[a-z0-9]+$" },
+        "step_id": { "type": "string", "pattern": "^step_[a-z0-9]+$" },
+        "action_id": { "type": "string", "pattern": "^action_[0-9a-f]{64}$" },
+        "observed_state_version": { "type": "integer", "minimum": 1 },
+        "action_token": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Commitment to the exact opaque token that authorized this durable intent; recovery requires that same token." },
+        "action_kind": { "enum": ["complete", "needs_decision"] },
+        "target": { "$ref": "#/$defs/target" },
+        "created_at": { "type": "string", "minLength": 20, "maxLength": 64 },
+        "seal": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "required": ["intent_version", "control_id", "step_id", "action_id", "observed_state_version", "action_token", "action_kind", "target", "created_at", "seal"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["control_intent"],
+  "additionalProperties": true,
+  "$defs": {
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "control" }, "control_id": { "type": "string", "pattern": "^control_[a-z0-9]+$" } },
+          "required": ["kind", "control_id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "task" }, "task_key": { "type": "string" }, "attempt": { "type": "integer", "minimum": 1 } },
+          "required": ["kind", "task_key", "attempt"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "pull_request" }, "number": { "type": "integer", "minimum": 1 }, "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" } },
+          "required": ["kind", "number", "head_sha"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

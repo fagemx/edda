@@ -24,6 +24,21 @@ pub(super) fn planner_starts_ready_tasks_by_id_subject_to_wip() {
 }
 
 #[test]
+pub(super) fn planner_leaves_acp_targets_to_the_acp_transport() {
+    let mut acp = task(1, TaskStatus::Ready, &["src/acp.rs"]);
+    acp.agent_kind = Some("acp:grok".into());
+    let mut historical = task(2, TaskStatus::Ready, &["src/historical.rs"]);
+    historical.agent_kind = Some("codex-acp".into());
+    assert_eq!(
+        plan_actions(&[acp, historical], &[], &[], "2026-08-16T01:00:00Z", 1, 3,),
+        vec![ReconcileAction::Start {
+            task_id: 2,
+            attempt: 1,
+        }]
+    );
+}
+
+#[test]
 pub(super) fn planner_leaves_live_running_and_resumes_expired_bound_session() {
     let mut live = task(1, TaskStatus::Running, &["src/live.rs"]);
     live.attempts = 1;
@@ -85,6 +100,46 @@ pub(super) fn planner_requeues_expired_unresumable_work_and_stops_at_retry_cap()
                 reason: "retry-cap-exhausted".into(),
             },
         ]
+    );
+}
+
+#[test]
+pub(super) fn planner_does_not_downgrade_controlled_session_or_lease_to_legacy_retry() {
+    let mut ordinary = task(2, TaskStatus::Failed, &["src/ordinary.rs"]);
+    ordinary.attempts = 1;
+    ordinary.failure_reason = Some("ordinary runner failure".into());
+
+    let mut crashed_after_session = task(3, TaskStatus::Running, &["src/session.rs"]);
+    crashed_after_session.attempts = 1;
+    crashed_after_session.session_id = Some("thread-controlled".into());
+    crashed_after_session.session_agent_kind = Some("codex".into());
+    crashed_after_session.session_attempt = Some(1);
+    crashed_after_session.session_brief_event_id = Some("evt_controlled".into());
+    crashed_after_session.session_brief_digest = Some("a".repeat(64));
+    let mut crashed_before_session = task(4, TaskStatus::Running, &["src/lease.rs"]);
+    crashed_before_session.attempts = 1;
+    let controlled_lease = TaskLease {
+        owner: format!(
+            "{}evt_controlled:{}:runner",
+            edda_ledger::task_actions::CONTROLLED_TASK_LEASE_PREFIX,
+            "a".repeat(64)
+        ),
+        ..lease(4, 1, "2026-08-16T00:00:00Z")
+    };
+
+    assert_eq!(
+        plan_actions(
+            &[ordinary, crashed_after_session, crashed_before_session],
+            &[lease(3, 1, "2026-08-16T00:00:00Z"), controlled_lease,],
+            &[],
+            "2026-08-16T01:00:00Z",
+            4,
+            3,
+        ),
+        vec![ReconcileAction::Start {
+            task_id: 2,
+            attempt: 2,
+        }]
     );
 }
 

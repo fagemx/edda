@@ -20,12 +20,30 @@
     "attempt": {
       "type": "integer",
       "minimum": 0
+    },
+    "brief_event_id": {
+      "type": "string",
+      "pattern": "^evt_[a-z0-9]+$",
+      "maxLength": 68
+    },
+    "brief_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "lease_owner": {
+      "type": "string",
+      "minLength": 1
     }
   },
   "required": [
     "task_id"
   ],
   "additionalProperties": true,
+  "dependentRequired": {
+    "brief_event_id": ["brief_digest", "agent_kind", "session_id", "attempt", "lease_owner"],
+    "brief_digest": ["brief_event_id", "agent_kind", "session_id", "attempt", "lease_owner"],
+    "lease_owner": ["brief_event_id", "brief_digest", "agent_kind", "session_id", "attempt"]
+  },
   "anyOf": [
     {
       "required": [
