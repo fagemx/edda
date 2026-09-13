@@ -59,6 +59,18 @@ test('candidate projection deduplicates by session, marks configured runs and ne
   assert.ok(!JSON.stringify(view).includes('registryRoot'));
 });
 
+test('the same session in two registry roots stays two root-scoped candidates', () => {
+  const first = join(tmpdir(), 'manager-dedupe-first'), second = join(tmpdir(), 'manager-dedupe-second'), workspace = join(tmpdir(), 'manager-dedupe-ws');
+  const report: DiscoveryReport = { runs: [
+    { registryRoot: first, sessionId: 's', runId: null, instanceId: null, state: 'idle', live: false, source: 'recorded', workspace, lastProgressAt: null, reason: 'offline' },
+    { registryRoot: second, sessionId: 's', runId: null, instanceId: null, state: 'idle', live: false, source: 'recorded', workspace, lastProgressAt: null, reason: 'offline' },
+  ], failures: [] };
+  const view = projectCandidates(report, []);
+  assert.equal(view.candidates.length, 2);
+  assert.deepEqual(view.candidates.map((candidate) => candidate.id).sort(), [
+    candidateId({ registryRoot: first, sessionId: 's' }), candidateId({ registryRoot: second, sessionId: 's' })].sort());
+});
+
 test('candidate identity matches configuration on (registry root, session), not session id alone', async () => {
   const root = mkdtempSync(join(tmpdir(), 'manager-identity-root-')), other = mkdtempSync(join(tmpdir(), 'manager-identity-other-')), workspace = mkdtempSync(join(tmpdir(), 'manager-identity-ws-'));
   const config = parseConfig({ version: 1, projects: [{ id: 'p', name: 'P' }], agents: [

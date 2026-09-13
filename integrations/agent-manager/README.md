@@ -117,8 +117,10 @@ Bounds and safety:
 - A candidate whose run is already selected shows **已加入管理** with its agent id
   and cannot be added twice. That match uses the same `(registryRoot, sessionId)` identity
   `config.json` enforces, so the same session id under a different configured root is not
-  mislabelled. A run registered from two configured roots is shown once,
-  preferring the live registration. Offline or stopped runs are shown as recorded
+  mislabelled. A managed record and its live session in the same registry root are shown
+  once, preferring the live registration; the same session id present under two configured
+  roots is two root-scoped candidates, because that is the identity configuration and
+  candidate ids use. Offline or stopped runs are shown as recorded
   evidence with a reason, never as proof of completion. If one root cannot be listed,
   its failure is reported and every other root still returns its candidates.
 

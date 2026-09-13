@@ -10,9 +10,12 @@ export function rootLabel(registryRoot: string): string {
   return hash(registryRoot).slice(0, 12);
 }
 // Pi session identity when a run has one; otherwise the managed run id. A live
-// session and its recorded managed run share one identity so they merge.
+// session and its recorded managed run share this identity inside their registry
+// root. A run is scoped to its root — the same key `config.json` and
+// `candidateId` use — so the same session under another root is a different
+// registration, not a duplicate to merge.
 function identity(run: DiscoveredRun): string {
-  return run.sessionId ? `s:${run.sessionId}` : `r:${run.runId ?? candidateId(run)}`;
+  return `${run.registryRoot}\0${run.sessionId ? `s:${run.sessionId}` : `r:${run.runId ?? candidateId(run)}`}`;
 }
 function merge(preferred: DiscoveredRun, other: DiscoveredRun): DiscoveredRun {
   return { ...preferred, sessionId: preferred.sessionId ?? other.sessionId, runId: preferred.runId ?? other.runId,
@@ -20,9 +23,10 @@ function merge(preferred: DiscoveredRun, other: DiscoveredRun): DiscoveredRun {
     lastProgressAt: preferred.lastProgressAt ?? other.lastProgressAt };
 }
 // The same run can appear both as a live session and as recorded managed
-// inventory, and the same session can be registered under more than one
-// explicitly configured root. Keep one run per identity, preferring the live
-// registration so an operator never sees a stale duplicate.
+// inventory. Keep one run per (registry root, session/run) identity, preferring
+// the live registration so an operator never sees a stale duplicate. A session
+// present in two configured roots stays two root-scoped candidates, because that
+// is exactly the identity configuration and candidate ids already use.
 export function dedupeRuns(report: DiscoveryReport): DiscoveredRun[] {
   const byIdentity = new Map<string, DiscoveredRun>();
   for (const run of report.runs) {

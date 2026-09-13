@@ -34,7 +34,10 @@ export class CandidatePanel {
     heading.append(this.title, this.refreshButton);
     root.append(heading, el('p', '只列出本機已明確設定來源中的 Pi 執行；唯讀顯示，加入管理後仍需自行交辦與綁定。', 'muted'), this.feedback, this.list);
   }
-  update(overview: Overview): void { this.overview = overview; if (this.view) this.render(); }
+  // Do not rebuild the list under an open form: a periodic overview refresh would
+  // reset the operator's focus mid-edit. The captured draft still restores every
+  // typed field when the form is rebuilt after a failure or an explicit refresh.
+  update(overview: Overview): void { this.overview = overview; if (this.view && !this.openForm) this.render(); }
   async refresh(): Promise<void> {
     if (this.loading) return;
     this.loading = true;
@@ -83,12 +86,17 @@ export class CandidatePanel {
     if (draft && [...role.options].some((option) => option.value === draft.role)) role.value = draft.role;
     const submit = el('button', '確認加入', 'primary'); submit.type = 'submit'; submit.disabled = this.busy || !project.value;
     const cancel = el('button', '取消'); cancel.type = 'button'; cancel.addEventListener('click', () => { this.openForm = ''; this.draft = null; this.render(); });
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
+    // Capture every edit, not just the submit: a periodic overview refresh or a
+    // failed registration rebuilds this form, and the operator's typed values
+    // must come back with it.
+    const capture = (): CandidateFormFields => {
       const fields: CandidateFormFields = { name: nameInput.value, id: idInput.value, projectId: project.value, role: role.value as 'manager' | 'worker' };
       this.draft = { candidateId: candidate.id, ...fields };
-      void this.register(candidate, fields);
-    });
+      return fields;
+    };
+    nameInput.addEventListener('input', capture); idInput.addEventListener('input', capture);
+    project.addEventListener('change', capture); role.addEventListener('change', capture);
+    form.addEventListener('submit', (event) => { event.preventDefault(); void this.register(candidate, capture()); });
     for (const field of [nameInput, idInput, project, role]) { const label = el('label', field.getAttribute('aria-label') ?? '', 'candidate-field'); label.append(field); form.append(label); }
     const actions = el('div', '', 'candidate-actions'); actions.append(submit, cancel); form.append(actions);
     form.append(el('p', `加入後會出現在左側清單，可用既有「登記執行 session」綁定到工作；不會自動交辦或喚醒。`, 'muted'));

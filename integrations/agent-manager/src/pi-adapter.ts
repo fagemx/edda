@@ -107,6 +107,7 @@ export class ChannelAdapter implements PiAdapter {
       if (typeof listManaged === 'function') {
         try {
           const listing = record(await listManaged(root, { limit: MAX_MANAGED_RUNS })), runs = Array.isArray(listing.runs) ? listing.runs : [];
+          if (listing.hasMore === true || runs.length > MAX_MANAGED_RUNS) problems.push(`此來源的管理執行清單達到 ${MAX_MANAGED_RUNS} 筆上限；未顯示的項目未列入候選。`);
           for (const raw of runs.slice(0, MAX_MANAGED_RUNS)) {
             const value = record(raw), runId = str(value.runId, 64);
             if (!runId || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(runId)) continue;
@@ -122,15 +123,18 @@ export class ChannelAdapter implements PiAdapter {
         try {
           const rows = await listSessions(root);
           if (!Array.isArray(rows)) problems.push('此來源的 session 清單格式不正確；未採用任何項目。');
-          else for (const raw of rows.slice(0, MAX_DISCOVERY_ROWS)) {
-            const value = record(raw), sessionId = str(value.sessionId, 200);
-            const live = value.live === true, cwd = value.cwd;
-            if (!sessionId || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(sessionId)) continue;
-            const reason = live ? null : value.state === 'stopped' ? '上次紀錄為已停止；目前沒有即時連線。' : '目前沒有可連線的註冊擁有者；不代表工作已完成。';
-            found.push({ registryRoot: root, sessionId, runId: null, instanceId: typeof value.instanceId === 'string' ? value.instanceId : null,
-              state: discoveryStates.includes(value.state as RuntimeState) ? value.state as RuntimeState : value.state === 'unreachable' ? 'unavailable' : 'unknown',
-              live, source: live ? 'live' : 'recorded', workspace: typeof cwd === 'string' && isAbsolute(cwd) ? cwd : null,
-              lastProgressAt: date(value.lastProgressAt), reason });
+          else {
+            if (rows.length > MAX_DISCOVERY_ROWS) problems.push(`此來源的 session 清單超過 ${MAX_DISCOVERY_ROWS} 筆顯示上限；未顯示的項目未列入候選。`);
+            for (const raw of rows.slice(0, MAX_DISCOVERY_ROWS)) {
+              const value = record(raw), sessionId = str(value.sessionId, 200);
+              const live = value.live === true, cwd = value.cwd;
+              if (!sessionId || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(sessionId)) continue;
+              const reason = live ? null : value.state === 'stopped' ? '上次紀錄為已停止；目前沒有即時連線。' : '目前沒有可連線的註冊擁有者；不代表工作已完成。';
+              found.push({ registryRoot: root, sessionId, runId: null, instanceId: typeof value.instanceId === 'string' ? value.instanceId : null,
+                state: discoveryStates.includes(value.state as RuntimeState) ? value.state as RuntimeState : value.state === 'unreachable' ? 'unavailable' : 'unknown',
+                live, source: live ? 'live' : 'recorded', workspace: typeof cwd === 'string' && isAbsolute(cwd) ? cwd : null,
+                lastProgressAt: date(value.lastProgressAt), reason });
+            }
           }
         } catch { problems.push('此來源的 session 清單目前無法讀取；其他來源不受影響。'); }
       }
