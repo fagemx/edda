@@ -103,16 +103,38 @@ fn matcher(patterns: &[&str]) -> Result<GlobSet> {
 }
 
 /// R22's engine table. Opus is authoritative only through Claude Code (R27);
+/// official deepseek-flash is authoritative only on the shipping surface, only
+/// through pi, and only when the request names the official provider;
 /// glm-5.3-flash is authoritative on the internal-tool surface and SHADOW
 /// elsewhere; any engine the table does not name is a checklist-type engine
 /// everywhere, so an unknown or unnamed model is never authoritative.
-fn is_authoritative(engine: &str, transport: &str, surface: Surface) -> bool {
+fn is_authoritative(
+    engine: &str,
+    transport: &str,
+    surface: Surface,
+    official_provider: bool,
+) -> bool {
     match engine {
         "claude-opus-5" => transport == "claude-code",
         "gpt-5.6-sol" => true,
         "glm-5.3-flash" => surface == Surface::InternalTool,
+        // The qualification was measured on the official DeepSeek provider; a
+        // router is a substitution the table cannot inherit (#1187).
+        "deepseek-flash" => official_provider && transport == "pi" && surface == Surface::Shipping,
         _ => false,
     }
+}
+
+/// Whether a request names the official DeepSeek provider rather than a router.
+/// `canonical_model_id` strips the provider segment, so `deepseek/deepseek-flash`
+/// and `openrouter/deepseek/deepseek-flash` share one canonical id and the id
+/// alone cannot tell them apart. A request that names no provider is left to
+/// pi, which resolves it to the official provider.
+fn names_official_provider(model_requested: &str) -> bool {
+    model_requested
+        .trim()
+        .split_once('/')
+        .is_none_or(|(provider, _)| provider.eq_ignore_ascii_case("deepseek"))
 }
 
 /// The engines R22 makes authoritative for `surface`. This is the authoritative
@@ -120,6 +142,9 @@ fn is_authoritative(engine: &str, transport: &str, surface: Surface) -> bool {
 /// non-author member of it to be reviewable (#926, absorbed into GH-999).
 fn authoritative_pool(surface: Surface) -> Vec<&'static str> {
     let mut pool = vec!["claude-opus-5 (only via Claude Code)", "gpt-5.6-sol"];
+    if surface == Surface::Shipping {
+        pool.push("deepseek-flash (only via pi on the official `deepseek` provider)");
+    }
     if surface == Surface::InternalTool {
         pool.push("glm-5.3-flash");
     }
@@ -152,7 +177,12 @@ pub(crate) fn assess(
     let engine =
         canonical_model_id(model_requested).unwrap_or_else(|| model_requested.trim().to_owned());
     Ok(Qualification {
-        authoritative: is_authoritative(&engine, transport, surface),
+        authoritative: is_authoritative(
+            &engine,
+            transport,
+            surface,
+            names_official_provider(model_requested),
+        ),
         surface,
         deciding_path,
         engine,
@@ -343,12 +373,55 @@ mod tests {
                 assessed(&[path], "openrouter/z-ai/glm-5.3-flash", "pi").authoritative,
                 internal_tool
             );
+            // Official deepseek-flash only on the shipping surface, only via
+            // pi, and only through the official provider (#1187).
+            let shipping = path == "crates/edda-core/src/lib.rs";
+            assert_eq!(
+                assessed(&[path], "deepseek/deepseek-flash", "pi").authoritative,
+                shipping
+            );
             for unknown in ["claude-sonnet-5", "inherited", "", "totally-made-up"] {
                 assert!(
                     !assessed(&[path], unknown, "claude-code").authoritative,
                     "{unknown}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn r22_official_deepseek_flash_is_shipping_only_pi_only_and_provider_pinned() {
+        let shipping = ["crates/edda-cli/src/cmd_review/mod.rs"];
+        // The measured form — official provider, pi transport — is
+        // authoritative on the shipping surface and nowhere stricter.
+        let q = assessed(&shipping, "deepseek/deepseek-flash", "pi");
+        assert_eq!(q.engine, "deepseek-flash");
+        assert!(q.authoritative);
+        for path in [
+            "REVIEW.md",
+            ".github/workflows/ci.yml",
+            "docs/reference/cli.md",
+        ] {
+            assert!(
+                !assessed(&[path], "deepseek/deepseek-flash", "pi").authoritative,
+                "{path}"
+            );
+        }
+        // A bare request is left to pi, which resolves it to the official
+        // provider, so it keeps the qualification.
+        assert!(assessed(&shipping, "deepseek-flash", "pi").authoritative);
+        // The same canonical id through a router is a substitution the table
+        // cannot inherit, on every surface.
+        let routed = assessed(&shipping, "openrouter/deepseek/deepseek-flash", "pi");
+        assert_eq!(routed.engine, "deepseek-flash");
+        assert!(!routed.authoritative);
+        // Authority was measured on pi, so another transport does not inherit
+        // it even on shipping.
+        for transport in ["claude-code", "codex", "openrouter", ""] {
+            assert!(
+                !assessed(&shipping, "deepseek/deepseek-flash", transport).authoritative,
+                "{transport}"
+            );
         }
     }
 
@@ -395,7 +468,7 @@ mod tests {
         // non-author authoritative engine to be nameable from the brief alone.
         for text in [&authoritative, &checklist_type] {
             assert!(text.contains(
-                "Authoritative engines for this surface (R22 engine table): claude-opus-5 (only via Claude Code), gpt-5.6-sol."
+                "Authoritative engines for this surface (R22 engine table): claude-opus-5 (only via Claude Code), gpt-5.6-sol, deepseek-flash (only via pi on the official `deepseek` provider)."
             ));
         }
         assert!(assessed(&["docs/reference/cli.md"], "glm-5.3-flash", "pi")
