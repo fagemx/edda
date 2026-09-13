@@ -3,6 +3,22 @@ import type { ContinuityReference } from './continuation-contracts.js';
 
 export interface WorkBinding { id: string; projectId: string; taskId: number; workspace: string; ownerAgentId: string }
 export type WorkStage = 'uninitialized' | 'ready' | 'assigned' | 'executing' | 'awaiting_delivery' | 'delivered' | 'accepted' | 'blocked';
+// Native, operator-facing phase (GH1181). Derived from the task rail, delivery
+// receipts, observed sessions and owner-inbox events. It is shown before the
+// manual `stage` and never lets `task running` imply that a child is working.
+export type WorkPhase = 'uninitialized' | 'ready' | 'assigned' | 'working' | 'waiting' | 'interrupted' | 'delivered' | 'accepted' | 'blocked' | 'failed';
+// Wait target. `'none'` means the work is provably not waiting on another party
+// (it is working, or it reached a terminal phase). `null` means this projection
+// will not name a target, and `waitEvidence` says which case it is: the session
+// relation is unlinked/unavailable, or the recorded stage leaves the next actor
+// to the operator (uninitialized/ready, a delivery with no reviewer bound, an
+// interruption). A role is never guessed. Native terminal facts name their own
+// target: `task failed` is `'none'`, `delivery failed` is `'user_decision'`.
+// `'tool'` is reserved for a genuine wait-on-tool case; no current input path
+// produces it (a live child using a tool is `working`, which is `'none'`).
+// `'worker'` is the executing party, which a manager-role controller can also be
+// when it executes the work directly; `'verifier'` is the reviewing party.
+export type WorkWaitingFor = 'worker' | 'verifier' | 'dependency' | 'user_decision' | 'tool' | 'none' | null;
 export interface WorkInstruction { id: string; message: string; operationId: string; acknowledgedAt: string | null; evidence: string | null }
 export interface WorkHistory { id: string; kind: string; at: string; summary: string }
 export interface WorkSessionBinding {
@@ -13,6 +29,7 @@ export interface WorkSessionBinding {
 export interface WorkView {
   id: string; projectId: string; taskId: number; title: string; taskStatus: string; taskReceipt: string | null;
   ownerAgentId: string; assigneeAgentId: string | null; nextStep: string; stage: WorkStage; revision: string;
+  phase: WorkPhase; waitingFor: WorkWaitingFor; waitEvidence: string | null;
   evidence: string | null; waitingReason: string | null; pendingInstruction: WorkInstruction | null;
   deliveryOperationId: string | null; deliveryStatus: OperationStatus | null;
   updatedAt: string | null; error: string | null; history: WorkHistory[];

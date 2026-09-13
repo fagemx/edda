@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { ManagerError, type AgentBinding } from './contracts.js';
+import { ManagerError, type AgentBinding, type AgentView, type RuntimeState } from './contracts.js';
 import { hash, object, parseConfig, parseSend, selectionRevision, slug, text, uuid } from './config.js';
 import { EddaWorkflowLedger, WorkflowLocks, type CanonicalTask, type WorkflowLedger } from './edda-workflow.js';
 import type { AgentManager } from './manager.js';
-import type { WorkAction, WorkBinding, WorkView, WorksView } from './workflow-contracts.js';
+import type { OwnerInboxEvent, OwnerInboxKind } from './owner-inbox-contracts.js';
+import type { WorkAction, WorkBinding, WorkPhase, WorkSessionBinding, WorkView, WorkWaitingFor, WorksView } from './workflow-contracts.js';
 
 const PREFIX = 'edda.manager-work.v1 ';
 interface WorkEvent { version: 1; taskKey: string; previous: string | null; action: WorkAction; fingerprint: string; target: AgentBinding | null; transportStoreId: string; priorFailedOperation: string | null }
@@ -39,8 +40,126 @@ export function parseWorkAction(input: unknown): WorkAction {
 function empty(binding: WorkBinding): WorkView {
   return { id: binding.id, projectId: binding.projectId, taskId: binding.taskId, title: `Edda #${binding.taskId}`, taskStatus: 'unknown', taskReceipt: null,
     ownerAgentId: binding.ownerAgentId, assigneeAgentId: null, nextStep: '設定下一步並開始追蹤。', stage: 'uninitialized', revision: '', evidence: null,
+    phase: 'uninitialized', waitingFor: null, waitEvidence: null,
     waitingReason: null, pendingInstruction: null, deliveryOperationId: null, deliveryStatus: null, updatedAt: null, error: null, history: [], lastActionId: null, confirmedActionId: null, sessions: [] };
 }
+// --- Native phase projection (GH1181) ---------------------------------------
+// The `manager-work` ledger records what a human or agent *said*; the native
+// task rail, delivery receipts, observed sessions and owner-inbox events record
+// what is *observed*. `phase`/`waitingFor` are semantic and come from those
+// native sources; heartbeat, source and staleness stay process liveness and are
+// never folded into the wait reason.
+const INTERRUPTING_INBOX: readonly OwnerInboxKind[] = ['interrupted', 'provider_error', 'unavailable', 'overdue'];
+const PROGRESS_STATES: readonly RuntimeState[] = ['running', 'executing_tool'];
+const MAX_WAIT_EVIDENCE = 300;
+export interface NativeWorkInputs { task: CanonicalTask; view: WorkView; agents: AgentView[]; inbox: OwnerInboxEvent[] }
+export interface NativeWorkProgress { phase: WorkPhase; waitingFor: WorkWaitingFor; waitEvidence: string | null }
+interface BoundSession { session: WorkSessionBinding; agent: AgentView | null }
+/** A binding is only this session when the observed agent still carries its
+ *  selection revision, transport and session id — the identity rule the owner
+ *  inbox already applies. Anything else is `unlinked` and never live evidence. */
+function linkedAgent(view: WorkView, agents: AgentView[], session: WorkSessionBinding): AgentView | null {
+  const agent = agents.find(a => a.id === session.agentId && a.projectId === view.projectId);
+  if (!agent || agent.selectionRevision !== session.selectionRevision || agent.transport !== session.transport) return null;
+  return agent.sessionEvidence?.sessionId === session.sessionId ? agent : null;
+}
+const progressing = (agent: AgentView | null): boolean => !!agent && agent.source === 'live' && !agent.stale && PROGRESS_STATES.includes(agent.state);
+const observedAs = (agent: AgentView | null, state: RuntimeState): boolean => !!agent && agent.source === 'live' && !agent.stale && agent.state === state;
+/** Wait target from the recorded role chain. A missing relation resolves to
+ *  `null` with an `unlinked` evidence line — never to a guessed role. */
+interface PendingSide { side: WorkWaitingFor; evidence: string | null; session: BoundSession | null }
+function pendingSide(view: WorkView, bound: BoundSession[], agents: AgentView[]): PendingSide {
+  if (view.stage === 'uninitialized') return { side: null, evidence: 'ledger:uninitialized', session: null };
+  if (view.stage === 'ready') return { side: null, evidence: 'ledger:ready（尚未指派執行者）', session: null };
+  if (view.stage === 'accepted') return { side: 'none', evidence: 'ledger:accepted', session: null };
+  if (view.stage === 'blocked') return { side: 'dependency', evidence: view.waitingReason ? `ledger:blocked ${view.waitingReason}` : 'ledger:blocked', session: null };
+  const reviewer = bound.find(b => b.session.role === 'reviewer');
+  if (view.stage === 'delivered') return reviewer
+    ? { side: 'verifier', evidence: `session:${reviewer.session.agentId}/reviewer${reviewer.agent ? '' : '（unlinked）'}`, session: reviewer }
+    : { side: null, evidence: 'ledger:delivered（未登記審查 session；等待原負責人驗收）', session: null };
+  const executor = bound.find(b => b.session.agentId === view.assigneeAgentId && b.session.role !== 'reviewer') ?? bound.find(b => b.session.role === 'worker');
+  if (executor) return { side: 'worker', evidence: `session:${executor.session.agentId}/${executor.session.role}${executor.agent ? '' : '（unlinked）'}`, session: executor };
+  const assignee = view.assigneeAgentId ? agents.find(a => a.id === view.assigneeAgentId && a.projectId === view.projectId) : undefined;
+  if (assignee) return { side: 'worker', evidence: `unlinked:assignee ${assignee.id}/${assignee.role} 沒有 session 綁定`, session: null };
+  return { side: null, evidence: view.assigneeAgentId ? `unlinked:${view.assigneeAgentId} 不在已選取的代理中` : 'unlinked:沒有可判定的執行角色', session: null };
+}
+export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress {
+  const { task, view, agents, inbox } = input;
+  const parts: string[] = [];
+  const note = (value: string | null | undefined): void => { if (value) parts.push(value); };
+  const finish = (phase: WorkPhase, waitingFor: WorkWaitingFor): NativeWorkProgress =>
+    ({ phase, waitingFor, waitEvidence: parts.length ? parts.join(' · ').slice(0, MAX_WAIT_EVIDENCE) : null });
+
+  const bound: BoundSession[] = view.sessions.filter(s => !s.unboundAt).map(session => ({ session, agent: linkedAgent(view, agents, session) }));
+  const busy = bound.filter(b => progressing(b.agent));
+  const pending = pendingSide(view, bound, agents);
+  // Only the session the work is actually waiting on can interrupt the hand-off;
+  // a stopped session in another role is liveness, not this work's interruption.
+  const pendingStopped = pending.session?.agent?.state === 'stopped';
+
+  if (task.status === 'done') { note('task:done（原生任務已完成）'); return finish('accepted', 'none'); }
+
+  // An interruption is a native signal, but only while it is fresher than the
+  // last recorded manual action; a session observed after it supersedes it.
+  const ledgerAt = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
+  const interruption = inbox.filter(e => INTERRUPTING_INBOX.includes(e.kind) && Number.isFinite(Date.parse(e.at)) &&
+    (!Number.isFinite(ledgerAt) || Date.parse(e.at) > ledgerAt)).sort((a, b) => b.at.localeCompare(a.at))[0];
+  if (busy.length) {
+    // Only a live, non-stale session that is running (or using a tool) is work.
+    // A child that is working is not waiting on the operator, so the wait target
+    // is `none`; the tool call itself stays a process fact shown separately.
+    const first = busy[0]!;
+    note(`session:${first.session.agentId}/${first.session.role}:${first.agent?.state ?? 'unknown'}`);
+    if (busy.length > 1) note(`同時有 ${busy.length} 個進行中的 session`);
+    return finish('working', 'none');
+  }
+  const waitingUser = bound.find(b => observedAs(b.agent, 'waiting_user'));
+  if (waitingUser) { note(`session:${waitingUser.session.agentId}/${waitingUser.session.role}:waiting_user`); return finish('waiting', 'user_decision'); }
+  // Terminal native and delivery facts are decided before a session-liveness stop
+  // can override them, so a delivered/accepted/blocked/failed work keeps its true
+  // phase and its pending hand-off.
+  if (task.status === 'failed') { note('task:failed（原生任務已失敗）'); return finish('failed', 'none'); }
+  if (task.status === 'blocked') { note('task:blocked（原生任務已阻塞）'); return finish('blocked', 'dependency'); }
+  if (view.deliveryStatus === 'failed') { note('delivery:failed'); note(view.waitingReason?.slice(0, 160)); return finish('failed', 'user_decision'); }
+  if (view.stage === 'accepted') { note('ledger:accepted（原生任務狀態尚未更新）'); return finish('accepted', 'none'); }
+  if (view.stage === 'delivered') {
+    // `delivered` means the work now waits on the verifier (or the owner when no
+    // reviewer is bound). A stopped verifier is a liveness fact shown separately,
+    // not a new interruption: the pending hand-off is unchanged.
+    note(pending.evidence); note(deliveryNote(view));
+    return finish('delivered', pending.side);
+  }
+  if (view.stage === 'blocked') { note(pending.evidence); return finish('blocked', 'dependency'); }
+  if (view.stage === 'ready') { note(pending.evidence); return finish('ready', null); }
+  if (view.stage === 'uninitialized') { note(pending.evidence); return finish('uninitialized', null); }
+  // A live, non-stale progressing session is not an interruption, and a
+  // delivered/accepted/blocked/failed work has already been decided above: the
+  // recorded inbox interruption applies only to an active hand-off
+  // (assigned / executing / awaiting_delivery). A liveness event such as
+  // `unavailable` for an already-delivered work is liveness, not a new phase —
+  // otherwise the wired OwnerInbox `unavailable` row would override `delivered`.
+  if (interruption) {
+    note(`inbox:${interruption.kind} @ ${interruption.at}`);
+    note(interruption.summary.slice(0, 160));
+    note(pending.evidence);
+    return finish('interrupted', null);
+  }
+  // assigned / executing / awaiting_delivery: the task rail is not asked to
+  // imply that a child works — only the observed session decides that above.
+  // A stopped session here interrupts only the role this work is waiting on, and
+  // the wait target is preserved. Source, staleness, heartbeat and last progress
+  // stay separate process-liveness fields.
+  note(pending.evidence); note(deliveryNote(view));
+  for (const b of bound) note(`observation:${b.session.agentId}/${b.session.role}:${b.agent?.state ?? 'unlinked'}`);
+  if (pendingStopped && pending.session) {
+    note(`session:${pending.session.session.agentId}/${pending.session.session.role}:stopped`);
+    note(pending.session.agent?.reason?.slice(0, 160));
+    return finish('interrupted', pending.side);
+  }
+  const waiting = view.stage !== 'assigned' || view.deliveryStatus === 'started' || view.deliveryStatus === 'settled';
+  return finish(waiting ? 'waiting' : 'assigned', pending.side);
+}
+function deliveryNote(view: WorkView): string { return view.deliveryStatus ? `delivery:${view.deliveryStatus}` : 'delivery:沒有交辦回執'; }
 function apply(view: WorkView, action: WorkAction, at: string, target: AgentBinding | null): void {
   switch (action.kind) {
     case 'attach_continuity': view.continuity = action.reference; break;
@@ -83,12 +202,14 @@ export class WorkManager {
   async list(): Promise<WorksView> {
     const bindings = this.manager.config.works ?? [];
     if (!this.refreshing && !this.closing) {
-      let index = 0;
+      let index = 0, snapshot: AgentView[] | undefined;
       const worker = async () => { while (index < bindings.length && !this.closing) {
         const binding = bindings[index++]!;
         const cached = this.cache.get(binding.id);
         if (cached && Date.now() - cached.at < 10000) continue;
-        try { await this.read(binding); }
+        // One native observation snapshot per pass, not one full overview() per work.
+        snapshot ??= this.manager.overview().agents;
+        try { await this.read(binding, snapshot); }
         catch (error) {
           const view = { ...(cached?.view ?? empty(binding)), error: error instanceof ManagerError ? error.message : '此工作的 Edda 紀錄暫時無法讀取。' };
           this.cache.set(binding.id, { at: Date.now(), view });
@@ -103,11 +224,11 @@ export class WorkManager {
     return { works: bindings.map((b) => this.cache.get(b.id)?.view ?? { ...empty(b), error: '正在取得此工作的 Edda 紀錄。' }), generatedAt: new Date().toISOString() };
   }
   async stop(): Promise<void> { this.closing = true; await Promise.allSettled([...this.queue.values(), ...this.reads.values(), ...(this.refreshing ? [this.refreshing] : [])]); }
-  private async read(binding: WorkBinding): Promise<ReadWork> {
+  private async read(binding: WorkBinding, agents?: AgentView[]): Promise<ReadWork> {
     const pending = this.reads.get(binding.id); if (pending) return pending;
-    const promise = this.doRead(binding).finally(() => this.reads.delete(binding.id)); this.reads.set(binding.id, promise); return promise;
+    const promise = this.doRead(binding, agents).finally(() => this.reads.delete(binding.id)); this.reads.set(binding.id, promise); return promise;
   }
-  private async doRead(binding: WorkBinding): Promise<ReadWork> {
+  private async doRead(binding: WorkBinding, agents?: AgentView[]): Promise<ReadWork> {
     const [task, notes] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding)]);
     const events: ReadWork['events'] = [];
     for (const note of notes) {
@@ -163,6 +284,12 @@ export class WorkManager {
         else if (op?.status === 'failed') view.waitingReason = op.notice;
       }
     }
+    // Derive the operator-facing phase last: it reads the native task rail,
+    // delivery receipt, observed sessions and recorded owner-inbox events, so a
+    // fresher native signal overrides a stale manual stage/waiting reason.
+    const native = deriveWorkProgress({ task, view, agents: agents ?? this.manager.overview().agents,
+      inbox: this.manager.store.inboxEvents(view.id, binding.projectId, binding.taskId, 201) });
+    view.phase = native.phase; view.waitingFor = native.waitingFor; view.waitEvidence = native.waitEvidence;
     this.cache.set(binding.id, { at: Date.now(), view }); return { task, events: ordered, view };
   }
   async continuationSnapshot(id: string): Promise<{ taskKey: string; view: WorkView; actions: WorkAction[] }> {
