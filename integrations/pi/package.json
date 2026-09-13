@@ -1,9 +1,11 @@
 {
   "name": "@edda/pi-session-channel",
-  "version": "0.7.0",
+  "version": "0.8.0",
+  "bin": { "edda-pi": "./cli.mjs" },
+  "files": ["*.mjs", "*.ps1", "!*.test.mjs", "!*smoke*.mjs", "getting-started.md"],
   "private": true,
   "type": "module",
   "engines": { "node": ">=24" },
   "pi": { "extensions": ["./extension.mjs"] },
-  "scripts": { "test": "node --test *.test.mjs" }
+  "scripts": { "test": "node --test *.test.mjs", "test:package": "node package-smoke.mjs" }
 }

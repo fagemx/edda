@@ -9,9 +9,9 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { installRuntime, verifyRelease, rpcFrames, managedDir, alive } from './managed-store.mjs';
-import { launchManaged, managedStatus, stopManaged, resumeManaged } from './managed-client.mjs';
+import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation } from './managed-client.mjs';
 import { requestSession } from './client.mjs';
-import { readJson } from './store.mjs';
+import { readJson, writeJson } from './store.mjs';
 import { listInbox } from './inbox-manager.mjs';
 
 const exec = promisify(execFile);
@@ -81,6 +81,20 @@ test('CLI launch survives client exit; duplicate identity, authenticated stop an
   assert.equal((await managedStatus(f.registry, f.runId)).live, true);
   const before = await requestSession(f.registry, state.sessionId, '/conversation?limit=20');
   assert.equal((await stopManaged(f.registry, f.runId)).status, 'stopped');
+  // Real Pi often returns unconfirmed at launch, then settles asynchronously.
+  // The fixture settles synchronously, so preserve that real launch-copy shape.
+  const stateFile = join(managedDir(f.registry, f.runId), 'state.json');
+  const saved = readJson(stateFile);
+  writeJson(stateFile, { ...saved, initialReceipt: { id: saved.initialReceipt.id, status: 'unconfirmed' } });
+  const stopped = await managedStatus(f.registry, f.runId);
+  assert.equal(stopped.live, false);
+  assert.equal(stopped.initialReceipt.status, 'settled');
+  assert.equal(stopped.initialReceipt.live, false);
+  const offline = await managedConversation(f.registry, f.runId);
+  assert.equal(offline.evidenceSource, 'persisted_session');
+  assert.equal(offline.conversation.headCursor, before.headCursor);
+  assert.deepEqual(offline.conversation.entries, before.entries);
+  assert.equal((await managedStatus(f.registry, f.runId)).live, false);
   await writeFile(join(f.root, 'pi/package.json'), JSON.stringify({ type: 'module', name: '@earendil-works/pi-coding-agent', version: 'fixture-updated' }));
   const resumed = await resumeManaged(f.registry, f.runId);
   assert.equal(resumed.sessionId, state.sessionId);
@@ -115,6 +129,11 @@ test('missing session file prevents recovery without spawning a replacement', as
   const source = await readFile(launched.sessionFile, 'utf8');
   await rm(launched.sessionFile);
   await assert.rejects(resumeManaged(f.registry, f.runId), /ENOENT/);
+  await assert.rejects(managedConversation(f.registry, f.runId), /ENOENT/);
+  const entries = source.split('\n');
+  entries[0] = JSON.stringify({ ...JSON.parse(entries[0]), id: randomUUID() });
+  await writeFile(launched.sessionFile, entries.join('\n'));
+  await assert.rejects(managedConversation(f.registry, f.runId), /identity/);
   await writeFile(launched.sessionFile, source);
 });
 

@@ -11,10 +11,14 @@ import { listInbox, readInbox, acknowledgeInbox, recordAuthorization, revokeAuth
 import { wakeCapability } from './inbox-store.mjs';
 import { readBoundedFile } from './compose-sources.mjs';
 import { installRuntime } from './managed-store.mjs';
-import { launchManaged, managedStatus, stopManaged, resumeManaged } from './managed-client.mjs';
+import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation } from './managed-client.mjs';
 import { startSupervisor, supervisorStatus, stopSupervisor } from './supervisor-client.mjs';
+import { runtimeInfo, listManagedRuns } from './activation.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
+  edda-pi --version
+  edda-pi runtime-info                 installed version, capabilities and guide path (read-only)
+  edda-pi runs [--limit 50] [--after RUN_ID]   recorded managed runs, including stopped ones
   node integrations/pi/cli.mjs list
   node integrations/pi/cli.mjs status SESSION_ID
   node integrations/pi/cli.mjs send SESSION_ID --message TEXT [--id UUID] [--sender codex] [--mode followUp|steer]
@@ -48,6 +52,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs runtime-install
   node integrations/pi/cli.mjs launch --project PATH [--pi-entry FILE] [--provider NAME] [--model NAME] [--thinking LEVEL] [--prompt-file FILE] [--run-id UUID] [--extension FILE] [--agent-dir PATH] [--no-tools]
   node integrations/pi/cli.mjs run-status RUN_ID
+  node integrations/pi/cli.mjs run-conversation RUN_ID [--after ENTRY_ID] [--limit 20]
   node integrations/pi/cli.mjs run-stop RUN_ID [--abort]
   node integrations/pi/cli.mjs run-resume RUN_ID
   node integrations/pi/cli.mjs supervisor-start --config FILE [--id UUID]
@@ -58,11 +63,16 @@ JSON stdout; diagnostics stderr. EDDA_PI_CHANNEL_DIR overrides the private root.
 Supervision commands are tools for an authorized controller, not a decision engine.
 No automatic process restart or message retry. Opt-in dependency alerts may start a model turn.
 The listener is local only. Keep the message ID.
-`;
+Install from the packaged tarball; see README.md and the installed getting-started.md.
+`.replaceAll('node integrations/pi/cli.mjs ', 'edda-pi ') +
+  'Source checkout usage remains: node integrations/pi/cli.mjs <command>.\n';
 
 async function main(args) {
   const [command, ...rest] = args;
   if (!command || command === '--help') { process.stdout.write(help); return; }
+  if (command === '--version' && !rest.length) {
+    process.stdout.write(`edda-pi ${JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version}\n`); return;
+  }
   const root = defaultRoot();
   const positional = [];
   const options = {};
@@ -74,6 +84,7 @@ async function main(args) {
     options[arg] = rest[++i];
   }
   const allowed = {
+    'runtime-info': [], runs: ['--limit', '--after'],
     list: [], status: [], send: ['--message', '--message-file', '--id', '--sender', '--mode'],
     receipt: ['--id'], recover: ['--instance'],
     conversation: ['--after', '--limit'], enroll: ['--scope'], watch: ['--conversation'],
@@ -86,15 +97,17 @@ async function main(args) {
     'authorization-record': ['--record', '--consumer'], 'authorization-revoke': ['--consumer'],
     'inbox-respond': ['--message', '--message-file', '--authorization', '--consumer'], 'inbox-wake': [],
     'runtime-install': [], launch: ['--project', '--pi-entry', '--provider', '--model', '--thinking', '--prompt-file', '--run-id', '--extension', '--agent-dir', '--no-tools'],
-    'run-status': [], 'run-stop': ['--abort'], 'run-resume': [],
+    'run-status': [], 'run-conversation': ['--after', '--limit'], 'run-stop': ['--abort'], 'run-resume': [],
     'supervisor-start': ['--config', '--id'], 'supervisor-status': [], 'supervisor-stop': [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
-  const counts = command === 'doctor' ? [0, 1] : [['list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
+  const counts = command === 'doctor' ? [0, 1] : [['runtime-info', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
   if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
+  if (command === 'runtime-info') result = runtimeInfo(root);
+  if (command === 'runs') result = listManagedRuns(root, { limit: options['--limit'], after: options['--after'] });
   if (command === 'supervisor-start') {
     const config = JSON.parse((await readBoundedFile(options['--config'])).text);
     config.id = validateId(options['--id'] || config.id || randomUUID());
@@ -105,6 +118,7 @@ async function main(args) {
   if (command === 'supervisor-stop') result = await stopSupervisor(root, sessionId);
   if (command === 'runtime-install') result = { status: 'installed', release: installRuntime(root), settingsChanged: false };
   if (command === 'launch') {
+    if (!options['--project']) throw new Error('launch requires --project');
     const runId = validateId(options['--run-id'] || randomUUID());
     process.stderr.write(`Run ID: ${runId}\n`);
     result = await launchManaged(root, { runId, project: options['--project'], piEntry: options['--pi-entry'],
@@ -112,6 +126,7 @@ async function main(args) {
       extensions: options['--extension'] ? [options['--extension']] : [], agentDir: options['--agent-dir'], noTools: options['--no-tools'] === true, thinking: options['--thinking'] });
   }
   if (command === 'run-status') result = await managedStatus(root, sessionId);
+  if (command === 'run-conversation') result = await managedConversation(root, sessionId, { after: options['--after'], limit: options['--limit'] });
   if (command === 'run-stop') result = await stopManaged(root, sessionId, { abort: options['--abort'] === true });
   if (command === 'run-resume') result = await resumeManaged(root, sessionId);
   if (command === 'inbox') result = listInbox(root, { consumer: options['--consumer'], limit: options['--limit'], after: options['--after'] });
@@ -167,7 +182,7 @@ async function main(args) {
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable', 'needs_reload', 'needs_enrollment', 'not_registered',
-    'ambiguous_session', 'invalid_selector', 'offline', 'busy', 'source_changed', 'needs_expected_revision', 'adoption_incomplete', 'unsupported',
+    'ambiguous_session', 'invalid_selector', 'needs_pi', 'offline', 'busy', 'source_changed', 'needs_expected_revision', 'adoption_incomplete', 'unsupported',
     'runner_unreachable', 'launch_pending', 'stop_pending', 'exited'].includes(result?.status)) process.exitCode = 2;
 }
 

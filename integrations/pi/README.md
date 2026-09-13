@@ -8,23 +8,43 @@ Requires Node.js 24 and Pi 0.85.1 (the version used for the runtime smoke test).
 The extension has no npm dependencies. Older Pi versions may lack lifecycle
 events used here; they are not supported.
 
-## Enable
+## Start here: installed client and fresh-session recovery
 
-Try it on a new Pi session without changing settings:
+Read [getting-started.md](getting-started.md) for the complete install → launch →
+find from another session → inspect → stop/resume → explicit continuation path.
+From an Edda checkout root:
 
-```powershell
-pi -e C:/ai_agent/edda-worktrees/pi-session-channel/integrations/pi/extension.mjs --edda-session-label edda-worker
+```text
+npm pack ./integrations/pi --ignore-scripts
+npm install --global --ignore-scripts ./edda-pi-session-channel-0.8.0.tgz
+edda-pi runtime-info
+edda-pi runs
 ```
 
-Or install the local package using Pi's supported package command:
+This installs a copy, not a link to a developer's worktree. `edda-pi` works from
+any cwd. `runtime-info` reports the installed version, actual Pi discovery and
+guide path without starting work. `runs` reads managed records, including stopped
+runs; use `run-status` for live health. The installed guide is the canonical user
+entry. The source-level commands below remain supported for development.
+
+## Enable an interactive channel (optional)
+
+Managed launch already loads the channel; no `pi install` is required. To try the
+channel in a new interactive Pi from an Edda checkout without changing settings:
 
 ```powershell
-pi install C:/ai_agent/edda-worktrees/pi-session-channel/integrations/pi
+pi -e ./integrations/pi/extension.mjs --edda-session-label edda-worker
 ```
 
-Local package installation references the directory; keep that worktree until
-you move the installation to a merged checkout. Remove that reference with
-`pi remove C:/ai_agent/edda-worktrees/pi-session-channel/integrations/pi`.
+Or use Pi's supported local-package command from that checkout:
+
+```powershell
+pi install ./integrations/pi
+```
+
+This optional Pi package installation references the directory; preserve it while
+configured. Remove that reference with `pi remove ./integrations/pi` from the
+same checkout. It is separate from the tarball-installed `edda-pi` CLI.
 
 An already-open Pi needs `/reload` after package installation, at an appropriate
 idle point. Loading the extension does not resume work. It cannot silently attach
@@ -37,7 +57,7 @@ For new sessions, managed launch owns the process and fixes the integration vers
 from the beginning. It automatically snapshots the runtime outside the checkout:
 
 ```powershell
-node integrations/pi/cli.mjs launch --project C:/my-project --provider openrouter --model deepseek/deepseek-v4.1-flash --thinking low --prompt-file task.txt
+node integrations/pi/cli.mjs launch --project C:/my-project --provider openrouter --model deepseek/deepseek-v4.1-flash --thinking high --prompt-file task.txt
 node integrations/pi/cli.mjs run-status RUN_ID
 node integrations/pi/cli.mjs run-stop RUN_ID
 node integrations/pi/cli.mjs run-resume RUN_ID

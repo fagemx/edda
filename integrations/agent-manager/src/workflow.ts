@@ -11,6 +11,11 @@ interface ReadWork { task: CanonicalTask; events: Array<WorkEvent & { id: string
 export function parseWorkAction(input: unknown): WorkAction {
   const r = object(input), base = { actionId: uuid(r.actionId), revision: text(r.revision, 64) };
   switch (r.kind) {
+    case 'attach_continuity': {
+      const ref = object(r.reference), capsuleId = text(ref.capsuleId, 100), localEventId = text(ref.localEventId, 100), originEventId = text(ref.originEventId, 100);
+      if (!/^cap_[a-z0-9]+$/.test(capsuleId) || !/^evt_[a-z0-9]+$/.test(localEventId) || !/^evt_[a-z0-9]+$/.test(originEventId)) throw new ManagerError('INVALID_CONTINUITY_REFERENCE', '原生 capsule 參照格式不正確。');
+      return { ...base, kind: r.kind, reference: { capsuleId, localEventId, originEventId } };
+    }
     case 'initialize': return { ...base, kind: r.kind, nextStep: text(r.nextStep, 2000) };
     case 'assign': return { ...base, kind: r.kind, agentId: slug(r.agentId), nextStep: text(r.nextStep, 2000), send: parseSend(r.send) };
     case 'intervene': return { ...base, kind: r.kind, send: parseSend(r.send) };
@@ -38,6 +43,7 @@ function empty(binding: WorkBinding): WorkView {
 }
 function apply(view: WorkView, action: WorkAction, at: string, target: AgentBinding | null): void {
   switch (action.kind) {
+    case 'attach_continuity': view.continuity = action.reference; break;
     case 'initialize': view.stage = 'ready'; view.nextStep = action.nextStep; break;
     case 'assign':
       view.stage = 'assigned'; view.assigneeAgentId = action.agentId; view.nextStep = action.nextStep;
@@ -144,7 +150,7 @@ export class WorkManager {
       catch { throw new ManagerError('LEDGER_INVALID', '交接紀錄含不合法的狀態轉換；已停止套用。', 409); }
       apply(view, event.action, event.at, event.target);
       view.history.push({ id: event.action.actionId, kind: event.action.kind, at: event.at,
-        summary: event.action.kind === 'intervene' ? event.action.send.message : 'nextStep' in event.action ? event.action.nextStep : 'evidence' in event.action ? event.action.evidence : event.action.kind === 'bind_session' ? event.action.expectedEvent : '解除 session 綁定' });
+        summary: event.action.kind === 'attach_continuity' ? `連結原生上下文 ${event.action.reference.capsuleId}` : event.action.kind === 'intervene' ? event.action.send.message : 'nextStep' in event.action ? event.action.nextStep : 'evidence' in event.action ? event.action.evidence : event.action.kind === 'bind_session' ? event.action.expectedEvent : '解除 session 綁定' });
     }
     view.revision = hash(JSON.stringify([binding, task.key, task.updatedAt, previous]));
     if (view.deliveryOperationId) {
@@ -158,6 +164,9 @@ export class WorkManager {
       }
     }
     this.cache.set(binding.id, { at: Date.now(), view }); return { task, events: ordered, view };
+  }
+  async continuationSnapshot(id: string): Promise<{ taskKey: string; view: WorkView; actions: WorkAction[] }> {
+    const state = await this.read(this.binding(id)); return { taskKey: state.task.key, view: state.view, actions: state.events.map(e => e.action) };
   }
   async act(id: string, input: WorkAction): Promise<WorkView> {
     if (this.closing) throw new ManagerError('STOPPING', '管理服務正在關閉，請稍後查詢原操作。', 503);
@@ -233,6 +242,7 @@ export class WorkManager {
   }
   private validate(view: WorkView, action: WorkAction): void {
     const fail = (message: string): never => { throw new ManagerError('INVALID_TRANSITION', message, 409); };
+    if (action.kind === 'attach_continuity') return;
     if (action.kind === 'initialize') { if (view.stage !== 'uninitialized') fail('工作已開始追蹤。'); return; }
     if (view.stage === 'uninitialized') fail('請先設定此工作的下一步。');
     if (action.kind === 'bind_session') {

@@ -12,7 +12,7 @@ export interface AgentBinding {
   summaryFile: string | null;
   transport?: 'pi' | 'codex'; transcriptFile?: string;
 }
-export interface ManagerConfig { version: 1; projects: ProjectView[]; agents: AgentBinding[]; refreshMs: number; works?: import('./workflow-contracts.js').WorkBinding[] }
+export interface ManagerConfig { version: 1; projects: ProjectView[]; agents: AgentBinding[]; refreshMs: number; continuityExecutable?: string; works?: import('./workflow-contracts.js').WorkBinding[] }
 export interface ModelView { provider: string; id: string }
 export interface UsageView { tokens: number | null; reportedCost: number | null }
 export interface PublicEntry {

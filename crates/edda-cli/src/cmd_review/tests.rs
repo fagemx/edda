@@ -203,6 +203,7 @@ async fn end_to_end_four_exit_codes_and_author_ledger() {
                 "authoritative_engines": [
                     "claude-opus-5 (only via Claude Code)",
                     "gpt-5.6-sol",
+                    "deepseek-flash (only via pi on the official `deepseek` provider)",
                     "glm-5.3-flash"
                 ],
                 "require_model_diversity": false,

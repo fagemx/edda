@@ -72,7 +72,7 @@ export function parseConfig(input: unknown): ManagerConfig {
   unique(works.map((w) => w.id)); unique(works.map((w) => `${w.workspace}\0${w.taskId}`));
   const refreshMs = c.refreshMs ?? 3000;
   if (!Number.isSafeInteger(refreshMs) || Number(refreshMs) < 1000 || Number(refreshMs) > 60000) throw new ManagerError('INVALID_CONFIG', '更新間隔必須是 1 到 60 秒。');
-  return { version: 1, projects: projects.sort((a, b) => a.priority - b.priority), agents, refreshMs: Number(refreshMs), ...(works.length ? { works } : {}) };
+  return { version: 1, projects: projects.sort((a, b) => a.priority - b.priority), agents, refreshMs: Number(refreshMs), ...(works.length ? { works } : {}), ...(c.continuityExecutable == null ? {} : { continuityExecutable: path(c.continuityExecutable) }) };
 }
 export function loadConfig(file: string): ManagerConfig {
   const stat = lstatSync(file);
