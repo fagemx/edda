@@ -59,6 +59,10 @@ a security sandbox — every session runs as the same OS user.
   briefs/<job>.md               # assistant -> controller
   briefs/<task>-worker.md       # controller -> worker
   templates/                    # source role files copied into new work dirs
+    shared-context.md           #   -> <project>/shared-context.md
+    assistant/AGENTS.md         #   -> <project>/assistant/AGENTS.md
+    controller/AGENTS.md        #   -> <project>/controllers/<job>/AGENTS.md
+    worker/AGENTS.md            #   -> <project>/workers/<task>/AGENTS.md
 ```
 
 `assistant/`, `controllers/<job>/` and `workers/<task>/` are **siblings**; never nest one inside
@@ -205,6 +209,10 @@ edda-pi run-conversation <runId> # the public persisted conversation
 edda task list                   # the task rail
 edda task show <id>              # one task's brief and lifecycle
 ```
+
+These commands belong to the installed `edda-pi` **companion** CLI, not to `edda` itself. If the
+installed companion version does not provide one of them, say so plainly rather than assuming it or
+substituting an invented status.
 
 Rules for an honest answer:
 

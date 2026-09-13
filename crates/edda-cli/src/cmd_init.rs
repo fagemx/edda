@@ -422,6 +422,16 @@ mod tests {
     }
 
     #[test]
+    fn coord_delegate_is_registered_in_the_skills_array() {
+        // The scaffold tests iterate SKILLS, so they stay green if this entry is
+        // deleted — while `edda init` silently stops scaffolding the skill.
+        assert!(
+            SKILLS.iter().any(|(name, _)| *name == "coord-delegate"),
+            "coord-delegate must be in SKILLS"
+        );
+    }
+
+    #[test]
     fn tracked_coord_run_projection_matches_embedded_source() {
         let embedded = include_str!("skills/coord-run.md");
         let tracked = include_str!("../../../.claude/skills/coord-run/SKILL.md");
