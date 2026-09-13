@@ -2,7 +2,7 @@ import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { requestSession, listSessions } from './client.mjs';
 import { enroll, readEnrollment } from './supervision.mjs';
-import { readJson, writeJson, sessionDir } from './store.mjs';
+import { readJson, registry, writeJson, sessionDir } from './store.mjs';
 import { dependencyConfiguration } from './dependency-observer.mjs';
 
 export async function followDependencies(root, id, { project, taskIds, notify = false, maxNotifications = 10, scope }) {
@@ -33,16 +33,35 @@ export async function unfollowDependencies(root, id) {
 
 export async function doctor(root, selectedId) {
   const rows = await listSessions(root);
-  const chosen = rows.filter((r) => selectedId ? r.sessionId === selectedId : r.live || readEnrollment(root, r.sessionId)?.enabled);
-  if (selectedId && !chosen.length) return { status: 'not_registered', sessionId: selectedId, nextAction: 'Load the Pi extension and use list to obtain its exact session ID.' };
+  // Registry health is read independently of the session inventory so a record
+  // that is unreadable AND has no recoverable identity is still named here.
+  const health = registry(root).map(({ dir, state, owner, stateError, ownerError }) => {
+    const error = stateError || ownerError;
+    if (!error) return null;
+    return { dir, sessionId: owner?.sessionId || state?.sessionId || null, record: error.record, message: error.message };
+  }).filter(Boolean);
+  const unreadable = health.map(({ sessionId, record }) => ({ sessionId, record }));
+  const enrolled = (id) => { try { return Boolean(readEnrollment(root, id)?.enabled); } catch { return false; } };
+  const chosen = rows.filter((r) => selectedId ? r.sessionId === selectedId : r.live || enrolled(r.sessionId));
+  if (selectedId && !chosen.length) {
+    let target = null;
+    try { target = sessionDir(root, selectedId); } catch { /* not a valid session selector */ }
+    if (target && health.some((entry) => entry.dir === target)) return { status: 'record_unavailable', sessionId: selectedId, unreadable,
+      nextAction: 'The record is unreadable and was not repaired; it was preserved as-is.' };
+    return { status: 'not_registered', sessionId: selectedId, unreadable,
+      nextAction: 'Load the Pi extension and use list to obtain its exact session ID.' };
+  }
   const sessions = await Promise.all(chosen.map(async (r) => {
     const base = { sessionId: r.sessionId, name: r.label || basename(r.cwd || '') || r.sessionId,
       cwd: r.cwd, live: r.live, runtimeState: r.state };
+    if (r.error?.code === 'record_unavailable') return { ...base, readiness: 'record_unavailable',
+      error: { ...r.error },
+      nextAction: 'The record is unreadable and was not repaired; use the identity shown and the registry list to inspect around it.' };
     if (!r.live) return { ...base, readiness: 'offline', nextAction: 'Inspect the original Pi process; no automatic restart.' };
     if (!r.capabilities?.includes('dependencies')) return { ...base, readiness: 'needs_reload', nextAction: 'Run /reload when idle to load dependency observation.' };
     const observer = await requestSession(root, r.sessionId, '/dependencies');
     const handoff = r.capabilities.includes('handoff') ? await requestSession(root, r.sessionId, '/handoff?budget=16384') : null;
-    const enabled = Boolean(readEnrollment(root, r.sessionId)?.enabled);
+    const enabled = enrolled(r.sessionId);
     return { ...base, readiness: !enabled ? 'needs_enrollment' : observer.phase,
       handoff: handoff?.status || 'unavailable', observer: { phase: observer.phase, notify: observer.notify,
         taskIds: observer.taskIds, pending: observer.pending, notifications: observer.notifications,
@@ -56,5 +75,5 @@ export async function doctor(root, selectedId) {
           'Use follow with the intended project/tasks; --notify explicitly enables bounded wake messages.' :
           'Observation is configured. dependencies shows evidence; unfollow pauses it.' };
   }));
-  return { status: 'diagnosed', sessions };
+  return { status: 'diagnosed', sessions, unreadable };
 }

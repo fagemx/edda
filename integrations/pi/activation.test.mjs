@@ -55,6 +55,25 @@ test('run discovery preserves corrupt records and does not leak prompt/token/pro
   assert.equal(await readFile(badFile, 'utf8'), '{ SECRET-BROKEN-JSON');
 });
 
+test('run discovery keeps config identity when state.json is NUL bytes', async (t) => {
+  const root = await fixture(t), good = randomUUID(), bad = randomUUID();
+  await record(root, good);
+  await record(root, bad, { config: { release: { id: 'a'.repeat(64) } } });
+  const badFile = join(root, 'managed', bad, 'state.json');
+  await writeFile(badFile, Buffer.alloc(1887, 0));
+  const before = await readFile(badFile);
+  const result = listManagedRuns(root);
+  assert.equal(result.runs.length, 2);
+  const healthy = result.runs.find((r) => r.runId === good), corrupt = result.runs.find((r) => r.runId === bad);
+  assert.equal(healthy.error, null);
+  assert.equal(corrupt.project, root);
+  assert.equal(corrupt.releaseId, 'a'.repeat(64));
+  assert.equal(corrupt.error.code, 'record_unavailable');
+  assert.equal(corrupt.error.record, 'state.json');
+  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
+  assert.deepEqual(await readFile(badFile), before);
+});
+
 test('runs paginate deterministically, validate input and do not traverse nested registries', async (t) => {
   const root = await fixture(t), ids = [randomUUID(), randomUUID(), randomUUID()].sort();
   for (const id of ids) await record(root, id);

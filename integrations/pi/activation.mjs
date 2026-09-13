@@ -2,7 +2,7 @@
 import { readdirSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultRoot, readJson, validateId } from './store.mjs';
+import { defaultRoot, readRecord, validateId } from './store.mjs';
 import { findPiEntry, managedDir } from './managed-store.mjs';
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
@@ -37,18 +37,31 @@ export function listManagedRuns(root, { limit = 50, after } = {}) {
   }
   const selected = names.filter((name) => !after || name > after), page = selected.slice(0, limit);
   const runs = page.map((runId) => {
+    let config = null, configError = null, configOk = false;
     try {
-      const dir = managedDir(root, runId), config = readJson(join(dir, 'config.json')), state = readJson(join(dir, 'state.json'));
-      if (!config || config.version !== 1 || config.runId !== runId || config.root !== root || typeof config.project !== 'string' || config.project.length > 4096 ||
-          (state && state.runId !== runId)) throw new Error('Invalid run records');
+      const dir = managedDir(root, runId);
+      const configRecord = readRecord(join(dir, 'config.json'));
+      configError = configRecord.error;
+      config = configRecord.value;
+      configOk = Boolean(config) && !configError && config.version === 1 && config.runId === runId && config.root === root &&
+        typeof config.project === 'string' && config.project.length <= 4096;
+      if (!configOk) throw new Error('Invalid run records');
+      const stateRecord = readRecord(join(dir, 'state.json')), state = stateRecord.value;
+      if (state && state.runId !== runId) throw new Error('Invalid run records');
       // Never spread records: prompts, tokens and raw provider errors are not discovery data.
+      // A valid config.json keeps project/releaseId even when state.json is unreadable.
       return { runId, project: config.project, sessionId: state?.sessionId ? validateId(state.sessionId) : null,
         recordedPhase: phases.has(state?.phase) ? state.phase : 'unknown', observedLive: null,
         updatedAt: time(state?.updatedAt), releaseId: /^[a-f0-9]{64}$/.test(config.release?.id) ? config.release.id : null,
-        error: null };
+        error: stateRecord.error ? { ...stateRecord.error } : null };
     } catch {
-      return { runId, project: null, sessionId: null, recordedPhase: 'unknown', observedLive: null,
-        updatedAt: null, releaseId: null, error: 'Run records unavailable or invalid; preserved without recovery.' };
+      // Preserve any validated config identity even when the row degrades, and
+      // attribute the failure to the record that actually failed.
+      return { runId, project: configOk ? config.project : null, sessionId: null, recordedPhase: 'unknown', observedLive: null, updatedAt: null,
+        releaseId: configOk && /^[a-f0-9]{64}$/.test(config.release?.id) ? config.release.id : null,
+        error: configError ? { ...configError }
+          : configOk ? { code: 'record_invalid', record: 'state.json', message: 'State record invalid; run identity preserved without recovery.' }
+          : { code: 'record_invalid', record: 'config.json', message: 'Run records unavailable or invalid; preserved without recovery.' } };
     }
   });
   return { status: 'recorded_runs', registryRoot: root, runs, hasMore: selected.length > page.length,
