@@ -104,14 +104,6 @@ export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress 
   const ledgerAt = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
   const interruption = inbox.filter(e => INTERRUPTING_INBOX.includes(e.kind) && Number.isFinite(Date.parse(e.at)) &&
     (!Number.isFinite(ledgerAt) || Date.parse(e.at) > ledgerAt)).sort((a, b) => b.at.localeCompare(a.at))[0];
-  // A live, non-stale progressing session is not an interruption: the recorded
-  // inbox interruption applies only when nothing is currently progressing.
-  if (interruption && !busy.length) {
-    note(`inbox:${interruption.kind} @ ${interruption.at}`);
-    note(interruption.summary.slice(0, 160));
-    note(pending.evidence);
-    return finish('interrupted', null);
-  }
   if (busy.length) {
     // Only a live, non-stale session that is running (or using a tool) is work.
     // A child that is working is not waiting on the operator, so the wait target
@@ -140,6 +132,18 @@ export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress 
   if (view.stage === 'blocked') { note(pending.evidence); return finish('blocked', 'dependency'); }
   if (view.stage === 'ready') { note(pending.evidence); return finish('ready', null); }
   if (view.stage === 'uninitialized') { note(pending.evidence); return finish('uninitialized', null); }
+  // A live, non-stale progressing session is not an interruption, and a
+  // delivered/accepted/blocked/failed work has already been decided above: the
+  // recorded inbox interruption applies only to an active hand-off
+  // (assigned / executing / awaiting_delivery). A liveness event such as
+  // `unavailable` for an already-delivered work is liveness, not a new phase —
+  // otherwise the wired OwnerInbox `unavailable` row would override `delivered`.
+  if (interruption) {
+    note(`inbox:${interruption.kind} @ ${interruption.at}`);
+    note(interruption.summary.slice(0, 160));
+    note(pending.evidence);
+    return finish('interrupted', null);
+  }
   // assigned / executing / awaiting_delivery: the task rail is not asked to
   // imply that a child works — only the observed session decides that above.
   // A stopped session here interrupts only the role this work is waiting on, and

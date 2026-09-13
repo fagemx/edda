@@ -195,6 +195,22 @@ test('an unparseable observation timestamp cannot let an interruption override l
   assert.equal(result.waitingFor, 'none');
 });
 
+test('a fresh inbox liveness event does not override a delivered phase, but does interrupt an active one', () => {
+  // The wired OwnerInbox records a fresh `unavailable` row for exactly a bound
+  // session whose source is unavailable; for a delivered work that is liveness,
+  // not a new phase, and the pending verifier hand-off must be preserved.
+  const delivered = view({ stage: 'delivered', deliveryStatus: 'settled', updatedAt: at(2), sessions: [binding('worker', 'worker'), binding('reviewer', 'reviewer')] });
+  const stayed = derive(delivered, [observation('worker'), observation('reviewer', { role: 'worker', source: 'unavailable', stale: true })],
+    [inboxEvent('unavailable', LATER, 'Session 證據不可用或身分已改變；未自動重新派工。')]);
+  assert.equal(stayed.phase, 'delivered');
+  assert.equal(stayed.waitingFor, 'verifier');
+
+  // The same fresh event on an active hand-off is still an interruption.
+  const active = derive(view({ stage: 'executing', updatedAt: at(2) }), [observation('worker')], [inboxEvent('unavailable', LATER)]);
+  assert.equal(active.phase, 'interrupted');
+  assert.equal(active.waitingFor, null);
+});
+
 class ClockLedger implements WorkflowLedger {
   private entries: LedgerNote[] = [];
   private clock = 0;
