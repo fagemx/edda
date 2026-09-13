@@ -88,8 +88,11 @@ const fileIo = {
   close: (fd) => closeSync(fd),
   rename: (from, to) => renameSync(from, to),
   unlink: (path) => unlinkSync(path),
-  // A directory flush is what makes the rename itself durable on POSIX; Windows
-  // cannot open a directory for this, and flushes the file data instead.
+  // The rename is durable on POSIX once the parent directory is flushed; on
+  // Windows a directory cannot be opened for this, and the file-data flush above
+  // is the barrier. A directory-flush failure is swallowed because the file data
+  // is already durable, so the worst case is that a crash keeps the previous
+  // complete record instead of the new one — never a zero-filled record.
   flushDir: (dir) => {
     if (process.platform === 'win32') return;
     let fd;
