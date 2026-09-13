@@ -112,14 +112,23 @@ not the controller, worker or implementer of this project's jobs.
 3. Launch: edda-pi launch --project <root>/controllers/<job> --provider <worker-provider> --model <worker-model> --thinking high --prompt-file <root>/briefs/<job>.md
    Keep the printed runId.
 4. Reply with the runId, where the deliverable lands, and that you will report the outcome.
-## Result return
-- Your address: edda-pi run-status "$EDDA_SESSION_ID" -> take the sessionId field. ($EDDA_SESSION_ID is
-  your run id, not your session id.)
-- Put in the brief: <returnSessionId> = that sessionId, and that when done OR failed the controller
-  sends one short report with
-  edda-pi send <returnSessionId> --sender controller --message-file <report.md>
-  and verifies it with edda-pi receipt <returnSessionId> --id <messageId>.
-- Stay idle after submitting the brief. The report arrives as a new user message; summarise it and stop.
+## Result return (owner-bound; survives assistant replacement)
+- `edda return` is added by issue #1192 (PR #1193) and exists only in a build that includes it; an
+  older installed `edda` exits non-zero for it, where the session-addressed path below still works.
+- Register your owner reference once, at the start:
+  edda return bind --owner "assistant/<project>" --session "$EDDA_SESSION_ID"
+  The reference is stable; the session is only its current holder. A replacement assistant re-binds with
+  --replaces-session <old-holder> (explicit identity replacement) and then claims pending returns.
+- Put in the brief: the owner reference and that when done OR failed the controller posts one short
+  return against it (not a session id):
+  edda return post --owner "assistant/<project>" --work <job> --status done|failed --result "<one line>" [--deliverable <path>] --message-file <report.md> --session "$EDDA_SESSION_ID"
+- Consume returns at the start of each turn:
+  edda return claim --owner "assistant/<project>" --session "$EDDA_SESSION_ID"
+  Present each claimed return once. A second claim returns nothing, and a superseded session cannot
+  claim, so the same completion is never presented twice.
+- The session-addressed path (edda-pi send <sessionId>) remains valid for the unchanged same-session
+  case; the owner reference is what survives replacement.
+- Stay idle after submitting the brief. A new return arrives in your next turn's claim; summarise it and stop.
 ```
 
 ```markdown
@@ -141,9 +150,12 @@ facts. This file defines your role.
 3. edda-pi launch --project <root>/workers/<task> --provider <worker-provider> --model <worker-model> --thinking high --prompt-file <root>/briefs/<task>-worker.md
 4. Check the worker's report against the brief; rework before you deliver.
 ## Report to the assistant
-Before ending your turn, send one short report and verify it:
-edda-pi send <returnSessionId> --sender controller --message-file <report.md>
-edda-pi receipt <returnSessionId> --id <messageId>
+Before ending your turn, post one short return against the owner reference from your brief (an owner
+reference, not a session id):
+edda return post --owner <ownerRef> --work <job> --status done|failed --result "<one line>" [--deliverable <path>] --message-file <report.md> --session "$EDDA_SESSION_ID"
+If your brief instead names a return session id, the session-addressed path stays valid:
+edda-pi send <returnSessionId> --sender controller --message-file <report.md> then
+edda-pi receipt <returnSessionId> --id <messageId>.
 State job name, done/failed, deliverable paths, one-line result, real blocker.
 ```
 
@@ -165,10 +177,13 @@ and let every session inherit the **same** `EDDA_PI_CHANNEL_DIR` so all runs sha
 
 ## 2. Receive the controller's completion or failure
 
-A controller reports back with `edda-pi send` to the assistant's `sessionId` (the return address in its
-brief). On a **live, idle** managed Pi session this starts a new turn in the same conversation — the
-report arrives as a new user message with no user prompt and no polling. The assistant summarises it
-and stays in the conversation.
+A controller reports back against the **owner reference** in its brief (`edda return post`, added by
+issue #1192 and present only in a build that includes it; the legacy session-addressed `edda-pi send`
+to the assistant's `sessionId` still works for the same-session case).
+The owner reference is stable across assistant replacement: the current holder claims pending returns
+with `edda return claim` at the start of a turn, and each return is presented exactly once. On a
+**live, idle** managed Pi session a direct `edda-pi send` also starts a new turn with no user prompt and
+no polling; the owner mailbox is what makes the result survive when that session is replaced.
 
 Keep three things separate; never let one stand in for another:
 

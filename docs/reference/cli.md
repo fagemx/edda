@@ -1075,6 +1075,37 @@ edda conduct skip <PLAN>         # skip a phase
 edda conduct abort <PLAN>        # abort a running plan
 ```
 
+### `edda return`
+
+Owner-bound return continuity: a delegated job's completion survives replacement of the assistant
+session that delegated it. Returns are posted against a stable owner reference, and the current holder
+claims each one exactly once.
+
+This verb is added by issue #1192 (PR #1193) and is present only in a build that includes it; an older
+installed `edda` does not know `edda return` and exits non-zero.
+
+```bash
+edda return bind --owner assistant/<project> --session "$EDDA_SESSION_ID" [--replaces-session OLD] [--json]
+edda return post --owner assistant/<project> --work <job> --status done|failed [--result T] [--deliverable P] [--message-file F] --session C [--json]
+edda return pending --owner assistant/<project> [--json]
+edda return claim --owner assistant/<project> --session "$EDDA_SESSION_ID" [--json]
+edda return show --id ID [--json]
+edda return status --owner assistant/<project> [--json]
+```
+
+| Flag | Subcommand | Meaning |
+|---|---|---|
+| `--owner REF` | `bind`, `post`, `pending`, `claim`, `status` | Stable owner reference, e.g. `assistant/<project>` |
+| `--session ID` | `bind`, `post`, `claim` | The session binding, posting, or claiming |
+| `--replaces-session OLD` | `bind` | Explicit identity replacement of the current holder |
+| `--work ID` | `post` | Job/work identifier within the owner reference |
+| `--status done|failed` | `post` | Return outcome |
+| `--result TEXT` | `post` | One-line result |
+| `--deliverable PATH` | `post` | Deliverable path |
+| `--message-file PATH` | `post` | Full report (`-` reads stdin) |
+| `--id ID` | `show` | Return id |
+| `--json` | all | Emit one JSON object |
+
 ---
 
 ## Internal / experimental commands
