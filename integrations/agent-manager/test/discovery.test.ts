@@ -59,6 +59,31 @@ test('candidate projection deduplicates by session, marks configured runs and ne
   assert.ok(!JSON.stringify(view).includes('registryRoot'));
 });
 
+test('candidate identity matches configuration on (registry root, session), not session id alone', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'manager-identity-root-')), other = mkdtempSync(join(tmpdir(), 'manager-identity-other-')), workspace = mkdtempSync(join(tmpdir(), 'manager-identity-ws-'));
+  const config = parseConfig({ version: 1, projects: [{ id: 'p', name: 'P' }], agents: [
+    { id: 'known', name: 'Known', role: 'worker', projectId: 'p', registryRoot: root, workspace, sessionId: 'shared' }] });
+  try {
+    // A same-id run under another configured root is not the configured agent.
+    const elsewhere: DiscoveryReport = { runs: [{ registryRoot: other, sessionId: 'shared', runId: null, instanceId: null,
+      state: 'idle', live: false, source: 'recorded', workspace, lastProgressAt: null, reason: 'offline' }], failures: [] };
+    assert.equal(projectCandidates(elsewhere, config.agents).candidates[0]?.configuredAgentId, null);
+    const matching: DiscoveryReport = { runs: [{ registryRoot: root, sessionId: 'shared', runId: null, instanceId: null,
+      state: 'idle', live: false, source: 'recorded', workspace, lastProgressAt: null, reason: 'offline' }], failures: [] };
+    assert.equal(projectCandidates(matching, config.agents).candidates[0]?.configuredAgentId, 'known');
+    // The manager's registration refusal uses the same identity, so the run in the
+    // other root can still be explicitly added as a second (registryRoot, sessionId).
+    const adapter: PiAdapter = { discover: async () => elsewhere, observe: async () => running(),
+      conversation: async () => { throw new Error('unused'); }, send: async () => { throw new Error('unused'); }, receipt: async () => null };
+    const store = new ManagerStore(root), manager = new AgentManager(config, store, adapter);
+    try {
+      const view = await manager.registerCandidate({ candidateId: candidateId({ registryRoot: other, sessionId: 'shared' }), id: 'second', name: 'Second', role: 'worker', projectId: 'p' });
+      assert.equal(view.id, 'second');
+      assert.equal(manager.binding('second').registryRoot, other);
+    } finally { await manager.stop(); store.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true }); rmSync(workspace, { recursive: true, force: true }); }
+});
+
 test('manager discovery is read-only, bounded to configured roots and isolates failures', async () => {
   const f = fixture();
   try {
@@ -206,6 +231,18 @@ test('discovery isolates one unreadable root while a healthy root still lists', 
     await channel?.close();
     rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+});
+
+test('discovery reports roots dropped past the bounded root cap', async () => {
+  const adapter = await ChannelAdapter.create();
+  const base = mkdtempSync(join(tmpdir(), 'manager-discovery-cap-'));
+  try {
+    const roots = Array.from({ length: 33 }, (_, index) => join(base, `root-${index}`));
+    const report = await adapter.discover(roots);
+    const limit = report.failures.find((failure) => failure.message.includes('上限'));
+    assert.ok(limit, 'the dropped root is reported instead of silently ignored');
+    assert.equal(limit?.registryRoot, roots[32]);
+  } finally { rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 test('registration carries the managed run id when the candidate has one', async () => {

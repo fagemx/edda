@@ -33,16 +33,18 @@ export function dedupeRuns(report: DiscoveryReport): DiscoveredRun[] {
   return [...byIdentity.values()];
 }
 // Public projection shared by the candidate list and by explicit registration.
-// `configuredAgentId` is matched on session identity, so a run already selected
-// under any configured root is never offered as a new candidate.
+// `configuredAgentId` is matched on the same `(registryRoot, sessionId)` identity
+// `config.json` enforces, so a same-id run under another configured root (or a
+// Codex agent whose workspace happens to equal a Pi registry root) is not
+// mislabelled as an already-selected Pi run.
 export function projectCandidates(report: DiscoveryReport, agents: AgentBinding[]): CandidateListView {
-  const configured = new Map(agents.map((agent) => [agent.sessionId, agent.id]));
+  const configured = new Map(agents.map((agent) => [`${agent.registryRoot}\0${agent.sessionId}`, agent.id]));
   const candidates: CandidateView[] = dedupeRuns(report)
     .sort((left, right) => (Number(right.live) - Number(left.live)) || (left.sessionId ?? left.runId ?? '').localeCompare(right.sessionId ?? right.runId ?? ''))
     .map((run) => ({
       id: candidateId(run), sessionId: run.sessionId, runId: run.runId, instanceId: run.instanceId, state: run.state, live: run.live,
       source: run.source, workspace: run.workspace, lastProgressAt: run.lastProgressAt, reason: run.reason,
-      configuredAgentId: run.sessionId ? configured.get(run.sessionId) ?? null : null,
+      configuredAgentId: run.sessionId ? configured.get(`${run.registryRoot}\0${run.sessionId}`) ?? null : null,
     }));
   const issues = [...new Map(report.failures.map((failure) => [`${rootLabel(failure.registryRoot)}\0${failure.message}`,
     { label: rootLabel(failure.registryRoot), message: failure.message }])).values()];

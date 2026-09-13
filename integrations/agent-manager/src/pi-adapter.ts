@@ -89,7 +89,14 @@ export class ChannelAdapter implements PiAdapter {
   // sends or launches. A managed run and its live session merge into one row.
   async discover(registryRoots: string[]): Promise<DiscoveryReport> {
     const report: DiscoveryReport = { runs: [], failures: [] };
-    const roots = [...new Set(registryRoots)].slice(0, MAX_DISCOVERY_ROOTS);
+    const uniqueRoots = [...new Set(registryRoots)];
+    const roots = uniqueRoots.slice(0, MAX_DISCOVERY_ROOTS);
+    // A silently truncated root set would contradict the documented bounded root
+    // set; report the drop as a source issue instead of hiding it.
+    const dropped = uniqueRoots.slice(MAX_DISCOVERY_ROOTS);
+    const firstDropped = dropped[0];
+    if (firstDropped !== undefined) report.failures.push({ registryRoot: firstDropped,
+      message: `已明確設定的來源超過 ${MAX_DISCOVERY_ROOTS} 個上限；其餘 ${dropped.length} 個未探索。` });
     const listSessions = this.client.listSessions, listManaged = this.activation.listManagedRuns;
     if (typeof listSessions !== 'function' && typeof listManaged !== 'function') {
       report.failures.push(...roots.map((registryRoot) => ({ registryRoot, message: '這個 Pi 版本沒有可用的探索介面；未進行探索。' })));

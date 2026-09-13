@@ -103,7 +103,9 @@ Bounds and safety:
 
 - The root set is exactly the effective default Pi registry (`EDDA_PI_CHANNEL_DIR`,
   else `~/.edda-pi-sessions`) plus the distinct `registryRoot` values of the already-selected
-  Pi agents, deduplicated. There is no other home/project/directory scan, and no raw
+  Pi agents, deduplicated and bounded to at most 32 roots; if the configured union exceeds
+  that bound, the dropped roots are reported as a source issue rather than silently ignored.
+  There is no other home/project/directory scan, and no raw
   `owner.json`/`state.json`/`managed/**.json` parsing in the manager: each root is read
   through the same validated Pi inventory used elsewhere: `listManagedRuns` (recorded
   managed runs with their `runId`) and `listSessions` (live or offline sessions). A
@@ -112,8 +114,10 @@ Bounds and safety:
 - It is read-only. Listing only reads status/inventory; it never assigns work, changes an
   owner, launches or resumes a session, calls a model, sends a message or records
   acceptance.
-- A candidate whose session is already selected shows **已加入管理** with its agent id
-  and cannot be added twice. A run registered from two configured roots is shown once,
+- A candidate whose run is already selected shows **已加入管理** with its agent id
+  and cannot be added twice. That match uses the same `(registryRoot, sessionId)` identity
+  `config.json` enforces, so the same session id under a different configured root is not
+  mislabelled. A run registered from two configured roots is shown once,
   preferring the live registration. Offline or stopped runs are shown as recorded
   evidence with a reason, never as proof of completion. If one root cannot be listed,
   its failure is reported and every other root still returns its candidates.

@@ -68,7 +68,7 @@ export class AgentManager {
     const run = dedupeRuns(report).find((candidate) => candidateId(candidate) === request.candidateId);
     if (!run) throw new ManagerError('NOT_FOUND', '找不到這個候選執行；請重新整理候選清單。', 404);
     if (!run.sessionId) throw new ManagerError('UNAVAILABLE', '這個管理執行尚無可綁定的 session；未加入管理。', 409);
-    if (this.config.agents.some((a) => a.sessionId === run.sessionId)) throw new ManagerError('ALREADY_CONFIGURED', '這個執行已在管理清單中。', 409);
+    if (this.config.agents.some((a) => a.registryRoot === run.registryRoot && a.sessionId === run.sessionId)) throw new ManagerError('ALREADY_CONFIGURED', '這個執行已在管理清單中。', 409);
     if (!run.workspace) throw new ManagerError('UNAVAILABLE', '此候選沒有可驗證的工作目錄，未加入管理。', 409);
     const binding: AgentBinding = { id: request.id, name: request.name, role: request.role, projectId: request.projectId,
       registryRoot: run.registryRoot, sessionId: run.sessionId, runId: run.runId, workspace: run.workspace, summaryFile: null };
