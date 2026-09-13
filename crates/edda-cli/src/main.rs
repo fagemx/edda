@@ -45,6 +45,7 @@ mod cmd_rebuild;
 mod cmd_recap;
 mod cmd_recap_digest;
 mod cmd_reconcile;
+mod cmd_return;
 mod cmd_review;
 mod cmd_rules;
 mod cmd_run;
@@ -235,6 +236,11 @@ enum Command {
         /// Send even when no active session answers to the target label
         #[arg(long)]
         force: bool,
+    },
+    /// Owner-bound return continuity: bind, post, pending, claim, show, status
+    Return {
+        #[command(subcommand)]
+        cmd: cmd_return::ReturnCmd,
     },
     /// Acknowledge a pending request from another session
     #[command(name = "request-ack")]
@@ -1162,6 +1168,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
         Command::Checkpoint { args } => cmd_checkpoint::execute(&repo_root, args),
         Command::Continuity { cmd } => cmd_continuity::run(cmd, &repo_root, &cwd),
+        Command::Return { cmd } => cmd_return::execute(cmd, &repo_root),
         Command::Decide {
             decision,
             reason,
