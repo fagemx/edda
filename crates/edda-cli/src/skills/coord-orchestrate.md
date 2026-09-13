@@ -13,6 +13,51 @@ precedence for safety, verification, review and merge authority. This skill is
 caller guidance; it adds no Edda scheduler, lock, approval service or runtime
 role enforcement.
 
+## Modes
+
+This skill is the strong planning and exception path. Runtime advancement is a
+separate, smaller loop with its own skill.
+
+| Mode | Runtime | Product surface |
+|---|---|---|
+| `prepare` | strong planner | Author/validate a `ControlManifestInputV1` and compile it into a sealed `ControlManifestV1` with `edda control compile <file> --json` |
+| `run` | Flash runtime | Advance the sealed control with `coord-run` through `edda control status`/`next`/`apply` |
+| `exception` | strong planner | `edda control adjudicate <id> --state-version <n> --decision <file> --json` clears `needs_decision`; `edda control authorize-merge <id> ... --json` binds a separate merge capability |
+
+### Prepare mode
+
+The strong planner owns the goal, decomposition, DAG, scope, routes and the
+review charter, and encodes them in the `ControlManifestInputV1` that compiles
+to a `ControlManifestV1`. Validate the input schematically before compiling; a
+refused compile is a refusal, not a reason to weaken the manifest. Compile is
+the strong path and carries no merge authority: it atomically accepts the brief
+inputs and one manifest and returns the control id and manifest digest that
+`coord-run` then consumes.
+
+```bash
+edda control compile <manifest-input.json> --session <registered-session-id> \
+  --authority-token-file <private-bearer-file> --json
+```
+
+```bash edda-doctest
+$ edda control compile --help
+> Strong path: atomically accept brief inputs and one control manifest
+$ edda control authorize-merge --help
+> Bind a sealed host-local merge capability to an exact control subject
+$ edda control adjudicate --help
+> Strong path: append a versioned authority-bound adjudication
+```
+
+Merge authority is never invented by this skill. It is bound separately,
+through an independently granted `edda control authorize-merge` capability, and
+only once delivery supplies an exact PR/head/base. A manifest whose completion
+condition excludes merge moves straight from successful verification to
+`completed`.
+
+For step-by-step advancement, observations, wakes and receipt rendering, follow
+`coord-run` and the manifest's closed action enum. Do not duplicate the runtime
+loop here.
+
 ## Choose the entry before forming a fleet
 
 Use the first matching route.
@@ -85,14 +130,16 @@ and do not enqueue Pi, ACP, host-subagent or per-card no-retry tasks for
 reconcile to pick. The per-plan active map below does not filter the current
 reconciler.
 
-A task bound to an accepted `ExecutionBriefV1` is instead **controlled**. At the
-current accepted product boundary, controlled reconcile validates and binds an
-attempt but returns a descriptor with `execution: "none"`: it does not launch or
-enter the legacy Codex runner. Direct controlled execution remains unavailable
-until an authorized S6 capability exists. A literal `CONTROL_UNAVAILABLE`
-result is only a future planned S6 contract, not current product evidence. A
+A task bound to an accepted `ExecutionBriefV1` is instead **controlled**, and
+controlled execution now exists through the `edda control` product surface:
+`compile` seals the manifest, `status`/`next`/`apply` advance it one closed
+action at a time, and `authorize-merge`/`adjudicate` are separate authority
+paths. A controlled attempt does not enter the legacy Codex runner, and a
 descriptor, caller-authored event or ordinary task command is not launch
-authority and must not be described as a promised launch.
+authority and must not be described as a promised launch. `coord-run` is the
+Flash runtime loop that consumes the sealed manifest; merge still requires a
+separately bound capability, and an unknown outcome code still routes to strong
+`edda control adjudicate` rather than a guessed state.
 
 Changing modes requires operator authorization, exact scheduler lifecycle when
 installed, process/lease/attempt reconciliation, and no unresolved task side
@@ -206,7 +253,7 @@ Worker and controller must not race to settle a live task.
 | Ready with inputs bound | controller starts once and dispatches; worker reads Running |
 | Running/Blocked/Done start refusal | inspect task, dependencies, attempt and result; no unconditional retry |
 | Legacy/uncontrolled worker met the task's stated output | worker records ordinary `task done --receipt ... --evidence ...`; a candidate need not be a PR or merge |
-| Controlled attempt is bound to an accepted `ExecutionBriefV1` | completion must come from the authorized product path with a validated `WorkReceiptV1`, the exact brief/session/attempt/lease/outcome correlation and the required S6 authority seal; ordinary `task done --evidence` is refused, and the current product fails closed while that authorized capability is unavailable |
+| Controlled attempt is bound to an accepted `ExecutionBriefV1` | completion must come from the `edda control` product path with a validated `WorkReceiptV1`, the exact brief/session/attempt/lease/outcome correlation and the required S6 authority seal; ordinary `task done --evidence` is refused, and an unknown outcome code routes to a strong `edda control adjudicate` instead of a guessed state |
 | Definite stopped/prelaunch failure | worker fails, or controller fails only after observing the stop |
 | Failed with the same assignment/brief/scope and authorized retry | controller starts the SAME ID; its attempt increments and existing successor edges remain |
 | Running but silent, expired-looking lease or missing handle | inspect process, handle, source, task history and side effects; elapsed time alone never authorizes fail/relaunch |
