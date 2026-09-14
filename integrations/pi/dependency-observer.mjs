@@ -1,7 +1,8 @@
 import { realpath, stat } from 'node:fs/promises';
+import { mkdirSync, lstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { digest, readJson, writeJson, validateId } from './store.mjs';
+import { digest, readJson, writeJson, validateId, privateRoot } from './store.mjs';
 import { readTask, taskId } from './compose-sources.mjs';
 
 const now = () => new Date().toISOString();
@@ -42,24 +43,64 @@ export async function dependencyConfiguration(value) {
   return { project, taskIds, notify: value.notify, maxNotifications };
 }
 
-export function createDependencyObserver({ dir, sessionId, instanceId, policy, runtime, manifestRevision,
+/// The owner-scoped subscription directory for a stable owner reference:
+/// `<root>/owner-lifecycle/<sha256(ownerRef)>`. It is stable across sessions so
+/// an owner-bound subscription survives replacement without a manual refollow.
+export function ownerSubscriptionDir(root, ownerRef) {
+  if (typeof ownerRef !== 'string' || ownerRef.length < 1 || ownerRef.length > 200 || /[\u0000-\u001f\u007f]/.test(ownerRef)) {
+    throw new Error('Invalid owner reference');
+  }
+  const base = join(privateRoot(root), 'owner-lifecycle');
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  if (lstatSync(base).isSymbolicLink()) throw new Error('Owner subscription root must not be a symlink');
+  const dir = join(base, digest(ownerRef));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error('Owner subscription directory must not be a symlink');
+  return dir;
+}
+
+export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef = null, sessionId, instanceId, policy, runtime, manifestRevision,
   send, receipt, command, pollMs = 60000 }) {
-  const path = join(dir, 'dependencies.json');
-  const pausePath = join(dir, 'dependencies.pause.json');
+  if (ownerRef !== null && (typeof ownerRef !== 'string' || ownerRef.length < 1 || ownerRef.length > 200 || /[\u0000-\u001f\u007f]/.test(ownerRef))) {
+    throw new Error('Invalid dependency observer owner reference');
+  }
+  const path = join(subscriptionDir, 'dependencies.json');
+  const pausePath = join(subscriptionDir, 'dependencies.pause.json');
   let data = readJson(path);
-  if (data && (data.version !== 1 || data.sessionId !== sessionId)) throw new Error('Invalid dependency observer identity/version');
+  if (ownerRef) {
+    if (data && (data.version !== 1 || data.ownerRef !== ownerRef)) throw new Error('Invalid dependency observer identity/version');
+  } else if (data && (data.version !== 1 || data.sessionId !== sessionId)) {
+    throw new Error('Invalid dependency observer identity/version');
+  }
   let closed = false, operation, timer, storageError = false, configuring = false;
   const persist = (next) => { writeJson(path, next); data = next; };
   const pauseToken = () => {
     const marker = readJson(pausePath);
     if (!marker) return null;
-    if (marker.sessionId !== sessionId) throw new Error('Pause marker identity mismatch');
+    if (ownerRef ? marker.ownerRef !== ownerRef : marker.sessionId !== sessionId) throw new Error('Pause marker identity mismatch');
     return validateId(marker.nonce);
   };
   function allowed() {
     if (closed) return 'stopped';
     if (storageError) return 'storage_error';
     if (!data) return 'not_configured';
+    if (ownerRef) {
+      // The persisted owner record is authoritative. A replaced holder that can
+      // no longer see itself as the holder is explicitly superseded and stops
+      // notifying; the record's carried policy replaces per-session enrollment.
+      let persisted;
+      try { persisted = readJson(path); } catch { return 'storage_error'; }
+      if (!persisted || persisted.ownerRef !== ownerRef || persisted.holderSession !== sessionId) return 'superseded';
+      data = persisted;
+      try {
+        if (pauseToken() !== data.pauseToken) return 'paused';
+        const p = { enabled: data.enabled, scope: data.scope };
+        if (!p.enabled) return 'enrollment_paused';
+        if (typeof p.scope !== 'string') return 'control_state_unavailable';
+        if (digest(p.scope) !== data.scopeDigest) return 'scope_changed';
+      } catch { return 'control_state_unavailable'; }
+      return null;
+    }
     if (data.instanceId !== instanceId) return 'needs_refollow';
     try {
       if (pauseToken() !== data.pauseToken) return 'paused';
@@ -152,6 +193,19 @@ export function createDependencyObserver({ dir, sessionId, instanceId, policy, r
     }).finally(() => { if (operation === active) operation = undefined; });
     return active.promise;
   }
+  // A replacement session with the same owner reference adopts the persisted
+  // owner-scoped subscription and resumes observation without a manual refollow.
+  if (ownerRef && data) {
+    // The delivery receipt belonged to the previous holder's channel, so it is
+    // meaningless here; keep the handled sequence to avoid re-notifying, but
+    // let the next real change deliver without a stale awaiting_delivery guard.
+    data = { ...data, sessionId, instanceId, holderSession: sessionId, lastAlert: null };
+    persist(data);
+    clearInterval(timer);
+    timer = setInterval(() => { void check(); }, pollMs);
+    timer.unref();
+    void check();
+  }
   return {
     status, check,
     async configure(value) {
@@ -162,9 +216,12 @@ export function createDependencyObserver({ dir, sessionId, instanceId, policy, r
       const startingPauseToken = pauseToken();
       const selection = await dependencyConfiguration(value);
       if (closed) throw new Error('Observer closed');
-      const p = policy();
+      // The owner record's carried policy governs once it exists; a first
+      // owner-scoped configure still requires the existing session enrollment.
+      const p = ownerRef && data ? { enabled: data.enabled, scope: data.scope } : policy();
       if (!p?.enabled) throw new Error('An enabled supervision enrollment is required');
-      const config = { ...selection, scopeDigest: digest(p.scope), manifestRevision: manifestRevision() };
+      const carried = ownerRef ? { enabled: p.enabled, scope: p.scope } : {};
+      const config = { ...selection, ...carried, scopeDigest: digest(p.scope), manifestRevision: manifestRevision() };
       const configDigest = digest(JSON.stringify(config));
       if (!allowed() && data.configDigest === configDigest) return status();
       operation?.abort.abort();
@@ -172,7 +229,8 @@ export function createDependencyObserver({ dir, sessionId, instanceId, policy, r
       if (closed) throw new Error('Observer closed');
       persist({ version: 1, sessionId, instanceId, ...config, configDigest, subscriptionId: randomUUID(),
         pauseToken: startingPauseToken, phase: 'starting', sequence: 0, handledSequence: 0, notifications: 0,
-        facts: null, fingerprint: null, lastAlert: null });
+        facts: null, fingerprint: null, lastAlert: null,
+        ...(ownerRef ? { ownerRef, holderSession: sessionId } : {}) });
       storageError = false;
       clearInterval(timer);
       timer = setInterval(() => { void check(); }, pollMs);
@@ -182,7 +240,7 @@ export function createDependencyObserver({ dir, sessionId, instanceId, policy, r
       } finally { configuring = false; }
     },
     async pause() {
-      writeJson(pausePath, { sessionId, nonce: randomUUID(), pausedAt: now() });
+      writeJson(pausePath, ownerRef ? { ownerRef, nonce: randomUUID(), pausedAt: now() } : { sessionId, nonce: randomUUID(), pausedAt: now() });
       clearInterval(timer);
       operation?.abort.abort();
       await operation?.promise;

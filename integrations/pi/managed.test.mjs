@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -184,4 +185,43 @@ test('system-style ancestor aliases do not reject an owned session during resume
       if (status.live) await stopManaged(registry, launched.runId, { abort: true });
     }
   }
+});
+
+test('managed launch records the stable owner reference and exposes it even when state is unreadable', async (t) => {
+  const f = await fixture(t);
+  const launched = await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO',
+    provider: 'fixture', model: 'echo', owner: 'assistant/project', returnOwner: 'assistant/return' });
+  assert.equal(launched.owner, 'assistant/project');
+  assert.equal(launched.returnOwner, 'assistant/return');
+  await assert.rejects(launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO',
+    provider: 'fixture', model: 'echo', owner: 'assistant/other', returnOwner: 'assistant/return' }), /different launch inputs/);
+  await assert.rejects(launchManaged(f.registry, { runId: randomUUID(), project: f.project, piEntry: f.entry, owner: 'bad\u0000owner' }), /owner/);
+  await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
+  await stopManaged(f.registry, f.runId);
+  const stopped = await managedStatus(f.registry, f.runId);
+  assert.equal(stopped.owner, 'assistant/project');
+  assert.equal(stopped.returnOwner, 'assistant/return');
+  await writeFile(join(managedDir(f.registry, f.runId), 'state.json'), Buffer.alloc(1887, 0));
+  const degraded = await managedStatus(f.registry, f.runId);
+  assert.equal(degraded.status, 'record_unavailable');
+  assert.equal(degraded.owner, 'assistant/project');
+  assert.equal(degraded.returnOwner, 'assistant/return');
+});
+
+test('managed runner strips an inherited owner identity and passes only the configured contract', async (t) => {
+  const f = await fixture(t);
+  const capture = join(f.root, 'owner-env.json');
+  const priorOwner = process.env.EDDA_OWNER_REF, priorReturn = process.env.EDDA_RETURN_OWNER;
+  process.env.EDDA_OWNER_REF = 'assistant/leaked-parent';
+  process.env.EDDA_FIXTURE_ENV_CAPTURE = capture;
+  t.after(() => {
+    if (priorOwner === undefined) delete process.env.EDDA_OWNER_REF; else process.env.EDDA_OWNER_REF = priorOwner;
+    if (priorReturn === undefined) delete process.env.EDDA_RETURN_OWNER; else process.env.EDDA_RETURN_OWNER = priorReturn;
+    delete process.env.EDDA_FIXTURE_ENV_CAPTURE;
+  });
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, returnOwner: 'assistant/real-return' });
+  await until(async () => existsSync(capture));
+  const captured = JSON.parse(await readFile(capture, 'utf8'));
+  assert.equal(captured.owner, null);
+  assert.equal(captured.returnOwner, 'assistant/real-return');
 });

@@ -2,7 +2,8 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { openStore, digest, validateSession, validateId } from './store.mjs';
 import { createHandoff } from './handoff.mjs';
-import { createDependencyObserver } from './dependency-observer.mjs';
+import { createDependencyObserver, ownerSubscriptionDir } from './dependency-observer.mjs';
+import { createOwnerMailbox } from './owner-mailbox.mjs';
 import { readEnrollment } from './supervision.mjs';
 import { createInboxProducer } from './inbox-producer.mjs';
 import { inboxStore, inboxId, messageId } from './inbox-store.mjs';
@@ -38,7 +39,7 @@ async function jsonBody(req) {
 }
 
 export async function startChannel({ root, sessionId, cwd, label = '', deliver, getConversation, heartbeatMs = 5000,
-  dependencyCommand, dependencyPollMs = 60000 }) {
+  dependencyCommand, dependencyPollMs = 60000, ownerRef, returnOwner, ownerCommand }) {
   validateSession(sessionId);
   const instanceId = randomUUID();
   const token = randomBytes(32).toString('hex');
@@ -47,6 +48,10 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   let handoff;
   let dependencies;
   let inbox;
+  let mailbox = null;
+  // An unavailable owner mailbox leaves the channel fully functional.
+  try { if (ownerRef) mailbox = createOwnerMailbox({ owner: ownerRef, sessionId, cwd, command: ownerCommand }); }
+  catch { mailbox = null; }
   try { handoff = createHandoff(store.dir, sessionId, instanceId); }
   catch (error) { store.release(); throw error; }
   let closed = false;
@@ -90,9 +95,11 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
+      owner: mailbox ? mailbox.state() : null, returnOwner: returnOwner || null,
       integration: { version: integrationVersion, modulePath: fileURLToPath(import.meta.url), releaseId: process.env.EDDA_PI_RELEASE_ID || null },
       capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
       inbox: inbox?.status() }),
+    claimOwnerReturns: () => mailbox ? mailbox.claim() : Promise.resolve({ status: 'disabled', returns: [] }),
     get dependencies() { return dependencies; },
     handoffContext: (budget) => handoff.context(channel.snapshot(), budget),
     reportHandoff(id, value) {
@@ -250,7 +257,8 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       inbox = { status: () => ({ status: 'storage_error', error: error.message, wake: { status: 'unsupported', notified: false } }),
         begin() {}, assistant() {}, settled() {}, reconcile() {} };
     }
-    dependencies = createDependencyObserver({ dir: store.dir, sessionId, instanceId,
+    dependencies = createDependencyObserver({ dir: store.dir, subscriptionDir: ownerRef ? ownerSubscriptionDir(root, ownerRef) : store.dir,
+      ownerRef, sessionId, instanceId,
       policy: () => readEnrollment(root, sessionId), runtime: () => channel.snapshot(),
       manifestRevision: () => handoff.currentRevision(), send: (body) => submitMessage(body, true),
       receipt: (id) => receipts.get(id), command: dependencyCommand, pollMs: dependencyPollMs });
@@ -261,6 +269,9 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     owner.port = server.address().port;
     store.owner(owner);
     save();
+    // Owner binding is recorded as normal lifecycle; a failure only leaves the
+    // owner state unavailable and never fails the channel.
+    if (mailbox) await mailbox.bind();
     heartbeat = setInterval(() => {
       try { save(); inbox.reconcile(); }
       catch { storageError = true; recompute(); }

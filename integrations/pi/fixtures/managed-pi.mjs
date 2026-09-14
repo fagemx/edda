@@ -4,6 +4,11 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 const args = process.argv.slice(2), option = (key) => args[args.indexOf(key) + 1];
+if (process.env.EDDA_FIXTURE_ENV_CAPTURE) {
+  writeFileSync(process.env.EDDA_FIXTURE_ENV_CAPTURE, JSON.stringify({
+    owner: process.env.EDDA_OWNER_REF ?? null, returnOwner: process.env.EDDA_RETURN_OWNER ?? null,
+  }));
+}
 const root = process.env.EDDA_PI_CHANNEL_DIR;
 const release = join(root, 'releases', process.env.EDDA_PI_RELEASE_ID);
 const { startChannel } = await import(pathToFileURL(join(release, 'channel.mjs')));
