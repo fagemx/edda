@@ -35,7 +35,8 @@ Activate one merged revision across the Edda delivery carriers (Job C)
   --offline            do not fetch; cannot verify freshness (requires --allow-stale)
   --allow-stale        activate a deliberately older revision than origin/main
   --allow-downgrade    with --allow-stale, allow overwriting newer installed content
-  --dry-run            print the plan and mutate nothing
+  --dry-run            print the plan and mutate nothing; the freshness check uses the
+                       existing remote ref without fetching
   --json               accepted; the final receipt is always printed as JSON
   -h, --help           this message
 Exit codes: 0 activated and coherent, 1 a step failed, 2 usage/refusal/non-coherent.
@@ -93,16 +94,24 @@ git -C "$repo" diff --cached --quiet -- 2>/dev/null || die "$repo has staged cha
 # ── Freshness guard (#1217) ────────────────────────────────────────────
 # The route installs from the checkout, so activating a checkout that is behind
 # origin/main silently downgrades installed content. Refuse unless the operator
-# deliberately asks for an older revision.
+# deliberately asks for an older revision. --dry-run never fetches, so its
+# "mutates nothing" promise holds; it compares the existing remote ref.
+branch=$(git -C "$repo" symbolic-ref --short -q HEAD 2>/dev/null || true)
+[ -n "$branch" ] || branch=main
+remote_ref="origin/$branch"
 if [ "$offline" = 1 ] && [ "$allow_stale" = 0 ]; then
   die "--offline cannot verify that HEAD is current; pass --allow-stale to activate deliberately"
 elif [ "$allow_stale" = 1 ]; then
   printf 'activate-revision: WARNING activating a possibly stale revision (%s) because --allow-stale was given\n' "$revision"
 else
-  git -C "$repo" fetch --quiet origin main 2>/dev/null || die "could not fetch origin/main; pass --offline --allow-stale to proceed without the freshness check"
-  origin_main=$(git -C "$repo" rev-parse --verify --quiet origin/main 2>/dev/null) || die "cannot resolve origin/main; pass --offline --allow-stale to proceed without the freshness check"
-  [ "$revision" = "$origin_main" ] || die "checkout $revision is not current origin/main ($origin_main); run 'git -C $repo fetch && git -C $repo pull --ff-only', or pass --allow-stale to activate a deliberately older revision"
-  printf 'activate-revision: freshness ok (HEAD == origin/main %s)\n' "$origin_main"
+  if [ "$dry_run" = 1 ]; then
+    printf 'plan: git fetch origin %s (dry run does not fetch; comparing the existing %s ref)\n' "$branch" "$remote_ref"
+  else
+    git -C "$repo" fetch --quiet origin "$branch" 2>/dev/null || die "could not fetch $remote_ref; pass --offline --allow-stale to proceed without the freshness check"
+  fi
+  origin_rev=$(git -C "$repo" rev-parse --verify --quiet "$remote_ref" 2>/dev/null) || die "cannot resolve $remote_ref; pass --offline --allow-stale to proceed without the freshness check"
+  [ "$revision" = "$origin_rev" ] || die "checkout $revision is not current $remote_ref ($origin_rev); run 'git -C $repo fetch && git -C $repo pull --ff-only', or pass --allow-stale to activate a deliberately older revision"
+  printf 'activate-revision: freshness ok (HEAD == %s %s)\n' "$remote_ref" "$origin_rev"
 fi
 
 receipt="$repo/integrations/pi/activation-receipt.mjs"
@@ -134,11 +143,18 @@ if [ "$allow_stale" = 1 ] && [ "$allow_downgrade" = 0 ]; then
   installed=$(printf '%s' "$guard" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);process.stdout.write(r.pi.installedReleaseId||'')})")
   repo_id=$(printf '%s' "$guard" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);process.stdout.write(r.pi.repoReleaseId||'')})")
   configured=$(printf '%s' "$guard" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);process.stdout.write((r.manager.configured&&r.manager.configured.headSha)||'')})")
-  if [ -n "$installed" ] && [ -n "$repo_id" ] && [ "$installed" != "$repo_id" ]; then
-    die "would overwrite installed Pi content $installed with this checkout's $repo_id; pass --allow-downgrade to force"
+  # Fail closed when the installed identity cannot be observed: "unknown" must not
+  # mean "safe to overwrite".
+  if [ -n "$repo_id" ] && [ "$installed" != "$repo_id" ]; then
+    die "would overwrite installed Pi content ${installed:-unobservable} with this checkout's $repo_id; pass --allow-downgrade to force"
   fi
-  if [ -n "$configured" ] && [ "$configured" != "$head" ] && git -C "$repo" merge-base --is-ancestor "$head" "$configured" 2>/dev/null; then
-    die "the manager is configured at $configured, which is newer than this checkout ($head); pass --allow-downgrade to force"
+  if [ -n "$configured" ] && [ "$configured" != "$head" ]; then
+    if ! git -C "$repo" cat-file -e "$configured^{commit}" 2>/dev/null; then
+      die "the manager is configured at $configured, which is not present in this checkout; cannot prove it is not newer. Pass --allow-downgrade to force"
+    fi
+    if git -C "$repo" merge-base --is-ancestor "$head" "$configured" 2>/dev/null; then
+      die "the manager is configured at $configured, which is newer than this checkout ($head); pass --allow-downgrade to force"
+    fi
   fi
 fi
 

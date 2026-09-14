@@ -162,6 +162,38 @@ fi
 [ ! -e "$work/none" ] || fail "forced dry run created a manager root"
 pass "forced dry run mutates nothing"
 
+# An unobservable installed identity must not read as "safe to overwrite".
+mkdir -p "$work/empty-client"
+if EDDA_PI_PACKAGE_ROOT="$work/empty-client" sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --dry-run >"$work/unobservable.txt" 2>&1; then
+  fail "--allow-stale proceeded with an unobservable installed Pi identity"
+else
+  [ "$?" -eq 2 ] || fail "unobservable-identity refusal exit was not 2"
+  grep -q "unobservable" "$work/unobservable.txt" || fail "unobservable refusal did not say so"
+  pass "fails closed when installed Pi content cannot be observed"
+fi
+
+# A manager configured at a revision absent from the checkout cannot be proven
+# older, so it must refuse rather than skip the comparison. This fixture's Pi
+# content equals the controlled installed copy, so the Pi guard passes and the
+# manager guard is isolated.
+absent_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+guarded2="$work/guarded2"
+mkdir -p "$guarded2/integrations"
+cp -r "$installed_pi" "$guarded2/integrations/pi"
+git -C "$guarded2" init -q
+git -C "$guarded2" -c user.email=fixture@example.invalid -c user.name=fixture add -A
+git -C "$guarded2" -c user.email=fixture@example.invalid -c user.name=fixture commit -q -m "guarded2"
+mgr_absent="$work/mgr-absent"
+mkdir -p "$mgr_absent"
+printf '{"version":1,"mergeCommit":"%s","headSha":"%s"}\n' "$absent_commit" "$absent_commit" >"$mgr_absent/release.json"
+if EDDA_PI_PACKAGE_ROOT="$installed_pi" sh "$driver" --repo "$guarded2" --manager-root "$mgr_absent" --offline --allow-stale --dry-run >"$work/mgr-absent.txt" 2>&1; then
+  fail "manager configured at an absent revision did not refuse"
+else
+  [ "$?" -eq 2 ] || fail "manager-absent refusal exit was not 2"
+  grep -q "is not present in this checkout" "$work/mgr-absent.txt" || fail "manager-absent refusal did not explain itself"
+  pass "refuses a manager configured at a revision absent from the checkout"
+fi
+
 # ── manager-release: dry run and refusal ──────────────────────────────
 
 manager="$work/manager"

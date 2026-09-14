@@ -91,17 +91,19 @@ Steps, in order, each also valid to run alone:
    again, and reports status.
 4. **receipt gate** — print the receipt and exit `2` unless it is `coherent`.
 
-Safety: `--dry-run` mutates nothing; a dirty tracked tree or a `HEAD` that is not
-the requested revision is refused; old runtime releases and release metadata
-backups are kept; unrelated running work is never stopped or overwritten.
+Safety: `--dry-run` mutates nothing and never fetches; a dirty tracked tree or a
+`HEAD` that is not the requested revision is refused; old runtime releases and
+release metadata backups are kept; unrelated running work is never stopped or
+overwritten.
 
 The route also refuses to activate a checkout that is not current `origin/main`
-(it fetches first), because it installs from the checkout and a stale checkout
-would silently downgrade installed content. `--allow-stale` is the explicit
-opt-out for a deliberately older revision, and under it the route still refuses to
-overwrite differing installed Pi content or a manager configured at a newer
-revision unless `--allow-downgrade` is given; `--offline` skips the fetch and
-requires `--allow-stale`.
+(it fetches first, using the current branch's remote ref and falling back to
+`main`). `--allow-stale` is the explicit opt-out for a deliberately older
+revision, and it still fails closed: it refuses to overwrite differing **or
+unobservable** installed Pi content, and refuses a manager configured at a
+revision that is newer than the checkout or absent locally, unless
+`--allow-downgrade` is given. `--offline` skips the fetch and requires
+`--allow-stale`.
 
 ## Relationship to GH #1133
 
