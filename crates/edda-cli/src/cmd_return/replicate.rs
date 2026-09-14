@@ -195,6 +195,12 @@ fn validate_envelope(envelope: &ReplicateEnvelope) -> Result<()> {
             if value.len() > max {
                 bail!("{what} exceeds {max} bytes");
             }
+            // `logical_id` joins the fields with NUL, so a NUL inside a field
+            // would make two distinct envelopes share one identity. Refusing it
+            // (fail closed) keeps the identity encoding injective.
+            if value.contains('\u{0}') {
+                bail!("{what} must not contain a NUL character");
+            }
         }
     }
     let recomputed = logical_id(
@@ -285,6 +291,16 @@ fn replicate_export(dir: &Path, file: &str, args: &ReplicateArgs) -> Result<()> 
     };
     let path = Path::new(file);
     let bytes = serde_json::to_vec_pretty(&document)?;
+    // The aggregate bound import enforces is checked here too, so a file this
+    // verb writes is always a file this verb can apply.
+    if bytes.len() as u64 > MAX_REPLICATE_BYTES {
+        bail!(
+            "refusing to export {} returns to {file}: {} bytes exceeds the {} byte import bound",
+            count,
+            bytes.len(),
+            MAX_REPLICATE_BYTES
+        );
+    }
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     if let Err(error) = write_temp(&temp, &bytes) {
         let _ = fs::remove_file(&temp);
@@ -740,5 +756,60 @@ mod tests {
             serde_json::from_slice(&fs::read(&from_b).unwrap()).unwrap();
         assert_eq!(document["originMachine"], "machine-b");
         assert_eq!(document["returns"][0]["originMachine"], "machine-a");
+    }
+
+    #[test]
+    fn replicate_export_refuses_a_file_over_the_aggregate_import_bound() {
+        let a = temp();
+        ensure_layout(&a).unwrap();
+        // 64 max-size messages is exactly the model bound before JSON framing, so
+        // the serialized document necessarily exceeds it.
+        for index in 0..64u32 {
+            let id = format!("{index:0>64}");
+            let record = MessageRecord {
+                version: 1,
+                id: id.clone(),
+                owner: "assistant/p".into(),
+                work: format!("job-{index}"),
+                status: "done".into(),
+                result: None,
+                deliverable: None,
+                message: Some("x".repeat(1 << 20)),
+                posted_by_session: String::new(),
+                posted_at: format!("2026-09-14T00:00:{:02}Z", index % 60),
+                origin: None,
+            };
+            write_atomic(&message_file(&a, &id), &record).unwrap();
+        }
+        let file = a.join("huge.json");
+        assert!(
+            export_registry(&a, &file, "machine-a").is_err(),
+            "an over-bound aggregate document must not be written"
+        );
+        assert!(!file.exists(), "a refused export writes no file");
+    }
+
+    #[test]
+    fn replicate_import_refuses_a_nul_bearing_field() {
+        let source = temp();
+        let target = temp();
+        bind(&source, "assistant/p", "s1", None).unwrap();
+        post(&source, "assistant/p", "job-a", "controller-1").unwrap();
+        let mut document = exported_document(&source, "nul.json", "machine-a");
+        let message = "a\u{0}b";
+        document["returns"][0]["message"] = serde_json::json!(message);
+        // Keep the identity consistent so the NUL check, not a mismatch, is the refusal.
+        document["returns"][0]["logicalId"] = serde_json::json!(logical_id(
+            "assistant/p",
+            "job-a",
+            "done",
+            Some("ok"),
+            Some("out.md"),
+            Some(message)
+        ));
+        let file = target.join("nul.json");
+        write_document(&file, &document);
+        assert!(import_registry(&target, &file).is_err());
+        assert_eq!(message_count(&target), 0);
     }
 }
