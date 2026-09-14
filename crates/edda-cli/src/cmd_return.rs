@@ -25,6 +25,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod replicate;
+
 #[derive(Subcommand, Debug)]
 pub enum ReturnCmd {
     /// Register (or explicitly replace) the current responsible holder of an owner reference
@@ -39,6 +41,8 @@ pub enum ReturnCmd {
     Show(ShowArgs),
     /// Read-only: the current holder and return counts
     Status(OwnerArgs),
+    /// Replicate immutable posted returns across isolated registries (no network)
+    Replicate(replicate::ReplicateArgs),
 }
 
 #[derive(Args, Debug)]
@@ -134,6 +138,19 @@ struct MessageRecord {
     message: Option<String>,
     posted_by_session: String,
     posted_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<MessageOrigin>,
+}
+
+/// Provenance added to a record by `return replicate --import`. Backward
+/// compatible: a record written by `post` has no such block.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MessageOrigin {
+    logical_id: String,
+    message_id: String,
+    machine: String,
+    exported_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -298,6 +315,7 @@ pub fn execute(cmd: ReturnCmd, repo_root: &Path) -> Result<()> {
         ReturnCmd::Claim(args) => claim(&dir, args),
         ReturnCmd::Show(args) => show(&dir, args),
         ReturnCmd::Status(args) => status(&dir, args),
+        ReturnCmd::Replicate(args) => replicate::execute(&dir, args),
     }
 }
 
@@ -389,6 +407,7 @@ fn post(dir: &Path, args: PostArgs) -> Result<()> {
         message,
         posted_by_session: args.session.clone(),
         posted_at: now(),
+        origin: None,
     };
     if read_message(dir, &id)?.is_none() {
         write_atomic(&message_file(dir, &id), &record)?;
@@ -569,13 +588,18 @@ fn status(dir: &Path, args: OwnerArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn temp() -> PathBuf {
+    pub(super) fn temp() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("edda-return-{}", ulid::Ulid::new()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn bind(dir: &Path, owner: &str, session: &str, replaces: Option<&str>) -> Result<()> {
+    pub(super) fn bind(
+        dir: &Path,
+        owner: &str,
+        session: &str,
+        replaces: Option<&str>,
+    ) -> Result<()> {
         super::bind(
             dir,
             BindArgs {
@@ -587,7 +611,7 @@ mod tests {
         )
     }
 
-    fn post(dir: &Path, owner: &str, work: &str, session: &str) -> Result<()> {
+    pub(super) fn post(dir: &Path, owner: &str, work: &str, session: &str) -> Result<()> {
         post_with(dir, owner, work, session, "ok", "out.md")
     }
 
@@ -614,7 +638,7 @@ mod tests {
         )
     }
 
-    fn claim(dir: &Path, owner: &str, session: &str) -> Result<()> {
+    pub(super) fn claim(dir: &Path, owner: &str, session: &str) -> Result<()> {
         super::claim(
             dir,
             ClaimArgs {
