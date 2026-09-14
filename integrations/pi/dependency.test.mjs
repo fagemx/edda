@@ -200,6 +200,24 @@ test('owner-bound subscription survives assistant replacement and supersedes the
   assert.equal(messagesA.length, before);
 });
 
+test('a never-configured replaced holder cannot pause the current subscription', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-pause-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/pause-guard';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  let a, b;
+  t.after(async () => { await b?.close(); await a?.close(); await rm(project, { recursive: true, force: true }); });
+  a = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  b = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  await enroll(root, b.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await b.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  assert.notEqual(b.dependencies.status().phase, 'paused');
+  // A never configured, but it must not be able to pause B's subscription.
+  await a.dependencies.pause();
+  assert.notEqual(b.dependencies.status().phase, 'paused');
+});
+
 test('pause during configuration wins and malformed enrollment cannot crash polling', async (t) => {
   const f = await fixture(t);
   await f.follow({ notify: false });

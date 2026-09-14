@@ -255,8 +255,9 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
       } finally { configuring = false; }
     },
     async pause() {
-      // A replaced holder must not pause the subscription the current holder owns.
-      if (ownerRef && data && !ownerHolds()) return status();
+      // A replaced holder must not pause the subscription the current holder owns,
+      // even before it ever configured the observer itself.
+      if (ownerRef && !ownerHolds()) return status();
       writeJson(pausePath, ownerRef ? { ownerRef, nonce: randomUUID(), pausedAt: now() } : { sessionId, nonce: randomUUID(), pausedAt: now() });
       clearInterval(timer);
       operation?.abort.abort();

@@ -105,7 +105,9 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
-      owner: mailbox ? mailbox.state() : (ownerRef ? { owner: ownerRef, status: 'unavailable', error: ownerError } : null), returnOwner: returnOwner || null,
+      owner: mailbox
+        ? { ...mailbox.state(), dependencyScope: dependencyOwnerRef ? 'owner' : 'session', ...(ownerError ? { warning: ownerError } : {}) }
+        : (ownerRef ? { owner: ownerRef, status: 'unavailable', error: ownerError } : null), returnOwner: returnOwner || null,
       integration: { version: integrationVersion, modulePath: fileURLToPath(import.meta.url), releaseId: process.env.EDDA_PI_RELEASE_ID || null },
       capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
       inbox: inbox?.status() }),

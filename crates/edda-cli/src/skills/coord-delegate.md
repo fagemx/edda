@@ -112,7 +112,9 @@ not the controller, worker or implementer of this project's jobs.
 3. Launch: edda-pi launch --project <root>/controllers/<job> --provider <worker-provider> --model <worker-model> --thinking high --prompt-file <root>/briefs/<job>.md
    When the assistant is managed with an owner (`$EDDA_OWNER_REF` is set), add
    `--return-owner "$EDDA_OWNER_REF"`; when it is unset, omit the flag rather than passing an empty
-   value. Keep the printed runId.
+   value. If the assistant run overrode the mailbox root (`$EDDA_RETURN_ROOT` is set), also add
+   `--owner-root "$EDDA_RETURN_ROOT"` so the controller posts to that same mailbox; the registry default
+   needs no flag. Keep the printed runId.
 4. Reply with the runId, where the deliverable lands, and that you will report the outcome.
 ## Result return (owner-bound; survives assistant replacement)
 - The managed runtime records the owner/holder itself when the assistant is launched with
@@ -122,7 +124,8 @@ not the controller, worker or implementer of this project's jobs.
 - The owner mailbox is rooted by the managed launcher (`EDDA_RETURN_ROOT`, default
   `<registry>/owner-mailbox`) and is shared by the assistant and every controller it launches through the
   same registry. The delegated working directories do **not** need a common `.edda`/`.git` workspace root,
-  and the operator does not initialize one.
+  and the operator does not initialize one. A run launched with a custom `--owner-root` must repeat it (or
+  pass `--owner-root "$EDDA_RETURN_ROOT"`) on every delegated launch.
 - The assistant's owner reference is discoverable from the launch contract as `EDDA_OWNER_REF` (with
   `EDDA_RETURN_OWNER` as the controller's return address) and must be carried into every controller brief
   automatically. Do not put session ids in the brief.

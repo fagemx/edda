@@ -99,7 +99,7 @@ test('a channel with an owner binds on start and claims exactly once', async (t)
   const root = join(cwd, 'private');
   const channel = await startChannel({ root, sessionId: randomUUID(), cwd, ownerRef: owner, ownerCommand: fixture(), deliver() {} });
   t.after(async () => { await channel.close(); await rm(cwd, { recursive: true, force: true }); });
-  assert.deepEqual(channel.snapshot().owner, { owner, status: 'bound', replaced: false });
+  assert.deepEqual(channel.snapshot().owner, { owner, status: 'bound', replaced: false, dependencyScope: 'owner' });
   assert.equal(channel.snapshot().returnOwner, null);
   await postReturn(cwd, { work: 'job-channel', session: 'controller-c' });
   const first = await channel.claimOwnerReturns();

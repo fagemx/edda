@@ -57,7 +57,9 @@ assistant and every controller it launches under the same registry share that
 mailbox, so the delegated `assistant/` and `controllers/<job>/` directories do
 not need a common `.edda`/`.git` workspace root. A controller launch passes
 `--return-owner assistant/<project>` (the owner its done/failed return is posted
-against) and receives it as `EDDA_RETURN_OWNER`.
+against) and receives it as `EDDA_RETURN_OWNER`; if the assistant used a custom
+`--owner-root`, the controller launch repeats it (or passes
+`--owner-root "$EDDA_RETURN_ROOT"`) so both use the same mailbox.
 
 Launch may incur model usage. It creates one owned background runner, a Pi
 session, an immutable integration release and an initial-message intent. It
