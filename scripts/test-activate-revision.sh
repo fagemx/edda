@@ -97,6 +97,12 @@ pass "dry run mutates nothing"
 # installed, must be refused by default and only proceed with explicit opt-outs.
 guarded="$work/guarded"
 origin_bare="$work/origin.git"
+# A controlled "installed" package so the downgrade guard is deterministic on
+# hosts that have no global @edda/pi-session-channel (CI) as well as on a
+# workstation that does.
+installed_pi="$work/installed-pi"
+mkdir -p "$installed_pi"
+cp integrations/pi/*.mjs integrations/pi/*.ps1 integrations/pi/package.json integrations/pi/getting-started.md "$installed_pi/" 2>/dev/null || true
 mkdir -p "$guarded"
 git -C "$work" init -q --bare "$origin_bare"
 cp -r integrations/pi "$guarded/integrations-pi"
@@ -137,7 +143,7 @@ else
   pass "--offline alone refuses without --allow-stale"
 fi
 
-if sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --dry-run >"$work/downgrade.txt" 2>&1; then
+if EDDA_PI_PACKAGE_ROOT="$installed_pi" sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --dry-run >"$work/downgrade.txt" 2>&1; then
   fail "--allow-stale overwrote differing installed Pi content without --allow-downgrade"
 else
   [ "$?" -eq 2 ] || fail "downgrade refusal exit was not 2"
@@ -146,7 +152,7 @@ else
 fi
 
 before_guarded=$(git -C "$guarded" status --porcelain)
-if sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --allow-downgrade --dry-run >"$work/forced.txt" 2>&1; then
+if EDDA_PI_PACKAGE_ROOT="$installed_pi" sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --allow-downgrade --dry-run >"$work/forced.txt" 2>&1; then
   pass "--allow-stale --allow-downgrade proceeds"
 else
   cat "$work/forced.txt" >&2
