@@ -303,6 +303,57 @@ test('11. a rejected ambient EDDA_RETURN_ROOT is neutralised for the workspace c
   } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
 });
 
+test('13. the managed mailbox prefers the owner agent and orders ties deterministically', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'owner-root-managed-order-')), workspace = join(base, 'workspace');
+  mkdirSync(workspace);
+  const mailboxOf: Record<string, { ref: string; root: string } | null> = {
+    owner: { ref: 'assistant/owner', root: join(base, 'mailbox-owner') },
+    other: { ref: 'assistant/owner', root: join(base, 'mailbox-other') },
+    beta: { ref: 'assistant/owner', root: join(base, 'mailbox-beta') },
+    alpha: { ref: 'assistant/owner', root: join(base, 'mailbox-alpha') },
+    none: null,
+  };
+  for (const value of Object.values(mailboxOf)) if (value) mailbox(value.root);
+  const configFor = (agentIds: string[], ownerAgentId: string): ReturnType<typeof parseConfig> => parseConfig({ version: 1,
+    projects: [{ id: 'p', name: 'Project' }],
+    agents: agentIds.map((id) => ({ id, name: id, projectId: 'p', role: 'worker', registryRoot: join(base, 'registry'), workspace, sessionId: `${id}-session` })),
+    works: [{ id: 'w', projectId: 'p', taskId: 7, workspace, ownerAgentId, ownerRef: 'assistant/owner' }] });
+  const managedLabel = async (agentIds: string[], ownerAgentId: string): Promise<string | null> => {
+    const store = new ManagerStore(base);
+    const manager = new AgentManager(configFor(agentIds, ownerAgentId), store, adapterFor((binding) => live({ ownerMailbox: mailboxOf[binding.id] ?? null }), randomUUID()),
+      { ledger: new EddaWorkflowLedger(runner([])), locks: new WorkflowLocks(join(base, 'locks')) });
+    try {
+      return await withEnv(undefined, async () => {
+        await manager.refresh();
+        const work = (await manager.works.list()).works[0]!;
+        assert.equal(work.ownerReturn?.mailbox.kind, 'managed');
+        return work.ownerReturn?.mailbox.label ?? null;
+      });
+    } finally { await manager.stop(); store.close(); }
+  };
+  try {
+    // The owner agent wins over an equally matching, lexicographically earlier agent.
+    assert.equal(await managedLabel(['other', 'owner'], 'owner'), rootLabel(mailboxOf.owner!.root));
+    // Two matching non-owner agents: the lexicographically first id wins in both array orders.
+    assert.equal(await managedLabel(['beta', 'alpha', 'none'], 'none'), rootLabel(mailboxOf.alpha!.root));
+    assert.equal(await managedLabel(['alpha', 'beta', 'none'], 'none'), rootLabel(mailboxOf.alpha!.root));
+    // No matching agent: the managed candidate is null and the next root is used.
+    mailbox(workspace);
+    const store = new ManagerStore(base);
+    const config = configFor(['none'], 'none');
+    const manager = new AgentManager(config, store, adapterFor(() => live(), randomUUID()), { ledger: new EddaWorkflowLedger(runner([])), locks: new WorkflowLocks(join(base, 'locks')) });
+    try {
+      await withEnv(undefined, async () => {
+        await manager.refresh();
+        const work = (await manager.works.list()).works[0]!;
+        assert.equal(work.ownerReturn?.mailbox.kind, 'workspace');
+        assert.equal(work.ownerReturn?.mailbox.present, true);
+        assert.equal(work.ownerReturn?.mailbox.label, rootLabel(workspace));
+      });
+    } finally { await manager.stop(); store.close(); }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
 test('12. the workspace probe mirrors EddaPaths::find_root boundaries', () => {
   const base = mkdtempSync(join(tmpdir(), 'owner-root-find-'));
   try {

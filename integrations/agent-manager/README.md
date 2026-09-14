@@ -191,13 +191,16 @@ with `edda return bind`, so the work card can show that owner's pending returns.
 `ownerRoot` is also optional and pins the mailbox root explicitly (an absolute
 path). When it is absent the read resolves the root in precedence order: the
 pinned `works[].ownerRoot`, then an absolute `EDDA_RETURN_ROOT`, then the mailbox
-observed on the work owner's own managed run, then the CLI's own default. The
-managed candidate exists only for a selected agent whose binding carries that
-run's `runId` and whose run declares this owner reference (`edda-pi run-status`
-reports its `ownerRoot`, defaulting to `<registryRoot>/owner-mailbox`); without a
-`runId` the run is never read and that candidate is absent. The last candidate is
-deliberately not pinned to the workspace directory: the `edda return` CLI
-resolves the enclosing Edda root of the work workspace itself, and an ambient
+observed on a same-project Pi agent whose run declares this owner reference
+(the work's owner agent preferred, then a deterministic `id` order), then the
+CLI's own default. `edda-pi run-status` reports the effective `ownerRoot` on a
+live runner snapshot; the `record_unavailable` path returns only an explicitly
+passed `--owner-root` (or null), and the manager recreates the documented
+`<registryRoot>/owner-mailbox` default when the run declares an owner. The
+managed candidate is therefore deterministic and never depends on configuration
+order. The last candidate is deliberately not pinned to the workspace directory:
+the `edda return` CLI resolves the enclosing Edda root of the work workspace
+itself, and an ambient
 `EDDA_RETURN_ROOT` is cleared for that read (the CLI reads an empty override as
 absent) so the card and the read can never point at different roots. The first candidate whose `.edda/returns` layout
 exists is read; a higher-precedence candidate with no mailbox is disclosed in a
@@ -243,9 +246,11 @@ owner-bound `edda return` status (owner, holder, pending count and each matched
 return; an unusable matched return is reported as dropped, never hidden), the
 mailbox it read (named by source and an opaque root label) and a bounded notice
 that discloses a fallback or an absent mailbox. A
-fresher native fact — the task rail, a delivery receipt, a bound
-session, an owner-inbox event or a posted return — always wins over a stale
-manual stage.
+fresher native fact — the task rail, a delivery receipt, an observed bound
+session or a fresher owner-inbox event — outranks the manual stage; a posted
+return outranks only the manual `assigned` / `executing` / `awaiting_delivery`
+stages, so a recorded `delivered` / `accepted` / `blocked` decision still stands
+over an unclaimed return.
 
 Capability boundary: this projection reads and explains. It does not schedule,
 auto-register a source, wake an owner, restart or replay a worker, collect or

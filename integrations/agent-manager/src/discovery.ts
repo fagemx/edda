@@ -21,10 +21,14 @@ export function rootLabel(registryRoot: string): string {
 function identity(run: DiscoveredRun): string {
   return `${run.registryRoot}\0${runKey(run)}`;
 }
+// Carry `degraded` deliberately: a live preferred row is evidence the record is
+// usable, so it clears the other row's degradation (but keeps its own if it has
+// one); between two recorded rows the degradation is a real fact and is kept.
 function merge(preferred: DiscoveredRun, other: DiscoveredRun): DiscoveredRun {
   return { ...preferred, sessionId: preferred.sessionId ?? other.sessionId, runId: preferred.runId ?? other.runId,
     instanceId: preferred.instanceId ?? other.instanceId, workspace: preferred.workspace ?? other.workspace,
-    lastProgressAt: preferred.lastProgressAt ?? other.lastProgressAt };
+    lastProgressAt: preferred.lastProgressAt ?? other.lastProgressAt,
+    degraded: preferred.degraded ?? (preferred.live ? null : other.degraded ?? null) };
 }
 // The same run can appear both as a live session and as recorded managed
 // inventory. Keep one run per (registry root, session/run) identity, preferring

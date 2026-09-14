@@ -27,6 +27,12 @@ export function eddaRunner(executable = process.platform === 'win32' ? 'edda.exe
     });
   });
 }
+// The owner-return read is bounded twice: at most this many pending items are
+// examined, and at most this many matched facts are projected into the DTO. The
+// scan bound must be applied before matching so a matching return beyond the
+// first items is still found; the display bound only trims the projection.
+const MAX_RETURN_SCAN = 200;
+const MAX_RETURN_MATCHED = 20;
 export class EddaWorkflowLedger implements WorkflowLedger {
   constructor(private run: EddaRunner = eddaRunner()) {}
   async task(binding: WorkBinding): Promise<CanonicalTask> {
@@ -66,8 +72,12 @@ export class EddaWorkflowLedger implements WorkflowLedger {
       const total = status.total == null ? null : Number(status.total);
       if (total !== null && (!Number.isSafeInteger(total) || total < 0)) return failed('負責人回件狀態的總數不正確。');
       const list = object(JSON.parse(await this.run(binding.workspace, ['return', 'pending', '--owner', ownerRef, '--json'], env)) as unknown);
-      const items = Array.isArray(list.pending) ? list.pending.slice(0, 20) : [];
-      const matched: OwnerReturnFact[] = [];
+      const all = Array.isArray(list.pending) ? list.pending : [];
+      // Match across the whole scan window first; the display bound is applied to
+      // the matched facts, not to the input, so a matching return past the first
+      // few items is still found and counted.
+      const items = all.slice(0, MAX_RETURN_SCAN);
+      const matchedAll: OwnerReturnFact[] = [];
       let dropped = 0;
       for (const raw of items) {
         let work: string | null = null;
@@ -77,13 +87,20 @@ export class EddaWorkflowLedger implements WorkflowLedger {
           // A matched item whose status is not the bounded vocabulary is a dropped
           // fact, not an absent one: the card must not report a healthy count.
           if (item.status !== 'done' && item.status !== 'failed') { dropped += 1; continue; }
-          matched.push({ id: text(item.id, 200), work, status: item.status, result: item.result == null ? null : text(item.result, 2000), postedAt: text(item.posted_at, 100) });
+          matchedAll.push({ id: text(item.id, 200), work, status: item.status, result: item.result == null ? null : text(item.result, 2000), postedAt: text(item.posted_at, 100) });
         } catch {
           // Unreadable only where it might be this work's: an unusable item whose
           // id is unknown is conservatively counted as dropped.
           if (work === null || work === String(binding.taskId) || work === binding.id) dropped += 1;
         }
       }
+      // Matched facts past the display bound are counted, not hidden; likewise the
+      // pending items past the scan bound were never examined and may belong to
+      // this work. `dropped` therefore covers unusable, out-of-range and
+      // over-the-bound items, so the card never reports a healthy count while a
+      // return that might belong to this work is withheld.
+      const matched = matchedAll.slice(0, MAX_RETURN_MATCHED);
+      dropped += matchedAll.length - matched.length + (all.length - items.length);
       return { owner, holder: typeof status.holder === 'string' ? status.holder.slice(0, 200) : null, pending: Number(pending), total, matched, dropped, error: null };
     } catch { return failed('負責人回件狀態暫時無法讀取；未自動重試。'); }
   }

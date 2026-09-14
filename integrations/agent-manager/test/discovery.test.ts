@@ -8,10 +8,10 @@ import { pathToFileURL } from 'node:url';
 import { AgentManager } from '../src/manager.js';
 import { ManagerStore } from '../src/store.js';
 import { parseConfig, parseRegisterCandidate } from '../src/config.js';
-import { candidateId, projectCandidates, rootLabel } from '../src/discovery.js';
+import { candidateId, dedupeRuns, projectCandidates, rootLabel } from '../src/discovery.js';
 import { ChannelAdapter, defaultPiRoot } from '../src/pi-adapter.js';
 import { serve } from '../src/http.js';
-import { type AgentObservation, type DiscoveryReport, type DiscoveredRun, type PiAdapter } from '../src/contracts.js';
+import { type AgentObservation, type DiscoveryReport, type DiscoveredRun, type PiAdapter, type RecordDegradation } from '../src/contracts.js';
 
 interface Channel { snapshot(): { instanceId: string }; close(): Promise<void> }
 interface ChannelModule { startChannel(options: { root: string; sessionId: string; cwd: string; deliver: () => void; getConversation: () => unknown }): Promise<Channel> }
@@ -287,4 +287,19 @@ test('registration carries the managed run id when the candidate has one', async
     await manager.registerCandidate({ candidateId: candidateId({ registryRoot: root, sessionId: 's' }), id: 'x', name: 'X', role: 'worker', projectId: 'p' });
     assert.equal(manager.binding('x').runId, runId);
   } finally { await manager.stop(); store.close(); rmSync(root, { recursive: true, force: true }); rmSync(workspace, { recursive: true, force: true }); }
+});
+
+test('a run merge keeps a recorded degradation unless a live row clears it', () => {
+  const root = 'C:/registry', degraded: RecordDegradation = { code: 'record_unavailable', record: 'state.json', message: '無法讀取', recovery: 'inspect' };
+  const recorded = (over: Partial<DiscoveredRun> = {}): DiscoveredRun => ({ registryRoot: root, sessionId: 's', runId: null, instanceId: null,
+    state: 'unknown', live: false, source: 'recorded', workspace: null, lastProgressAt: null, reason: 'offline', ...over });
+  const liveRow = (over: Partial<DiscoveredRun> = {}): DiscoveredRun => ({ ...recorded(), live: true, source: 'live', state: 'idle', reason: null, ...over });
+  // A live preferred row is evidence the record is usable, so it clears the other
+  // row's recorded degradation.
+  assert.equal(dedupeRuns({ runs: [liveRow(), recorded({ degraded })], failures: [] })[0]?.degraded, null);
+  assert.equal(dedupeRuns({ runs: [recorded({ degraded }), liveRow()], failures: [] })[0]?.degraded, null);
+  // Between two recorded rows the degradation is a real fact and is kept.
+  assert.equal(dedupeRuns({ runs: [recorded({ degraded }), recorded()], failures: [] })[0]?.degraded?.code, 'record_unavailable');
+  // A live preferred row keeps its own degradation.
+  assert.equal(dedupeRuns({ runs: [liveRow({ degraded }), recorded({ degraded: null })], failures: [] })[0]?.degraded?.code, 'record_unavailable');
 });

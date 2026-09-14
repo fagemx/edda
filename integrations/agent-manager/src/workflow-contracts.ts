@@ -31,8 +31,10 @@ export interface WorkRegistryRelation { relation: WorkRootRelation; message: str
 // CLI. `matched` is the bounded subset of pending returns whose `work` matches
 // this work's task id or work id.
 export interface OwnerReturnFact { id: string; work: string; status: 'done' | 'failed'; result: string | null; postedAt: string }
-// `dropped` counts bounded pending items that could not be used and may belong to
-// this work, so the card never reports a healthy count while hiding one.
+// `dropped` counts pending items that could not be used and may belong to this
+// work — matched-but-unusable facts, matched facts beyond the display bound, and
+// pending items beyond the scan bound — so the card never reports a healthy count
+// while hiding one.
 export interface OwnerReturnRead { owner: string; holder: string | null; pending: number; total: number | null; matched: OwnerReturnFact[]; dropped: number; error: string | null }
 // Which mailbox root the read resolved to and whether that root actually held a
 // mailbox layout. `label` is an opaque hash, never a path.

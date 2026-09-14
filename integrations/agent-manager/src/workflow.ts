@@ -480,21 +480,18 @@ export class WorkManager {
     }
     return { kind: selected.kind, root: selected.root, label, present, notice };
   }
-  /** Where the `edda return` CLI itself would look: `EddaPaths::find_root` climbs
-   *  from `cwd` to the nearest ancestor holding `.edda`, so the workspace candidate
-   *  must be probed there rather than pinned to the workspace directory. Bounded to
-   *  16 levels and never a directory scan; a tree with no `.edda` above it keeps
-   *  the workspace path, and an unconfirmable mailbox is reported as such. */
-  /** The first project Pi agent — the work's owner agent first — whose observed
-   *  owner mailbox names this work's owner reference. Never invents a root. */
+  /** The first project Pi agent whose observed owner mailbox names this work's
+   *  owner reference. Qualified agents are ordered deterministically: the work's
+   *  owner agent first, then by `id.localeCompare`, so the chosen root does not
+   *  depend on config or observation order. Never invents a root. */
   private managedMailbox(binding: WorkBinding, agents: AgentView[]): string | null {
-    const candidates = agents.filter((agent) => agent.projectId === binding.projectId && agent.transport === 'pi');
-    candidates.sort((a, b) => Number(b.id === binding.ownerAgentId) - Number(a.id === binding.ownerAgentId));
-    for (const agent of candidates) {
-      const observed = agent.ownerMailbox, root = observed?.root;
-      if (observed?.ref === binding.ownerRef && typeof root === 'string' && isAbsolute(root)) return root;
-    }
-    return null;
+    const candidates = agents.flatMap((agent) => {
+      const observed = agent.ownerMailbox;
+      if (agent.projectId !== binding.projectId || agent.transport !== 'pi' || !observed || observed.ref !== binding.ownerRef ||
+        typeof observed.root !== 'string' || !isAbsolute(observed.root)) return [];
+      return [{ id: agent.id, root: observed.root }];
+    }).sort((a, b) => Number(b.id === binding.ownerAgentId) - Number(a.id === binding.ownerAgentId) || a.id.localeCompare(b.id));
+    return candidates[0]?.root ?? null;
   }
   /** Attach the resolved mailbox and its notice. A read from an absent layout is
    *  never allowed to look healthy: `present: false` forces a non-null error. */
