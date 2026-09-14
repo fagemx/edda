@@ -32,10 +32,18 @@ Activate one merged revision across the Edda delivery carriers (Job C)
   --no-edda            skip the shipping-binary step
   --no-pi              skip the Pi package step
   --no-manager         skip the agent-manager step
+  --offline            do not fetch; cannot verify freshness (requires --allow-stale)
+  --allow-stale        activate a deliberately older revision than origin/main
+  --allow-downgrade    with --allow-stale, allow overwriting newer installed content
   --dry-run            print the plan and mutate nothing
   --json               accepted; the final receipt is always printed as JSON
   -h, --help           this message
 Exit codes: 0 activated and coherent, 1 a step failed, 2 usage/refusal/non-coherent.
+
+By default the route refuses to activate a checkout that is not current `origin/main`,
+and under --allow-stale it also refuses to overwrite newer installed content unless
+--allow-downgrade is given. This route installs from the checkout, so activating a stale
+checkout would silently downgrade installed Pi content or the manager release (issue #1217).
 EOF
 }
 
@@ -43,6 +51,7 @@ die() { printf 'activate-revision: %s\n' "$*" >&2; exit 2; }
 
 repo=""; revision=""; edda_bin="edda"; edda_from=""; manager_root=""; registry_root=""
 dry_run=0; json=0; do_edda=1; do_pi=1; do_manager=1
+offline=0; allow_stale=0; allow_downgrade=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -55,6 +64,9 @@ while [ $# -gt 0 ]; do
     --no-edda) do_edda=0; shift ;;
     --no-pi) do_pi=0; shift ;;
     --no-manager) do_manager=0; shift ;;
+    --offline) offline=1; shift ;;
+    --allow-stale) allow_stale=1; shift ;;
+    --allow-downgrade) allow_downgrade=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --json) json=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -78,6 +90,21 @@ git -C "$repo" diff --quiet -- 2>/dev/null || die "$repo has unstaged tracked ch
 git -C "$repo" diff --cached --quiet -- 2>/dev/null || die "$repo has staged changes; commit or stash first"
 [ "$head" = "$revision" ] || die "HEAD ($head) is not the target revision ($revision); check out the target first"
 
+# ── Freshness guard (#1217) ────────────────────────────────────────────
+# The route installs from the checkout, so activating a checkout that is behind
+# origin/main silently downgrades installed content. Refuse unless the operator
+# deliberately asks for an older revision.
+if [ "$offline" = 1 ] && [ "$allow_stale" = 0 ]; then
+  die "--offline cannot verify that HEAD is current; pass --allow-stale to activate deliberately"
+elif [ "$allow_stale" = 1 ]; then
+  printf 'activate-revision: WARNING activating a possibly stale revision (%s) because --allow-stale was given\n' "$revision"
+else
+  git -C "$repo" fetch --quiet origin main 2>/dev/null || die "could not fetch origin/main; pass --offline --allow-stale to proceed without the freshness check"
+  origin_main=$(git -C "$repo" rev-parse --verify --quiet origin/main 2>/dev/null) || die "cannot resolve origin/main; pass --offline --allow-stale to proceed without the freshness check"
+  [ "$revision" = "$origin_main" ] || die "checkout $revision is not current origin/main ($origin_main); run 'git -C $repo fetch && git -C $repo pull --ff-only', or pass --allow-stale to activate a deliberately older revision"
+  printf 'activate-revision: freshness ok (HEAD == origin/main %s)\n' "$origin_main"
+fi
+
 receipt="$repo/integrations/pi/activation-receipt.mjs"
 [ -f "$receipt" ] || die "missing $receipt (the read-only receipt module)"
 
@@ -97,6 +124,23 @@ run() {
     "$@"
   fi
 }
+
+# ── Downgrade guard (#1217) ────────────────────────────────────────────
+# Under --allow-stale the checkout may be older than installed state; refuse to
+# overwrite newer installed Pi content or a manager configured at a newer
+# revision unless the operator explicitly asks for it.
+if [ "$allow_stale" = 1 ] && [ "$allow_downgrade" = 0 ]; then
+  guard=$(receipt_json)
+  installed=$(printf '%s' "$guard" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);process.stdout.write(r.pi.installedReleaseId||'')})")
+  repo_id=$(printf '%s' "$guard" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);process.stdout.write(r.pi.repoReleaseId||'')})")
+  configured=$(printf '%s' "$guard" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);process.stdout.write((r.manager.configured&&r.manager.configured.headSha)||'')})")
+  if [ -n "$installed" ] && [ -n "$repo_id" ] && [ "$installed" != "$repo_id" ]; then
+    die "would overwrite installed Pi content $installed with this checkout's $repo_id; pass --allow-downgrade to force"
+  fi
+  if [ -n "$configured" ] && [ "$configured" != "$head" ] && git -C "$repo" merge-base --is-ancestor "$head" "$configured" 2>/dev/null; then
+    die "the manager is configured at $configured, which is newer than this checkout ($head); pass --allow-downgrade to force"
+  fi
+fi
 
 printf 'activate-revision: repo=%s revision=%s dryRun=%s\n' "$repo" "$revision" "$dry_run"
 

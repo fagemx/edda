@@ -31,7 +31,7 @@ pass() { echo "ok - $1"; }
 # ── fixture checkout ──────────────────────────────────────────────────
 fixture="$work/repo"
 mkdir -p "$fixture/integrations/pi" "$fixture/integrations/agent-manager/dist/src"
-printf '%s\n' 'export function activationReceipt() { return {}; }' >"$fixture/integrations/pi/activation-receipt.mjs"
+printf '%s\n' 'process.stdout.write(JSON.stringify({ pi: { installedReleaseId: null, repoReleaseId: null }, manager: { configured: null } }));' >"$fixture/integrations/pi/activation-receipt.mjs"
 printf '%s\n' '{}' >"$fixture/integrations/pi/package.json"
 printf '%s\n' '// built cli placeholder' >"$fixture/integrations/agent-manager/dist/src/cli.js"
 git -C "$fixture" init -q
@@ -77,7 +77,7 @@ fi
 # ── driver: dry run plans everything and mutates nothing ──────────────
 
 before=$(git -C "$fixture" status --porcelain)
-if sh "$driver" --repo "$fixture" --manager-root "$work/manager" --dry-run >"$work/dry.txt" 2>&1; then
+if sh "$driver" --repo "$fixture" --manager-root "$work/manager" --offline --allow-stale --dry-run >"$work/dry.txt" 2>&1; then
   pass "driver --dry-run exits 0"
 else
   cat "$work/dry.txt" >&2
@@ -91,6 +91,70 @@ after=$(git -C "$fixture" status --porcelain)
 [ "$before" = "$after" ] || fail "dry run modified the fixture checkout"
 [ ! -e "$work/manager" ] || fail "dry run created a manager root"
 pass "dry run mutates nothing"
+
+# ── Freshness and downgrade guards (#1217) ────────────────────────────
+# A checkout whose origin/main is ahead, whose Pi content differs from what is
+# installed, must be refused by default and only proceed with explicit opt-outs.
+guarded="$work/guarded"
+origin_bare="$work/origin.git"
+mkdir -p "$guarded"
+git -C "$work" init -q --bare "$origin_bare"
+cp -r integrations/pi "$guarded/integrations-pi"
+mkdir -p "$guarded/integrations"
+mv "$guarded/integrations-pi" "$guarded/integrations/pi"
+# Make the checkout's Pi content differ from the installed package so the
+# downgrade guard has something to catch.
+printf '\n// stale-guard fixture marker\n' >> "$guarded/integrations/pi/cli.mjs"
+git -C "$guarded" init -q
+git -C "$guarded" -c user.email=fixture@example.invalid -c user.name=fixture add -A
+git -C "$guarded" -c user.email=fixture@example.invalid -c user.name=fixture commit -q -m "guarded"
+git -C "$guarded" branch -M main
+git -C "$guarded" remote add origin "$origin_bare"
+git -C "$guarded" push -q -u origin main
+git -C "$origin_bare" symbolic-ref HEAD refs/heads/main
+# Advance origin/main so the guarded checkout is behind it.
+other="$work/other"
+git clone -q "$origin_bare" "$other"
+printf 'advanced\n' > "$other/ADVANCE.txt"
+git -C "$other" -c user.email=fixture@example.invalid -c user.name=fixture add -A
+git -C "$other" -c user.email=fixture@example.invalid -c user.name=fixture commit -q -m "advance"
+git -C "$other" push -q origin main
+git -C "$guarded" fetch -q origin main
+
+if sh "$driver" --repo "$guarded" --manager-root "$work/none" --dry-run >"$work/stale.txt" 2>&1; then
+  fail "route activated a checkout behind origin/main by default"
+else
+  [ "$?" -eq 2 ] || fail "stale-checkout refusal exit was not 2"
+  grep -q "is not current origin/main" "$work/stale.txt" || fail "stale-checkout refusal did not name origin/main"
+  pass "route refuses a checkout behind origin/main by default"
+fi
+
+if sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --dry-run >"$work/offline.txt" 2>&1; then
+  fail "--offline alone skipped the freshness check"
+else
+  [ "$?" -eq 2 ] || fail "--offline refusal exit was not 2"
+  grep -q "pass --allow-stale" "$work/offline.txt" || fail "--offline refusal did not point at --allow-stale"
+  pass "--offline alone refuses without --allow-stale"
+fi
+
+if sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --dry-run >"$work/downgrade.txt" 2>&1; then
+  fail "--allow-stale overwrote differing installed Pi content without --allow-downgrade"
+else
+  [ "$?" -eq 2 ] || fail "downgrade refusal exit was not 2"
+  grep -q "would overwrite installed Pi content" "$work/downgrade.txt" || fail "downgrade refusal did not name the installed content"
+  pass "--allow-stale refuses to overwrite differing installed Pi content"
+fi
+
+before_guarded=$(git -C "$guarded" status --porcelain)
+if sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --allow-downgrade --dry-run >"$work/forced.txt" 2>&1; then
+  pass "--allow-stale --allow-downgrade proceeds"
+else
+  cat "$work/forced.txt" >&2
+  fail "explicit --allow-downgrade did not proceed"
+fi
+[ "$before_guarded" = "$(git -C "$guarded" status --porcelain)" ] || fail "forced dry run modified the guarded checkout"
+[ ! -e "$work/none" ] || fail "forced dry run created a manager root"
+pass "forced dry run mutates nothing"
 
 # ── manager-release: dry run and refusal ──────────────────────────────
 
