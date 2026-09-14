@@ -15,6 +15,7 @@ import { requestSession } from './client.mjs';
 import { readJson, writeJson } from './store.mjs';
 import { listInbox } from './inbox-manager.mjs';
 import { listManagedRuns } from './activation.mjs';
+import { removeTempTree } from './fixtures/temp-teardown.mjs';
 
 const exec = promisify(execFile);
 async function until(fn) {
@@ -41,14 +42,14 @@ async function fixture(t) {
       if (state.live) await stopManaged(registry, runId, { abort: true });
       await until(async () => { const current = await managedStatus(registry, runId); return !alive(current.runnerPid) && !alive(current.childPid); });
     }
-    await rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   });
   return { root, project, registry, entry, runId };
 }
 
 test('runtime install is repeatable and verifies actual file bytes', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'edda-release-test-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => { await removeTempTree(root); });
   const first = installRuntime(root), second = installRuntime(root);
   assert.deepEqual(first, second);
   assert.equal(verifyRelease(first).id, first.id);

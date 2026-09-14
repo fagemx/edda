@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import { readTask } from './compose-sources.mjs';
 import { writeJson, digest } from './store.mjs';
 import { managedStatus, stopManaged } from './managed-client.mjs';
 import { supervisorStatus, stopSupervisor } from './supervisor-client.mjs';
+import { removeTempTree } from './fixtures/temp-teardown.mjs';
 
 async function fixture(t, authority = 'Both fixture tasks are already approved; continue within these directories only.') {
   const root = await mkdtemp(join(tmpdir(), 'edda-supervisor-test-'));
@@ -41,7 +42,7 @@ async function fixture(t, authority = 'Both fixture tasks are already approved; 
     for (const id of [state.managerRunId, ...Object.values(state.workers).map((w) => w.runId)].filter(Boolean)) {
       try { if ((await managedStatus(registry, id)).live) await stopManaged(registry, id, { abort: true }); } catch { /* not launched */ }
     }
-    await rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   });
   return { root, project, registry, config, put, taskReader, get engine() { return engine; },
     restart() { engine = make(); return engine; }, pause() { active = false; }, resume() { active = true; } };
