@@ -237,7 +237,7 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Owner-bound return continuity: bind, post, pending, claim, show, status
+    /// Owner-bound return continuity: bind, post, pending, claim, show, status, replicate
     Return {
         #[command(subcommand)]
         cmd: cmd_return::ReturnCmd,

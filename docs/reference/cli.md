@@ -1089,6 +1089,16 @@ shared root for an assistant and its delegated controllers through the absolute 
 `EDDA_RETURN_ROOT`, so sibling project directories that do not share an `.edda`/`.git` workspace still
 meet in one mailbox; when the variable is unset the resolved workspace root is used unchanged.
 
+`replicate --export/--import` moves only allowlisted immutable posted-return envelopes between two
+isolated mailboxes through one portable JSON file (no network, no scheduler). It never replicates
+sessions, run ids, registry/workspace paths, holder bindings, claim markers, locks, leases, processes,
+tokens or transcripts, and import never writes `owners/` or `claims/`; an imported return is visible
+pending but stays unclaimable until the receiving machine binds the owner locally. The file carries a
+logical return identity that excludes the local posting session, so importing the same export twice
+(or the same logical return from two machines) appends each return once. Import fails closed: an
+unknown version/kind or a foreign-key envelope refuses the whole file with per-envelope
+reasons and writes nothing.
+
 ```bash
 edda return bind --owner assistant/<project> --session "$EDDA_SESSION_ID" [--replaces-session OLD] [--json]
 edda return post --owner assistant/<project> --work <job> --status done|failed [--result T] [--deliverable P] [--message-file F] --session C [--json]
@@ -1096,6 +1106,8 @@ edda return pending --owner assistant/<project> [--json]
 edda return claim --owner assistant/<project> --session "$EDDA_SESSION_ID" [--json]
 edda return show --id ID [--json]
 edda return status --owner assistant/<project> [--json]
+edda return replicate --export FILE [--owner REF] [--machine LABEL] [--json]
+edda return replicate --import FILE [--json]
 ```
 
 | Flag | Subcommand | Meaning |
@@ -1109,6 +1121,9 @@ edda return status --owner assistant/<project> [--json]
 | `--deliverable PATH` | `post` | Deliverable path |
 | `--message-file PATH` | `post` | Full report (`-` reads stdin) |
 | `--id ID` | `show` | Return id |
+| `--export FILE` | `replicate` | Write this mailbox's allowlisted immutable returns to a portable JSON file (read-only on the mailbox) |
+| `--import FILE` | `replicate` | Validate and append a portable file's returns once, deduped on the logical return identity |
+| `--machine LABEL` | `replicate` | Declared origin-machine label recorded on exported envelopes |
 | `--json` | all | Emit one JSON object |
 
 ---
