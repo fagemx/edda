@@ -50,7 +50,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs inbox-respond EVENT_ID --message-file PATH [--authorization RECORD_ID]
   node integrations/pi/cli.mjs inbox-wake
   node integrations/pi/cli.mjs runtime-install
-  node integrations/pi/cli.mjs launch --project PATH [--pi-entry FILE] [--provider NAME] [--model NAME] [--thinking LEVEL] [--prompt-file FILE] [--run-id UUID] [--extension FILE] [--agent-dir PATH] [--no-tools] [--owner REF] [--return-owner REF]
+  node integrations/pi/cli.mjs launch --project PATH [--pi-entry FILE] [--provider NAME] [--model NAME] [--thinking LEVEL] [--prompt-file FILE] [--run-id UUID] [--extension FILE] [--agent-dir PATH] [--no-tools] [--owner REF] [--return-owner REF] [--owner-root DIR]
   node integrations/pi/cli.mjs run-status RUN_ID
   node integrations/pi/cli.mjs run-conversation RUN_ID [--after ENTRY_ID] [--limit 20]
   node integrations/pi/cli.mjs run-stop RUN_ID [--abort]
@@ -96,7 +96,7 @@ async function main(args) {
     inbox: ['--consumer', '--limit', '--after'], 'inbox-read': ['--consumer', '--budget-bytes'], 'inbox-ack': ['--consumer'],
     'authorization-record': ['--record', '--consumer'], 'authorization-revoke': ['--consumer'],
     'inbox-respond': ['--message', '--message-file', '--authorization', '--consumer'], 'inbox-wake': [],
-    'runtime-install': [], launch: ['--project', '--pi-entry', '--provider', '--model', '--thinking', '--prompt-file', '--run-id', '--extension', '--agent-dir', '--no-tools', '--owner', '--return-owner'],
+    'runtime-install': [], launch: ['--project', '--pi-entry', '--provider', '--model', '--thinking', '--prompt-file', '--run-id', '--extension', '--agent-dir', '--no-tools', '--owner', '--return-owner', '--owner-root'],
     'run-status': [], 'run-conversation': ['--after', '--limit'], 'run-stop': ['--abort'], 'run-resume': [],
     'supervisor-start': ['--config', '--id'], 'supervisor-status': [], 'supervisor-stop': [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
@@ -124,7 +124,7 @@ async function main(args) {
     result = await launchManaged(root, { runId, project: options['--project'], piEntry: options['--pi-entry'],
       provider: options['--provider'], model: options['--model'], prompt: options['--prompt-file'] ? (await readBoundedFile(options['--prompt-file'])).text : undefined,
       extensions: options['--extension'] ? [options['--extension']] : [], agentDir: options['--agent-dir'], noTools: options['--no-tools'] === true, thinking: options['--thinking'],
-      owner: options['--owner'], returnOwner: options['--return-owner'] });
+      owner: options['--owner'], returnOwner: options['--return-owner'], ownerRoot: options['--owner-root'] });
   }
   if (command === 'run-status') result = await managedStatus(root, sessionId);
   if (command === 'run-conversation') result = await managedConversation(root, sessionId, { after: options['--after'], limit: options['--limit'] });

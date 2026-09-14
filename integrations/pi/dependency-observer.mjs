@@ -73,7 +73,20 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
     throw new Error('Invalid dependency observer identity/version');
   }
   let closed = false, operation, timer, storageError = false, configuring = false;
-  const persist = (next) => { writeJson(path, next); data = next; };
+  // The persisted owner record is the shared cross-process state. A holder that
+  // was replaced must not write its in-flight turn back over the newer holder,
+  // so an owner-scoped persist is dropped when the on-disk holder is another
+  // session; adoption uses writeJson directly because it IS the explicit handover.
+  const ownerHolds = () => {
+    if (!ownerRef) return true;
+    const onDisk = readJson(path);
+    if (!onDisk) return true;
+    return onDisk.ownerRef === ownerRef && onDisk.holderSession === sessionId;
+  };
+  const persist = (next) => {
+    if (ownerRef && !ownerHolds()) { const onDisk = readJson(path); if (onDisk) data = onDisk; return; }
+    writeJson(path, next); data = next;
+  };
   const pauseToken = () => {
     const marker = readJson(pausePath);
     if (!marker) return null;
@@ -199,8 +212,10 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
     // The delivery receipt belonged to the previous holder's channel, so it is
     // meaningless here; keep the handled sequence to avoid re-notifying, but
     // let the next real change deliver without a stale awaiting_delivery guard.
+    // This explicit handover writes through the guard: the on-disk holder is the
+    // session being replaced.
     data = { ...data, sessionId, instanceId, holderSession: sessionId, lastAlert: null };
-    persist(data);
+    writeJson(path, data);
     clearInterval(timer);
     timer = setInterval(() => { void check(); }, pollMs);
     timer.unref();
@@ -240,6 +255,8 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
       } finally { configuring = false; }
     },
     async pause() {
+      // A replaced holder must not pause the subscription the current holder owns.
+      if (ownerRef && data && !ownerHolds()) return status();
       writeJson(pausePath, ownerRef ? { ownerRef, nonce: randomUUID(), pausedAt: now() } : { sessionId, nonce: randomUUID(), pausedAt: now() });
       clearInterval(timer);
       operation?.abort.abort();

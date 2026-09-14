@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,4 +116,23 @@ test('a channel without an owner reports disabled owner returns', async (t) => {
   t.after(async () => { await channel.close(); await rm(cwd, { recursive: true, force: true }); });
   assert.equal(channel.snapshot().owner, null);
   assert.deepEqual(await channel.claimOwnerReturns(), { status: 'disabled', returns: [] });
+});
+
+test('one explicit owner mailbox root is shared by two sibling project directories', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'edda-owner-mailbox-shared-'));
+  const assistantDir = join(root, 'assistant'), controllerDir = join(root, 'controllers', 'job-1');
+  await mkdir(assistantDir, { recursive: true }); await mkdir(controllerDir, { recursive: true });
+  const shared = join(root, 'owner-mailbox');
+  const prior = process.env.EDDA_RETURN_ROOT;
+  process.env.EDDA_RETURN_ROOT = shared;
+  t.after(async () => {
+    if (prior === undefined) delete process.env.EDDA_RETURN_ROOT; else process.env.EDDA_RETURN_ROOT = prior;
+    await rm(root, { recursive: true, force: true });
+  });
+  const assistant = createOwnerMailbox({ owner, sessionId: 'session-a', cwd: assistantDir, command: fixture() });
+  assert.equal((await assistant.bind()).status, 'bound');
+  await postReturn(controllerDir, { work: 'job-shared' });
+  const claimed = await assistant.claim();
+  assert.equal(claimed.status, 'ok');
+  assert.equal(claimed.returns[0].work, 'job-shared');
 });

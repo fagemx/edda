@@ -19,8 +19,14 @@ if (prior?.serviceId !== serviceId || prior.phase !== 'launch_requested') throw 
 const resume = mode === '--resume';
 if (mode && !resume) throw new Error('Unknown runner mode');
 const token = randomBytes(32).toString('hex');
+// One shared owner mailbox per registry: an assistant and its delegated
+// controllers are separate project directories that need not share an
+// `.edda`/`.git` workspace root, so the launcher pins one explicit mailbox root
+// through `EDDA_RETURN_ROOT` (config.ownerRoot overrides the registry default).
+const ownerRoot = (config.owner || config.returnOwner)
+  ? (config.ownerRoot || join(root, 'owner-mailbox')) : null;
 let state = { ...prior, runId, serviceId, runnerPid: process.pid, phase: 'starting',
-  release: config.release, owner: config.owner || null, returnOwner: config.returnOwner || null,
+  release: config.release, owner: config.owner || null, returnOwner: config.returnOwner || null, ownerRoot,
   piVersion: null, expectedPiVersion: config.pi.version, updatedAt: new Date().toISOString() };
 let child, stopped = false, server, heartbeat, rpcError, observed, stateSequence = 0;
 const save = () => { state.updatedAt = new Date().toISOString(); writeJson(join(dir, 'state.json'), state); };
@@ -69,8 +75,10 @@ try {
   // launched by an owner assistant must not adopt the assistant's mailbox.
   delete env.EDDA_OWNER_REF;
   delete env.EDDA_RETURN_OWNER;
+  delete env.EDDA_RETURN_ROOT;
   if (config.owner) env.EDDA_OWNER_REF = config.owner;
   if (config.returnOwner) env.EDDA_RETURN_OWNER = config.returnOwner;
+  if (ownerRoot) env.EDDA_RETURN_ROOT = ownerRoot;
   delete env.EDDA_PROJECT_ID;
   if (config.agentDir) env.PI_CODING_AGENT_DIR = config.agentDir;
   const model = resume && prior.model ? prior.model : { provider: config.provider, id: config.model };

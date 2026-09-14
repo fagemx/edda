@@ -7,6 +7,7 @@ const args = process.argv.slice(2), option = (key) => args[args.indexOf(key) + 1
 if (process.env.EDDA_FIXTURE_ENV_CAPTURE) {
   writeFileSync(process.env.EDDA_FIXTURE_ENV_CAPTURE, JSON.stringify({
     owner: process.env.EDDA_OWNER_REF ?? null, returnOwner: process.env.EDDA_RETURN_OWNER ?? null,
+    returnRoot: process.env.EDDA_RETURN_ROOT ?? null,
   }));
 }
 const root = process.env.EDDA_PI_CHANNEL_DIR;

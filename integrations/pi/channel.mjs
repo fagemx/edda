@@ -49,9 +49,19 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   let dependencies;
   let inbox;
   let mailbox = null;
-  // An unavailable owner mailbox leaves the channel fully functional.
-  try { if (ownerRef) mailbox = createOwnerMailbox({ owner: ownerRef, sessionId, cwd, command: ownerCommand }); }
-  catch { mailbox = null; }
+  let ownerSubscription = store.dir;
+  let dependencyOwnerRef = null;
+  let ownerError = null;
+  // An unavailable owner mailbox leaves the channel fully functional, but the
+  // failure stays visible in the snapshot instead of looking like "no owner".
+  if (ownerRef) {
+    try { mailbox = createOwnerMailbox({ owner: ownerRef, sessionId, cwd, command: ownerCommand }); }
+    catch (error) { ownerError = error.message; mailbox = null; }
+    if (mailbox) {
+      try { ownerSubscription = ownerSubscriptionDir(root, ownerRef); dependencyOwnerRef = ownerRef; }
+      catch (error) { ownerError = error.message; }
+    }
+  }
   try { handoff = createHandoff(store.dir, sessionId, instanceId); }
   catch (error) { store.release(); throw error; }
   let closed = false;
@@ -95,7 +105,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
-      owner: mailbox ? mailbox.state() : null, returnOwner: returnOwner || null,
+      owner: mailbox ? mailbox.state() : (ownerRef ? { owner: ownerRef, status: 'unavailable', error: ownerError } : null), returnOwner: returnOwner || null,
       integration: { version: integrationVersion, modulePath: fileURLToPath(import.meta.url), releaseId: process.env.EDDA_PI_RELEASE_ID || null },
       capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
       inbox: inbox?.status() }),
@@ -257,8 +267,8 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       inbox = { status: () => ({ status: 'storage_error', error: error.message, wake: { status: 'unsupported', notified: false } }),
         begin() {}, assistant() {}, settled() {}, reconcile() {} };
     }
-    dependencies = createDependencyObserver({ dir: store.dir, subscriptionDir: ownerRef ? ownerSubscriptionDir(root, ownerRef) : store.dir,
-      ownerRef, sessionId, instanceId,
+    dependencies = createDependencyObserver({ dir: store.dir, subscriptionDir: ownerSubscription,
+      ownerRef: dependencyOwnerRef, sessionId, instanceId,
       policy: () => readEnrollment(root, sessionId), runtime: () => channel.snapshot(),
       manifestRevision: () => handoff.currentRevision(), send: (body) => submitMessage(body, true),
       receipt: (id) => receipts.get(id), command: dependencyCommand, pollMs: dependencyPollMs });

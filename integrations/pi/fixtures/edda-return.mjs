@@ -7,7 +7,9 @@ import { createHash } from 'node:crypto';
 const args = process.argv.slice(2);
 const command = args[0], verb = args[1];
 const option = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
-const base = join(process.cwd(), '.edda', 'returns');
+const base = process.env.EDDA_RETURN_ROOT
+  ? join(process.env.EDDA_RETURN_ROOT, '.edda', 'returns')
+  : join(process.cwd(), '.edda', 'returns');
 const sha = (value) => createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
 const out = (value) => process.stdout.write(JSON.stringify(value, null, 2) + '\n');

@@ -47,13 +47,17 @@ edda-pi launch --project <absolute-project-path> --provider openrouter --model d
 A managed project assistant is launched with a stable owner reference:
 
 ```text
-edda-pi launch --project <absolute-project-path> --provider <provider> --model <model> --owner assistant/<project> --return-owner assistant/<project> --prompt-file <absolute-task-file>
+edda-pi launch --project <absolute-project-path> --provider <provider> --model <model> --owner assistant/<project> --prompt-file <absolute-task-file>
 ```
 
 The runtime records that owner reference and its current holder automatically; no
-session id is shown to the user. `--return-owner` is the owner a controller must
-post its done/failed return against, and it reaches the controller as
-`EDDA_RETURN_OWNER`.
+session id is shown to the user. `--owner-root <absolute-dir>` optionally pins
+one shared owner mailbox root; it defaults to `<registry>/owner-mailbox`. The
+assistant and every controller it launches under the same registry share that
+mailbox, so the delegated `assistant/` and `controllers/<job>/` directories do
+not need a common `.edda`/`.git` workspace root. A controller launch passes
+`--return-owner assistant/<project>` (the owner its done/failed return is posted
+against) and receives it as `EDDA_RETURN_OWNER`.
 
 Launch may incur model usage. It creates one owned background runner, a Pi
 session, an immutable integration release and an initial-message intent. It
@@ -129,9 +133,12 @@ The managed runtime binds the owner reference at launch. When the assistant is
 replaced, the replacement launch rebinds explicitly from the persisted owner
 record, and pending returns are claimed on the **next natural live turn**, exactly
 once. There is no offline wake, timer or scheduler: a claimed return is presented
-once and a superseded holder cannot claim it again. An older installed `edda`
-without the `return` verb exits non-zero, where the session-addressed path above
-still works for the unchanged same-session case.
+once and a superseded holder cannot claim it again. The launcher pins one mailbox
+root through `EDDA_RETURN_ROOT` (default `<registry>/owner-mailbox`), inherited
+by every controller it launches, so the post and the claim meet even though the
+assistant and controller are different project directories. An older installed
+`edda` without the `return` verb exits non-zero, where the session-addressed path
+above still works for the unchanged same-session case.
 
 ## 6. Stop and resume without replay
 

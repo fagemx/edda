@@ -193,9 +193,14 @@ test('managed launch records the stable owner reference and exposes it even when
     provider: 'fixture', model: 'echo', owner: 'assistant/project', returnOwner: 'assistant/return' });
   assert.equal(launched.owner, 'assistant/project');
   assert.equal(launched.returnOwner, 'assistant/return');
+  assert.match(launched.ownerRoot, /owner-mailbox$/);
   await assert.rejects(launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO',
     provider: 'fixture', model: 'echo', owner: 'assistant/other', returnOwner: 'assistant/return' }), /different launch inputs/);
   await assert.rejects(launchManaged(f.registry, { runId: randomUUID(), project: f.project, piEntry: f.entry, owner: 'bad\u0000owner' }), /owner/);
+  // An unset shell variable expands to the empty string; it must be treated as
+  // absent (here: a different inputs digest), not rejected as an invalid label.
+  await assert.rejects(launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO',
+    provider: 'fixture', model: 'echo', owner: 'assistant/project', returnOwner: '' }), /different launch inputs/);
   await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
   await stopManaged(f.registry, f.runId);
   const stopped = await managedStatus(f.registry, f.runId);
@@ -224,4 +229,5 @@ test('managed runner strips an inherited owner identity and passes only the conf
   const captured = JSON.parse(await readFile(capture, 'utf8'));
   assert.equal(captured.owner, null);
   assert.equal(captured.returnOwner, 'assistant/real-return');
+  assert.equal(captured.returnRoot, join(f.registry, 'owner-mailbox'));
 });

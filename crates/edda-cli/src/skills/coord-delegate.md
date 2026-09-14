@@ -109,14 +109,20 @@ not the controller, worker or implementer of this project's jobs.
    controller of this job..."), and a Return address block (below).
 2. Create <root>/controllers/<job>/ and copy <root>/templates/controller/AGENTS.md there as AGENTS.md
    so the controller loads its own role. Never launch inside assistant/.
-3. Launch: edda-pi launch --project <root>/controllers/<job> --provider <worker-provider> --model <worker-model> --thinking high --return-owner "$EDDA_OWNER_REF" --prompt-file <root>/briefs/<job>.md
-   Keep the printed runId.
+3. Launch: edda-pi launch --project <root>/controllers/<job> --provider <worker-provider> --model <worker-model> --thinking high --prompt-file <root>/briefs/<job>.md
+   When the assistant is managed with an owner (`$EDDA_OWNER_REF` is set), add
+   `--return-owner "$EDDA_OWNER_REF"`; when it is unset, omit the flag rather than passing an empty
+   value. Keep the printed runId.
 4. Reply with the runId, where the deliverable lands, and that you will report the outcome.
 ## Result return (owner-bound; survives assistant replacement)
 - The managed runtime records the owner/holder itself when the assistant is launched with
   `edda-pi launch ... --owner "assistant/<project>"`. The reference is stable; the session is only its
   current holder, and a replacement launch rebinds explicitly from the persisted owner record. A managed
   assistant does **not** hand-bind or hand-claim.
+- The owner mailbox is rooted by the managed launcher (`EDDA_RETURN_ROOT`, default
+  `<registry>/owner-mailbox`) and is shared by the assistant and every controller it launches through the
+  same registry. The delegated working directories do **not** need a common `.edda`/`.git` workspace root,
+  and the operator does not initialize one.
 - The assistant's owner reference is discoverable from the launch contract as `EDDA_OWNER_REF` (with
   `EDDA_RETURN_OWNER` as the controller's return address) and must be carried into every controller brief
   automatically. Do not put session ids in the brief.
