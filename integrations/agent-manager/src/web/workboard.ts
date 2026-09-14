@@ -1,5 +1,5 @@
 import type { AgentView, ConversationView, Overview, SendRequest } from '../contracts.js';
-import type { WorkAction, WorkPhase, WorkStage, WorkView, WorkWaitingFor, WorksView } from '../workflow-contracts.js';
+import type { WorkAction, WorkPhase, WorkRootRelation, WorkStage, WorkView, WorkWaitingFor, WorksView } from '../workflow-contracts.js';
 import type { OwnerContext, OwnerInboxAck, OwnerInboxView, OwnerInboxEvent } from '../owner-inbox-contracts.js';
 import { ContinuationBoard } from './continuation-board.js';
 
@@ -10,8 +10,12 @@ interface Host { api<T>(path: string, body?: unknown): Promise<T>; openAgent(id:
 const key = 'edda-manager-work-drafts-v1';
 const labels: Record<WorkStage, string> = { uninitialized: '尚未安排下一步', ready: '待交接', assigned: '已交辦・等待接手', executing: '執行中', awaiting_delivery: '回覆結束・待交付證據', delivered: '已交付・待驗收', accepted: '已記錄驗收', blocked: '有阻塞・需要處理' };
 // Native phase labels (GH1181). Shown first; the manual stage above is secondary.
-const phases: Record<WorkPhase, string> = { uninitialized: '尚未初始化', ready: '待指派', assigned: '已交辦・尚未確認開始', working: '執行中（原生確認）', waiting: '等待中', interrupted: '已中斷／需要確認', delivered: '已交付・待審查', accepted: '已驗收／已完成', blocked: '阻塞', failed: '失敗' };
-const waitTargets: Record<Exclude<WorkWaitingFor, null>, string> = { worker: '等待 worker（執行者）', verifier: '等待 verifier（審查者）', dependency: '等待相依條件', user_decision: '等待使用者決策', tool: '等待工具', none: '無等待對象' };
+const phases: Record<WorkPhase, string> = { uninitialized: '尚未初始化', ready: '待指派', assigned: '已交辦・尚未確認開始', launched: '已交辦・回執已受理，尚未確認開始', working: '執行中（原生確認）', waiting: '等待中', interrupted: '已中斷／需要確認', recoverable: '可恢復（原生紀錄受損）', delivered: '已交付・待審查', accepted: '已驗收／已完成', blocked: '阻塞', completed: '已完成（原生任務確認）', failed: '失敗' };
+// GH1189 F2: a live tool call is `working` with separate process liveness, so
+// there is deliberately no `tool` wait target.
+export const waitTargets: Record<Exclude<WorkWaitingFor, null>, string> = { worker: '等待 worker（執行者）', verifier: '等待 verifier（審查者）', dependency: '等待相依條件', user_decision: '等待使用者決策', none: '無等待對象' };
+const rootRelations: Record<WorkRootRelation, string> = { in_root: '來源在專案已知範圍內', not_in_root: '不在目前觀測的來源', root_not_registered: '原登記來源已不在專案清單', unknown: '來源關聯尚未判定' };
+const roleNames: Record<'manager' | 'worker' | 'reviewer', string> = { manager: '管理者', worker: '工作者', reviewer: '審查者' };
 // A manual stage that claims a child is executing is stale whenever the native
 // sources cannot confirm a working session — the incident GH1181 fixes. The
 // native phase is shown first and this note is bounded to that disagreement.
@@ -112,6 +116,14 @@ export class WorkBoard {
     // inbox events. The manual ledger stage stays visible but secondary.
     this.details.append(el('p', `原生階段：${phases[work.phase]}${work.waitingFor ? ` · ${waitTargets[work.waitingFor]}` : ''}`, 'work-next'));
     if (work.waitEvidence) this.details.append(el('p', `原生證據：${work.waitEvidence}`, 'public-text'));
+    // The bounded root relation sits next to the native phase so a wrong root can
+    // never read as global no-work.
+    this.details.append(el('p', `來源關聯：${rootRelations[work.registry.relation]} · ${work.registry.message}`, 'muted'));
+    // Role chain: owner → worker/verifier, derived from the bindings and their
+    // recorded parent relation. Unlinked is explicit; a role is never guessed.
+    const active = (work.sessions ?? []).filter(session => !session.unboundAt);
+    const chain = [`負責人 ${this.name(work.ownerAgentId)}`, ...active.map(session => `${roleNames[session.role]} ${this.name(session.agentId)}${session.parentAgentId ? `（上層 ${this.name(session.parentAgentId)}）` : ''}`)];
+    this.details.append(el('p', `角色鏈：${chain.join(' → ')}${active.length ? '' : ' → 尚無已綁定的執行／審查 session（unlinked）'}`, 'muted'));
     this.details.append(el('p', `Edda 任務狀態：${work.taskStatus} · 手動交接紀錄：${labels[work.stage]}`, 'muted'));
     if (stageStale(work)) this.details.append(el('p', '手動交接紀錄顯示執行中，但原生來源無法確認有子代理正在工作；以原生階段為準。', 'notice'));
     if (work.waitingReason) this.details.append(el('p', `手動等待原因（次要）：${work.waitingReason}`, 'muted'));
@@ -119,6 +131,14 @@ export class WorkBoard {
     if (work.evidence) this.details.append(el('p', `最近證據：${work.evidence}`, 'public-text'));
     if (work.pendingInstruction && !work.pendingInstruction.acknowledgedAt) this.details.append(el('p', `方向變更等待確認：${work.pendingInstruction.message}`, 'notice public-text'));
     if (work.deliveryStatus) this.details.append(el('p', `傳送回執：${work.deliveryStatus} · ${work.deliveryOperationId}`, 'muted identity'));
+    // Owner-bound `edda return` status in the same work view: the owner reference
+    // is primary, the holder is a bounded secondary identity.
+    if (work.ownerReturn) {
+      const ownerReturn = work.ownerReturn;
+      this.details.append(el('p', `負責人回件：${ownerReturn.owner} · ${ownerReturn.holder ? `持有者 ${ownerReturn.holder}` : '尚無持有者'} · 待領取 ${ownerReturn.pending}${ownerReturn.total === null ? '' : ` / 共 ${ownerReturn.total}`}`, 'muted'));
+      if (ownerReturn.error) this.details.append(el('p', `負責人回件狀態不可用：${ownerReturn.error}`, 'notice'));
+      for (const fact of ownerReturn.matched) this.details.append(el('p', `回件 ${fact.work} · ${fact.status} · ${fact.postedAt}${fact.result ? ` · ${fact.result}` : ''} · ${fact.id.slice(0, 12)}`, 'public-text identity'));
+    }
     const buttons = el('div', '', 'work-links');
     for (const [label, id] of [['與負責人對話', work.ownerAgentId], ['與接手代理對話', work.assigneeAgentId]] as const) {
       if (!id || !this.overview?.agents.some(a => a.id === id)) continue;
@@ -133,7 +153,7 @@ export class WorkBoard {
     for (const session of work.sessions ?? []) {
       const source = this.overview?.agents.find(a => a.id === session.agentId);
       const row = el('article', '', 'session-row');
-      const role = { manager: '管理者', worker: '工作者', reviewer: '審查者' }[session.role];
+      const role = roleNames[session.role];
       row.append(el('strong', `${this.name(session.agentId)} · ${role}`), el('p', `${session.transport} / ${session.sessionId}`, 'identity'));
       row.append(el('p', session.unboundAt ? '已結束追蹤（保留歷史）' : source?.selectionRevision !== session.selectionRevision ? '來源綁定已變更，原 session 結果待確認' : source?.source === 'live' ? `即時觀測：${source.state}` : '僅有記錄或來源未知；不能判定程序已停止', 'muted'));
       // Heartbeat / liveness stays a separate process fact: never the wait reason.

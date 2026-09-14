@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ManagerError, type AdapterReceipt, type AgentBinding, type AgentObservation, type ConversationView, type DiscoveredRun, type DiscoveryReport, type OperationStatus, type OperationView, type PiAdapter, type PublicEntry, type RuntimeState, type SendRequest } from './contracts.js';
+import { ManagerError, type AdapterReceipt, type AgentBinding, type AgentObservation, type ConversationView, type DiscoveredRun, type DiscoveryReport, type OperationStatus, type OperationView, type PiAdapter, type PublicEntry, type RecordDegradation, type RuntimeState, type SendRequest } from './contracts.js';
 import type { NativeSessionEvent } from './session-contracts.js';
 
 // This is the only legacy-module boundary. All values crossing back are projected
@@ -58,7 +58,15 @@ function receipt(value: unknown, binding: AgentBinding, id: string, instance: st
 }
 export const unavailable = (): AgentObservation => ({ state: 'unavailable', instanceId: null, observedAt: new Date().toISOString(),
   heartbeatAt: null, lastProgressAt: null, lastEvent: null, source: 'unavailable', stale: true, reason: '目前無法讀取代理；不代表工作已完成。',
-  model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null });
+  degraded: null, model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null });
+/** Project a per-record degradation without ever copying the record itself.
+ *  `str()` returns null for an object, so the `{code,record,message}` error is
+ *  projected explicitly here instead of being silently dropped. */
+function degradation(error: unknown, recovery: string | null): RecordDegradation | null {
+  const e = record(error), code = str(e.code, 100);
+  if (!code) return null;
+  return { code, record: str(e.record, 100) ?? '未知原生紀錄', message: str(e.message, 300) ?? '原生紀錄無法讀取；未自動修復。', recovery };
+}
 
 export class ChannelAdapter implements PiAdapter {
   private cache = new Map<string, { instance: string; progress: string | null; latest: PublicEntry | null }>();
@@ -113,9 +121,12 @@ export class ChannelAdapter implements PiAdapter {
             if (!runId || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(runId)) continue;
             const sessionId = typeof value.sessionId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(value.sessionId) ? value.sessionId : null;
             const project = value.project, phase = str(value.recordedPhase, 40) ?? 'unknown', stopped = ['stopped', 'failed', 'exited'].includes(phase);
+            const degraded = degradation(value.error, null);
             found.push({ registryRoot: root, sessionId, runId, instanceId: null, live: false, source: 'recorded',
               state: stopped ? 'stopped' : 'unknown', workspace: typeof project === 'string' && isAbsolute(project) ? project : null,
-              lastProgressAt: date(value.updatedAt), reason: str(value.error, 300) ?? (stopped ? '上次管理紀錄為已停止；目前沒有即時連線。' : '僅有管理紀錄，沒有即時連線；不代表工作已完成。') });
+              lastProgressAt: date(value.updatedAt), degraded,
+              reason: degraded ? `${degraded.record}：${degraded.message}`.slice(0, 300)
+                : stopped ? '上次管理紀錄為已停止；目前沒有即時連線。' : '僅有管理紀錄，沒有即時連線；不代表工作已完成。' });
           }
         } catch { problems.push('此來源的管理執行清單目前無法讀取；其他來源不受影響。'); }
       }
@@ -181,6 +192,7 @@ export class ChannelAdapter implements PiAdapter {
       return { state: states.includes(state.state as RuntimeState) ? state.state as RuntimeState : 'unknown', instanceId: instance,
         observedAt: new Date().toISOString(), heartbeatAt, lastProgressAt: progress, lastEvent: str(state.lastEvent, 100),
         source: 'live', stale: age > 15000 || age < -5000, reason: modelError.category ? `模型回報：${str(modelError.category, 100)}` : null,
+        degraded: null,
         model: typeof model.provider === 'string' && typeof model.id === 'string' ? { provider: model.provider, id: model.id } : null,
         usage: managed.usage ? { tokens: number(usage.tokens), reportedCost: number(usage.reportedCost) } : null,
         capabilities: { conversation: capabilities.includes('conversation'), send: capabilities.includes('send') }, latestMessage: latest,
@@ -188,8 +200,12 @@ export class ChannelAdapter implements PiAdapter {
     } catch {
       const model = record(managed.model), usage = record(managed.usage), stopped = managed.lastRecordedPhase === 'stopped';
       const stoppedAt = date(managed.updatedAt) ?? date(managed.lastProgressAt);
+      // A corrupt `state.json` is a per-record degradation, not a missing run:
+      // the run identity from `config.json` is preserved and the recovery point
+      // is the bounded `nextAction` the Pi read returned.
+      const degraded = managed.status === 'record_unavailable' ? degradation(managed.error, str(managed.nextAction, 300)) : null;
       if (stopped && stoppedAt) remember({ id: `${binding.sessionId}:managed-stop:${stoppedAt}`, kind: 'interrupted', at: stoppedAt, turnId: null, category: 'managed_stop', httpStatus: null });
-      return { ...unavailable(), state: stopped ? 'stopped' : 'unavailable',
+      return { ...unavailable(), state: stopped ? 'stopped' : 'unavailable', degraded,
         reason: stopped ? '上次管理紀錄為已停止；目前沒有即時連線。' : '目前無法讀取代理；不代表工作已完成。',
         lastProgressAt: date(managed.lastProgressAt),
         model: typeof model.provider === 'string' && typeof model.id === 'string' ? { provider: model.provider, id: model.id } : null,

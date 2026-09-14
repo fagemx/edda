@@ -28,23 +28,24 @@ function binding(role: WorkSessionBinding['role'], agentId: string): WorkSession
 function view(overrides: Partial<WorkView> = {}): WorkView {
   return { id: 'work', projectId: 'p', taskId: 7, title: 'Task 7', taskStatus: 'running', taskReceipt: null,
     ownerAgentId: 'owner', assigneeAgentId: 'worker', nextStep: 'Deliver', stage: 'executing', revision: 'r',
-    phase: 'uninitialized', waitingFor: null, waitEvidence: null, evidence: null, waitingReason: null, pendingInstruction: null,
+    phase: 'uninitialized', waitingFor: null, waitEvidence: null, ownerReturn: null, registry: { relation: 'in_root', message: '測試用來源關聯' },
+    evidence: null, waitingReason: null, pendingInstruction: null,
     deliveryOperationId: 'op-1', deliveryStatus: 'started', updatedAt: at(2), error: null, history: [], lastActionId: null,
     confirmedActionId: null, sessions: [binding('worker', 'worker')], ...overrides };
 }
 function observation(id: string, overrides: Partial<AgentView> = {}): AgentView {
   return { id, name: id, role: 'worker', projectId: 'p', workspace: '/workspace', transport: 'pi', selectionRevision: 'revision',
     summary: null, summaryUpdatedAt: null, summaryError: null, state: 'idle', instanceId: 'instance', observedAt: at(200),
-    heartbeatAt: at(200), lastProgressAt: null, lastEvent: null, source: 'live', stale: false, reason: null, model: null, usage: null,
+    heartbeatAt: at(200), lastProgressAt: null, lastEvent: null, source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null,
     capabilities: { conversation: true, send: true }, latestMessage: null,
     sessionEvidence: { sessionId: `${id}-session`, evidenceSource: 'live', historyComplete: false, events: [] }, ...overrides };
 }
-function inboxEvent(kind: OwnerInboxKind, when: string, summary = '原生事件'): OwnerInboxEvent {
-  return { id: `event-${kind}-${when}`, workId: 'work', projectId: 'p', taskId: 7, bindingId: 'binding-worker', agentId: 'worker',
+function inboxEvent(kind: OwnerInboxKind, when: string, summary = '原生事件', bindingId = 'binding-worker'): OwnerInboxEvent {
+  return { id: `event-${kind}-${when}-${bindingId}`, workId: 'work', projectId: 'p', taskId: 7, bindingId, agentId: 'worker',
     sessionId: 'worker-session', nativeEventId: `native-${kind}`, kind, at: when, summary, category: null, httpStatus: null,
     deliveryRecorded: false, acknowledgedAt: null, acknowledgementId: null, evidence: null, ownerAgentId: 'owner' };
 }
-const derive = (work: WorkView, agents: AgentView[] = [], inbox: OwnerInboxEvent[] = []) => deriveWorkProgress({ task: task(work.taskStatus), view: work, agents, inbox });
+const derive = (work: WorkView, agents: AgentView[] = [], inbox: OwnerInboxEvent[] = []) => deriveWorkProgress({ task: task(work.taskStatus), view: work, agents, inbox, registry: work.registry });
 
 test('task running with no live bound child is never working and names the pending role', () => {
   const work = view({ stage: 'assigned', deliveryStatus: 'started' });
@@ -87,7 +88,8 @@ test('a fresher native interruption overrides a stale manual executing stage', (
   const work = view({ stage: 'executing', updatedAt: at(2) });
   const interrupted = derive(work, [observation('worker')], [inboxEvent('interrupted', LATER, '代理回合被中斷；工作結果需要確認。')]);
   assert.equal(interrupted.phase, 'interrupted');
-  assert.equal(interrupted.waitingFor, null);
+  // An interruption preserves the pending hand-off instead of dropping it.
+  assert.equal(interrupted.waitingFor, 'worker');
   assert.match(interrupted.waitEvidence ?? '', new RegExp(`inbox:interrupted @ ${LATER}`));
   assert.match(interrupted.waitEvidence ?? '', /工作結果需要確認/);
 
@@ -136,7 +138,7 @@ test('an unlinked or unavailable observation never guesses a role', () => {
 
 test('terminal native task and delivery states are projected explicitly', () => {
   const done = derive(view({ taskStatus: 'done' }));
-  assert.equal(done.phase, 'accepted');
+  assert.equal(done.phase, 'completed');
   assert.equal(done.waitingFor, 'none');
 
   const failed = derive(view({ taskStatus: 'failed' }));
@@ -208,7 +210,7 @@ test('a fresh inbox liveness event does not override a delivered phase, but does
   // The same fresh event on an active hand-off is still an interruption.
   const active = derive(view({ stage: 'executing', updatedAt: at(2) }), [observation('worker')], [inboxEvent('unavailable', LATER)]);
   assert.equal(active.phase, 'interrupted');
-  assert.equal(active.waitingFor, null);
+  assert.equal(active.waitingFor, 'worker');
 });
 
 class ClockLedger implements WorkflowLedger {
@@ -228,7 +230,7 @@ test('the manager wires native task/session/inbox evidence into the projected ph
   const observations = new Map<string, AgentObservation>();
   const fresh = (id: string, events: NativeSessionEvent[]): AgentObservation => ({
     state: 'idle', instanceId, observedAt: at(200), heartbeatAt: at(200), lastProgressAt: null, lastEvent: null, source: 'live', stale: false,
-    reason: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null,
+    reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null,
     sessionEvidence: { sessionId: `${id}-session`, evidenceSource: 'live', historyComplete: false, events } });
   observations.set('owner', fresh('owner', [])); observations.set('worker', fresh('worker', []));
   const adapter: PiAdapter = { observe: async (target) => observations.get(target.id)!,
@@ -271,10 +273,93 @@ test('the manager wires native task/session/inbox evidence into the projected ph
     const interrupted = (await projection().list()).works[0]!;
     assert.equal(interrupted.stage, 'executing');
     assert.equal(interrupted.phase, 'interrupted');
-    assert.equal(interrupted.waitingFor, null);
+    assert.equal(interrupted.waitingFor, 'worker');
     assert.match(interrupted.waitEvidence ?? '', /inbox:interrupted/);
   } finally {
     await manager.stop(); store.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('an accepted delivery receipt without an observed start is launched, not assigned or working', () => {
+  for (const status of ['accepted', 'queued', 'unconfirmed'] as const) {
+    const launched = derive(view({ stage: 'assigned', deliveryStatus: status }), [observation('worker')]);
+    assert.equal(launched.phase, 'launched');
+    assert.equal(launched.waitingFor, 'worker');
+    assert.match(launched.waitEvidence ?? '', new RegExp(`delivery:${status}`));
+  }
+  for (const status of ['prepared', 'unknown'] as const) {
+    const assigned = derive(view({ stage: 'assigned', deliveryStatus: status }), [observation('worker')]);
+    assert.equal(assigned.phase, 'assigned');
+    assert.equal(assigned.waitingFor, 'worker');
+  }
+});
+
+test('a delivered hand-off stays delivered when the bound worker waits on the operator (GH1189 F1)', () => {
+  const work = view({ stage: 'delivered', deliveryStatus: 'settled', sessions: [binding('worker', 'worker'), binding('reviewer', 'reviewer')] });
+  const result = derive(work, [observation('worker', { state: 'waiting_user' }), observation('reviewer', { role: 'worker' })]);
+  assert.equal(result.phase, 'delivered');
+  assert.equal(result.waitingFor, 'verifier');
+  assert.doesNotMatch(result.waitEvidence ?? '', /waiting_user/);
+});
+
+test('a live bound child never masks a terminal native task fact (GH1181 leftover)', () => {
+  const live = [observation('worker', { state: 'running' })];
+  const failed = derive(view({ taskStatus: 'failed' }), live);
+  assert.equal(failed.phase, 'failed');
+  assert.equal(failed.waitingFor, 'none');
+  const blocked = derive(view({ taskStatus: 'blocked' }), live);
+  assert.equal(blocked.phase, 'blocked');
+  assert.equal(blocked.waitingFor, 'dependency');
+  const done = derive(view({ taskStatus: 'done', stage: 'executing' }), live);
+  assert.equal(done.phase, 'completed');
+  const receipt = derive(view({ taskStatus: 'running', stage: 'executing', deliveryStatus: 'failed' }), live);
+  assert.equal(receipt.phase, 'failed');
+  assert.equal(receipt.waitingFor, 'user_decision');
+});
+
+test('a degraded pending session is recoverable with its identity, the unreadable record and a recovery point', () => {
+  const degraded = observation('worker', { state: 'unavailable', source: 'unavailable', stale: true,
+    degraded: { code: 'record_unavailable', record: 'state.json', message: 'State record unreadable', recovery: 'Use the identity shown; inspect the owned session directory before any resume.' } });
+  const result = derive(view({ stage: 'executing' }), [degraded]);
+  assert.equal(result.phase, 'recoverable');
+  assert.equal(result.waitingFor, 'worker');
+  assert.match(result.waitEvidence ?? '', /state\.json/);
+  assert.match(result.waitEvidence ?? '', /保留身分：worker\/worker-session/);
+  assert.match(result.waitEvidence ?? '', /恢復點：Use the identity shown/);
+});
+
+test('only an interruption for the pending binding interrupts the hand-off (GH1189 F3)', () => {
+  const work = view({ stage: 'executing', updatedAt: at(2), sessions: [binding('worker', 'worker'), binding('reviewer', 'reviewer')] });
+  const agents = [observation('worker'), observation('reviewer', { role: 'worker' })];
+  const other = derive(work, agents, [inboxEvent('unavailable', LATER, '其他綁定的事件', 'binding-reviewer')]);
+  assert.equal(other.phase, 'waiting');
+  assert.equal(other.waitingFor, 'worker');
+  const overdue = derive(work, agents, [inboxEvent('overdue', LATER, '其他綁定逾期', 'binding-reviewer')]);
+  assert.equal(overdue.phase, 'waiting');
+  const pending = derive(work, agents, [inboxEvent('unavailable', LATER, '待接手綁定的事件', 'binding-worker')]);
+  assert.equal(pending.phase, 'interrupted');
+  assert.equal(pending.waitingFor, 'worker');
+});
+
+test('a fresher owner return outranks only the stale manual stage', () => {
+  const ownerReturn = { owner: 'owner-ref', holder: null, pending: 1, total: 2, error: null,
+    matched: [{ id: 'return-1', work: '7', status: 'done' as const, result: '原生回件已完成。', postedAt: at(400) }] };
+  const fresher = derive(view({ stage: 'executing', updatedAt: at(300), ownerReturn }), [observation('worker')]);
+  assert.equal(fresher.phase, 'completed');
+  assert.equal(fresher.waitingFor, 'none');
+  assert.match(fresher.waitEvidence ?? '', /return:done/);
+  assert.match(fresher.waitEvidence ?? '', /return:等待負責人領取/);
+  // An older return never overrides a newer manual action.
+  const older = derive(view({ stage: 'executing', updatedAt: at(300), ownerReturn: { ...ownerReturn, matched: [{ ...ownerReturn.matched[0]!, postedAt: at(1) }] } }), [observation('worker')]);
+  assert.equal(older.phase, 'waiting');
+  // A native task fact still wins over the freshest return.
+  const rail = derive(view({ taskStatus: 'failed', updatedAt: at(300), ownerReturn }), [observation('worker')]);
+  assert.equal(rail.phase, 'failed');
+  // A task rail `done` with a stale manual executing stage projects completed.
+  const railDone = derive(view({ taskStatus: 'done', stage: 'executing', updatedAt: at(300), ownerReturn }), [observation('worker')]);
+  assert.equal(railDone.phase, 'completed');
+  // A failing return read is ignored rather than failing the projection.
+  const failedRead = derive(view({ stage: 'executing', updatedAt: at(300), ownerReturn: { ...ownerReturn, matched: [], error: '暫時無法讀取。' } }), [observation('worker')]);
+  assert.equal(failedRead.phase, 'waiting');
 });

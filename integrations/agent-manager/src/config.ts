@@ -67,7 +67,14 @@ export function parseConfig(input: unknown): ManagerConfig {
     const w = object(value), projectId = slug(w.projectId), ownerAgentId = slug(w.ownerAgentId);
     if (!Number.isSafeInteger(w.taskId) || Number(w.taskId) < 1) throw new ManagerError('INVALID_CONFIG', '工作必須連結有效的 Edda 任務編號。');
     if (!agents.some((a) => a.id === ownerAgentId && a.projectId === projectId)) throw new ManagerError('INVALID_CONFIG', '工作負責人必須是同專案已選取的代理。');
-    return { id: slug(w.id), projectId, taskId: Number(w.taskId), workspace: path(w.workspace), ownerAgentId };
+    // Optional owner reference for the native `edda return` mailbox. Absent stays
+    // backwards compatible; present must be a bounded, argument-safe locator.
+    let ownerRef: string | null = null;
+    if (w.ownerRef != null) {
+      ownerRef = text(w.ownerRef, 200);
+      if (!/^[A-Za-z0-9][A-Za-z0-9/_.:-]{0,199}$/.test(ownerRef)) throw new ManagerError('INVALID_CONFIG', '工作的負責人參照格式不正確。');
+    }
+    return { id: slug(w.id), projectId, taskId: Number(w.taskId), workspace: path(w.workspace), ownerAgentId, ownerRef };
   });
   unique(works.map((w) => w.id)); unique(works.map((w) => `${w.workspace}\0${w.taskId}`));
   const refreshMs = c.refreshMs ?? 3000;

@@ -20,10 +20,16 @@ export interface PublicEntry {
   role: 'user' | 'assistant' | null; text: string; truncated: boolean;
   toolName: string | null; toolError: boolean;
 }
+// A bounded, honest projection of a native record the Pi read could not use.
+// `recovery` names the strongest available continuation point (the bounded
+// `nextAction` the Pi read returns), or null when the source cannot name one.
+// It carries no record bytes and preserves the identity from the run config.
+export interface RecordDegradation { code: string; record: string; message: string; recovery: string | null }
 export interface AgentObservation {
   state: RuntimeState; instanceId: string | null; observedAt: string;
   heartbeatAt: string | null; lastProgressAt: string | null; lastEvent: string | null;
   source: 'live' | 'recorded' | 'unavailable'; stale: boolean; reason: string | null;
+  degraded: RecordDegradation | null;
   model: ModelView | null; usage: UsageView | null;
   capabilities: { conversation: boolean; send: boolean };
   latestMessage: PublicEntry | null;
@@ -59,6 +65,7 @@ export interface DiscoveredRun {
   registryRoot: string; sessionId: string | null; runId: string | null; instanceId: string | null;
   state: RuntimeState; live: boolean; source: 'live' | 'recorded';
   workspace: string | null; lastProgressAt: string | null; reason: string | null;
+  degraded?: RecordDegradation | null;
 }
 export interface DiscoveryReport { runs: DiscoveredRun[]; failures: Array<{ registryRoot: string; message: string }> }
 // Public candidate projection. Deliberately omits registryRoot; `id` is a stable
