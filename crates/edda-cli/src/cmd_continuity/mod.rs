@@ -367,15 +367,20 @@ fn repository_selection(
 
 /// Select the capsules that match this checkout's repository selection.
 ///
-/// A `legacy_partial` projection is always included, regardless of its
-/// `portable_repo_id` and of the repository selection: legacy checkpoints
-/// predate the portable identity (or could not carry one), and dropping them
-/// would make an old checkpoint unrestorable. The repository-scoped listing is
-/// therefore **not** a strict wrong-repository filter for legacy partials; a
-/// caller that needs strict refusal for them must say so and filter itself
-/// (GH #1180). Every other entry matches only a selected `portable_repo_id`, and
-/// an entry with no repository identity matches only when the selection is
-/// empty.
+/// On the repository filter, a `legacy_partial` projection is always included,
+/// regardless of its `portable_repo_id` and of the repository selection: legacy
+/// checkpoints predate the portable identity (or could not carry one), and
+/// dropping them would make an old checkpoint unrestorable. The repository-scoped
+/// listing is therefore **not** a strict wrong-repository filter for legacy
+/// partials; a caller that needs strict refusal for them must say so and filter
+/// itself (GH #1180). Every other entry matches only a selected
+/// `portable_repo_id`, and an entry with no repository identity matches only when
+/// the selection is empty.
+///
+/// The branch filter still applies to legacy partials: when a `branch` is
+/// selected, a legacy partial matches only if its recorded branch equals it or
+/// its branch is unrecorded. So a legacy partial is repository-independent but
+/// not always branch-independent.
 fn matching_entries(
     entries: Vec<CapsuleEntryV1>,
     portable_repo_ids: &BTreeSet<String>,

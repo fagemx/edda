@@ -35,12 +35,12 @@ function envelope({ id = CAPSULE_ID_VALUE, warnings = [], capsuleState = state()
 }
 const command = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-capsule-reader.mjs', import.meta.url))] };
 
-async function fixture(t, { capsuleId = CAPSULE_ID_VALUE, capsuleText = JSON.stringify(envelope()), list = true, writeCapsule = true, listWarnings = [], listEntries } = {}) {
+async function fixture(t, { capsuleId = CAPSULE_ID_VALUE, capsuleText = JSON.stringify(envelope()), list = true, writeCapsule = true, listWarnings = [], listEntries, listRaw } = {}) {
   const project = await mkdtemp(join(tmpdir(), 'edda-continuity-test-'));
   t.after(() => rm(project, { recursive: true, force: true }));
   await writeFile(join(project, 'task-17.json'), JSON.stringify(task()));
   const capsules = listEntries ?? (list ? [{ capsule: { capsule_id: capsuleId } }] : []);
-  await writeFile(join(project, 'capsules-list.json'), JSON.stringify({ data_authority: 'data_only', capsules, warnings: listWarnings }));
+  await writeFile(join(project, 'capsules-list.json'), listRaw ?? JSON.stringify({ data_authority: 'data_only', capsules, warnings: listWarnings }));
   if (writeCapsule) await writeFile(join(project, `capsule-${capsuleId}.json`), capsuleText);
   return { project, root: join(project, 'private-cache'), options: { project, id: '17', root: join(project, 'private-cache'), eddaCommand: command } };
 }
@@ -132,9 +132,25 @@ test('wrong repository, unavailable, malformed, oversize and stale capsules refu
 });
 
 test('a restore envelope over the 512 KiB read bound refuses as capsule_too_large', async (t) => {
-  const f = await fixture(t, { capsuleText: JSON.stringify(envelope({ capsuleState: state({ summary: 'x'.repeat(2 * MAX_CONTINUITY_CONTEXT_BYTES + 4096) }) })) });
+  const capsuleText = JSON.stringify(envelope({ capsuleState: state({ summary: 'x'.repeat(2 * MAX_CONTINUITY_CONTEXT_BYTES + 4096) }) }));
+  assert.ok(Buffer.byteLength(capsuleText) > 2 * MAX_CONTINUITY_CONTEXT_BYTES, 'fixture must exceed the restore read bound');
+  const f = await fixture(t, { capsuleText });
   const restored = await restoreCapsuleContext({ project: f.project, capsuleId: CAPSULE_ID_VALUE, eddaCommand: command });
   assert.equal(restored.status, 'capsule_too_large');
+  // The rendered-document bound reports the 256 KiB context bound instead, so the
+  // read-bound classification is what this pins.
+  assert.match(restored.reason, /bounded read/);
+});
+
+test('a repository listing over the 16 MiB bound refuses as membership-unverifiable', async (t) => {
+  const entry = '{"capsule":{"capsule_id":"cap_filler0000"}},';
+  const filler = entry.repeat(Math.ceil((17 * 1024 * 1024) / entry.length));
+  const listRaw = `{"data_authority":"data_only","capsules":[{"capsule":{"capsule_id":"${CAPSULE_ID_VALUE}"}},${filler.slice(0, -1)}],"warnings":[]}`;
+  assert.ok(Buffer.byteLength(listRaw) > 16 * 1024 * 1024, 'fixture must exceed the listing read bound');
+  const f = await fixture(t, { listRaw });
+  const restored = await restoreCapsuleContext({ project: f.project, capsuleId: CAPSULE_ID_VALUE, eddaCommand: command });
+  assert.equal(restored.status, 'capsule_unavailable');
+  assert.match(restored.reason, /bounded read/);
 });
 
 test('a repository listing larger than the context bound still verifies membership', async (t) => {
