@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { startChannel } from './channel.mjs';
-import { followDependencies, unfollowDependencies, doctor } from './dependency-client.mjs';
+import { followDependencies, unfollowDependencies, dependencyStatus, doctor } from './dependency-client.mjs';
 import { enroll } from './supervision.mjs';
 import { digest, writeJson, readJson } from './store.mjs';
 import { ownerSubscriptionDir, DELIVERY_WAIT_LIMIT } from './dependency-observer.mjs';
@@ -309,4 +309,66 @@ test('pause during configuration wins and malformed enrollment cannot crash poll
   await f.channel.dependencies.check();
   assert.equal(f.channel.dependencies.status().phase, 'control_state_unavailable');
   assert.equal(f.messages.length, 0);
+});
+
+test('unfollow locates and pauses an owner-scoped subscription', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-unfollow-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/unfollow-owner';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
+  await enroll(root, channel.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await channel.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  const dir = ownerSubscriptionDir(root, ownerRef);
+  assert.ok(readJson(join(dir, 'dependencies.json')));
+  const result = await unfollowDependencies(root, channel.sessionId);
+  assert.equal(result.status, 'paused');
+  assert.equal(result.scope, 'owner');
+  assert.ok(readJson(join(dir, 'dependencies.pause.json')), 'owner-scoped pause marker written');
+  assert.equal(channel.dependencies.status().phase, 'paused');
+});
+
+test('dependency status projects an owner-scoped subscription offline', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-offline-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/offline-owner';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const sessionId = channel.sessionId;
+  await enroll(root, sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await channel.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  await channel.close(); // the live endpoint is now unreachable
+  const status = await dependencyStatus(root, sessionId);
+  assert.equal(status.status, 'offline');
+  assert.equal(status.scope, 'owner');
+  assert.deepEqual(status.taskIds, ['17']);
+});
+
+test('an abandoned attempt is not re-abandoned while the receiver is busy', async (t) => {
+  const messages = [];
+  let deliveries = 0;
+  let channel;
+  const f = await fixture(t, (text) => {
+    messages.push(text);
+    if (deliveries++ === 0) return; // the first delivery stays unconfirmed
+    channel.messageStarted(text); channel.settled();
+  });
+  channel = f.channel;
+  channel.event('agent_start'); // busy: the initial send is deferred
+  await f.follow();
+  channel.settled(); // idle
+  await channel.dependencies.check(); // initial snapshot -> unconfirmed
+  await f.change({ status: 'done', receipt: 'v2' });
+  channel.event('agent_start'); // busy again
+  for (let i = 0; i < DELIVERY_WAIT_LIMIT + 3; i++) await channel.dependencies.check();
+  assert.equal(channel.dependencies.status().abandonedAttempts, 1);
+  assert.equal(messages.filter((m) => m.includes('"receipt":"v2"')).length, 0);
+  channel.settled(); // idle
+  await channel.dependencies.check();
+  assert.equal(messages.filter((m) => m.includes('"receipt":"v2"')).length, 1);
+  assert.equal(channel.dependencies.status().abandonedAttempts, 1);
 });
