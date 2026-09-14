@@ -20,14 +20,62 @@ export function validateId(id) {
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
 export const sessionDir = (root, id) => join(resolve(root), digest(validateSession(id)));
 
-export function privateRoot(root) {
+// Applying the channel ACL spawns Windows PowerShell, and a loaded CI runner can
+// make a cold start exceed the spawn timeout, which surfaces as
+// `spawnSync powershell.exe ETIMEDOUT` and fails whichever unrelated test first
+// calls `privateRoot()`. The ACL step is idempotent (`private-directory.ps1`
+// re-sets the same protected ACL and re-verifies it), so a timeout is retried
+// within a bounded window. The private-root guarantee is unchanged: a success
+// still means the script ran and verified, a non-timeout error still fails on the
+// first attempt, and an exhausted window is a typed failure — never a skipped
+// check.
+const PRIVATE_DIRECTORY_TIMEOUT_MS = 15000;
+// The pause before retry `i + 1`; cumulative wall time ~2 s, so a hung PowerShell
+// cannot withhold the caller for much longer than the original single attempt.
+const ACL_RETRY_MS = [0, 500, 1500];
+const aclIo = {
+  run: (script, root) => execFileSync('powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, '-Path', root],
+    { windowsHide: true, timeout: PRIVATE_DIRECTORY_TIMEOUT_MS, stdio: 'pipe' }),
+  // `sleepSync` is declared below with the record-write retry; the arrow defers
+  // the lookup so it is initialized by the time `privateRoot` runs.
+  sleep: (ms) => sleepSync(ms),
+};
+
+// An ACL that could not be applied before the retry window closed. Typed so the
+// failure is visible and distinguishable from a genuine ACL refusal (which is
+// thrown unchanged, on the first attempt).
+export class PrivateRootError extends Error {
+  constructor(root, attempts, cause) {
+    super(`Channel root ACL failed after ${attempts} attempts: ${basename(root)} (${cause.code || 'unknown'})`);
+    this.name = 'PrivateRootError';
+    this.code = 'private_root_failed';
+    this.root = root;
+    this.errno = cause.code || null;
+    this.cause = cause;
+  }
+}
+
+// Exported so a bounded-retry test can drive it without a real PowerShell.
+export function runPrivateDirectoryAcl(root, io = aclIo) {
+  const script = fileURLToPath(new URL('./private-directory.ps1', import.meta.url));
+  for (let attempt = 0; ; attempt += 1) {
+    try { io.run(script, root); return; }
+    catch (error) {
+      if (error.code !== 'ETIMEDOUT') throw error;
+      if (attempt >= ACL_RETRY_MS.length - 1) throw new PrivateRootError(root, attempt + 1, error);
+      io.sleep(ACL_RETRY_MS[attempt + 1]);
+    }
+  }
+}
+
+export function privateRoot(root, io = aclIo) {
   root = resolve(root);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const stat = lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Channel root must be a real directory');
   if (process.platform === 'win32') {
-    execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File',
-      fileURLToPath(new URL('./private-directory.ps1', import.meta.url)), '-Path', root], { windowsHide: true, timeout: 15000, stdio: 'pipe' });
+    runPrivateDirectoryAcl(root, io);
   } else {
     if (stat.uid !== process.getuid()) throw new Error('Channel root belongs to another user');
     chmodSync(root, 0o700);
