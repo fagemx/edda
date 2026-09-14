@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,7 @@ import { adoptSession, selectSession, discoverDependencies } from './adoption.mj
 import { readEnrollment } from './supervision.mjs';
 import { digest } from './store.mjs';
 import { MAX_CONTINUITY_CONTEXT_BYTES } from './continuity.mjs';
+import { removeTempTree } from './fixtures/temp-teardown.mjs';
 
 const metadata = { role: 'controller', doneWhen: ['Synthetic checks pass'], scope: {
   allowed: ['Observe synthetic fixtures'], excluded: ['Production changes'], reserved: ['New spend'],
@@ -29,7 +30,7 @@ async function fixture(t) {
   let channel;
   channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, dependencyCommand: command,
     deliver: (text) => { messages.push(text); channel.messageStarted(text); channel.settled(); } });
-  t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
+  t.after(async () => { await channel.close(); await removeTempTree(project); });
   const options = { id: '1', eddaCommand: command, scope: 'Only synthetic fixture observation; no spend.' };
   const adopt = (extra = {}) => adoptSession(root, channel.sessionId.slice(0, 8), { ...options, ...extra });
   const capsuleState = (summary = 'Synthetic restored summary') => ({ title: 'Continuity fixture', summary, goal: 'Continue synthetic task',
