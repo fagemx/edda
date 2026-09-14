@@ -6,6 +6,13 @@ import { digest, readJson, writeJson, validateId, privateRoot } from './store.mj
 import { readTask, taskId } from './compose-sources.mjs';
 
 const now = () => new Date().toISOString();
+// A notification whose channel receipt never advances (`unconfirmed`, or an
+// unknown send) must not latch the subscription forever. After this many
+// consecutive checks a still-unconfirmed attempt is abandoned: it is never
+// re-sent (its sequence stays handled), but a later revision is delivered under
+// its own notification identity, so an ambiguous outcome is not blindly retried
+// while it can no longer withhold newer changes.
+export const DELIVERY_WAIT_LIMIT = 3;
 function clip(text, maxBytes) {
   const bytes = Buffer.from(text || '');
   let end = Math.min(maxBytes, bytes.length);
@@ -133,6 +140,7 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
       notifications: data?.notifications || 0, changeSequence: data?.sequence || 0,
       pending: Boolean(data?.notify && data.sequence > data.handledSequence), checkedAt: data?.checkedAt,
       facts: data?.facts || [], lastAlert: delivery, sourceError: data?.sourceError || null,
+      deliveryWaits: data?.deliveryWaits || 0, abandonedAttempts: data?.abandonedAttempts || 0,
       checking: Boolean(operation), pollingIntervalSeconds: pollMs / 1000, coverage: 'selected_tasks_only',
       notice: 'Task status and receipt changes are evidence to inspect, not acceptance or new authority.' };
   }
@@ -160,9 +168,20 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
     persist({ ...data, facts, fingerprint, sequence: data.sequence + Number(changed), checkedAt: now(),
       phase: 'observing', sourceError: null });
     if (!data.notify || data.sequence === data.handledSequence) return status();
-    if (data.lastAlert && !['started', 'settled', 'failed'].includes(receipt(data.lastAlert.id)?.status)) {
-      persist({ ...data, phase: 'awaiting_delivery' });
-      return status();
+    const priorStatus = data.lastAlert ? receipt(data.lastAlert.id)?.status : null;
+    if (data.lastAlert && !['started', 'settled', 'failed'].includes(priorStatus)) {
+      const waits = (data.deliveryWaits ?? 0) + 1;
+      if (waits < DELIVERY_WAIT_LIMIT) {
+        persist({ ...data, deliveryWaits: waits, phase: 'awaiting_delivery' });
+        return status();
+      }
+      // Bounded wait exceeded: mark the attempt abandoned without re-sending it,
+      // then fall through to deliver the later revision with a fresh id.
+      persist({ ...data, deliveryWaits: 0, phase: 'observing',
+        abandonedAttempts: (data.abandonedAttempts ?? 0) + 1,
+        lastAlert: { ...data.lastAlert, receiptStatus: priorStatus || 'unknown', abandoned: true, abandonedAt: now() } });
+    } else if (data.deliveryWaits) {
+      persist({ ...data, deliveryWaits: 0 });
     }
     if (data.notifications >= data.maxNotifications) {
       persist({ ...data, phase: 'notification_limit' });
@@ -182,7 +201,7 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
       JSON.stringify({ project: data.project, tasks: facts.map(({ identity, failureDigest, evidenceDigest, ...f }) => f) });
     // Intent precedes the shared message path. An ambiguous attempt is handled,
     // never replayed; a genuinely later source transition has a new sequence/ID.
-    persist({ ...data, phase: 'notification_attempted', notifications: data.notifications + 1,
+    persist({ ...data, phase: 'notification_attempted', notifications: data.notifications + 1, deliveryWaits: 0,
       handledSequence: data.sequence, lastAlert: { id, sequence: data.sequence, attemptedAt: now(), receiptStatus: 'unknown' } });
     if (allowed()) return status();
     try {
