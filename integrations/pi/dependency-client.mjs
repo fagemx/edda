@@ -32,12 +32,19 @@ export async function dependencyStatus(root, id, check = false) {
     // Offline: project the persisted subscription (owner-scoped when one owns the
     // session), so status still resolves without a second subscription store.
     const owner = findOwnerSubscription(root, id);
-    const record = readJson(join(owner ? owner.dir : sessionDir(root, id), 'dependencies.json'));
-    if (!record) throw error;
-    return { sessionId: id, status: 'offline', scope: owner ? 'owner' : 'session', phase: record.phase,
+    const record = readJson(join(owner.dir ?? sessionDir(root, id), 'dependencies.json'));
+    if (!record) {
+      if (!owner.dir && owner.unreadable.length) {
+        return { sessionId: id, status: 'unavailable', unreadable: owner.unreadable,
+          nextAction: 'An owner subscription record is unreadable and was not repaired; inspect the owner-lifecycle directory.' };
+      }
+      throw error;
+    }
+    return { sessionId: id, status: 'offline', scope: owner.dir ? 'owner' : 'session', phase: record.phase,
       project: record.project, taskIds: record.taskIds, notify: record.notify,
       changeSequence: record.sequence || 0, handledSequence: record.handledSequence || 0,
       notifications: record.notifications || 0, checkedAt: record.checkedAt,
+      ...(owner.unreadable.length ? { unreadable: owner.unreadable } : {}),
       notice: 'Read-only persisted subscription projection; the live session was unreachable.' };
   }
   if (!state.capabilities?.includes('dependencies')) return { sessionId: id, status: 'needs_reload' };
@@ -46,14 +53,20 @@ export async function dependencyStatus(root, id, check = false) {
 
 export async function unfollowDependencies(root, id) {
   const owner = findOwnerSubscription(root, id);
-  const dir = owner ? owner.dir : sessionDir(root, id);
-  if (!readJson(join(dir, 'dependencies.json'))) return { sessionId: id, status: 'not_following' };
+  const dir = owner.dir ?? sessionDir(root, id);
+  if (!readJson(join(dir, 'dependencies.json'))) {
+    if (!owner.dir && owner.unreadable.length) {
+      return { sessionId: id, status: 'unavailable', unreadable: owner.unreadable,
+        nextAction: 'An owner subscription record is unreadable and was not repaired; inspect the owner-lifecycle directory.' };
+    }
+    return { sessionId: id, status: 'not_following' };
+  }
   // The durable cancellation marker works even when the endpoint is unreachable.
   // It carries the same identity the observer's pauseToken() validates.
-  writeJson(join(dir, 'dependencies.pause.json'), owner
+  writeJson(join(dir, 'dependencies.pause.json'), owner.dir
     ? { ownerRef: owner.ownerRef, nonce: randomUUID(), pausedAt: new Date().toISOString() }
     : { sessionId: id, nonce: randomUUID(), pausedAt: new Date().toISOString() });
-  const scope = owner ? 'owner' : 'session';
+  const scope = owner.dir ? 'owner' : 'session';
   try { await requestSession(root, id, '/dependencies/pause', {}); }
   catch { return { sessionId: id, status: 'paused', endpointConfirmed: false, scope }; }
   return { sessionId: id, status: 'paused', endpointConfirmed: true, scope };

@@ -372,3 +372,33 @@ test('an abandoned attempt is not re-abandoned while the receiver is busy', asyn
   assert.equal(messages.filter((m) => m.includes('"receipt":"v2"')).length, 1);
   assert.equal(channel.dependencies.status().abandonedAttempts, 1);
 });
+
+test('an unreadable owner record is surfaced, not silently skipped', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-unreadable-'));
+  const root = join(project, 'private');
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const start = (ownerRef) => startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  const broken = await start('assistant/unreadable-owner');
+  const readable = await start('assistant/readable-owner');
+  t.after(async () => { await broken.close(); await readable.close(); await rm(project, { recursive: true, force: true }); });
+  const scope = 'Observe this synthetic fixture; no real task work or spending.';
+  await enroll(root, broken.sessionId, scope);
+  await broken.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  await enroll(root, readable.sessionId, scope);
+  await readable.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  await broken.close();
+  await writeFile(join(ownerSubscriptionDir(root, 'assistant/unreadable-owner'), 'dependencies.json'), '{ this is not json');
+
+  // A session with no readable owner record is `unavailable`, not `not_following`.
+  const unfollow = await unfollowDependencies(root, randomUUID());
+  assert.equal(unfollow.status, 'unavailable');
+  assert.equal(unfollow.unreadable.length, 1);
+  assert.equal(unfollow.unreadable[0].record, 'dependencies.json');
+  assert.equal((await dependencyStatus(root, randomUUID())).status, 'unavailable');
+
+  // The readable owner subscription still matches and pauses beside the unreadable one.
+  const paused = await unfollowDependencies(root, readable.sessionId);
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.scope, 'owner');
+});
