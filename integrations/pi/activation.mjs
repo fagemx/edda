@@ -2,17 +2,50 @@
 import { readdirSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultRoot, readRecord, validateId } from './store.mjs';
-import { findPiEntry, managedDir } from './managed-store.mjs';
+import { defaultRoot, digest, readRecord, validateId } from './store.mjs';
+import { findPiEntry, managedDir, verifyRelease } from './managed-store.mjs';
 export { RECEIPT_VERSION, releaseIdentity, activationReceipt, evaluateCoherence } from './activation-receipt.mjs';
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
+
+// Digest-verified installed runtime releases, bounded and in descending id order
+// (the id is a content digest, not a timestamp). Read-only: `runtime-info` must
+// not create anything (the activation test asserts the root stays empty), so a
+// missing releases directory is simply empty.
+function verifiedReleases(root, limit = 5) {
+  const base = join(resolve(root), 'releases');
+  let names;
+  try { names = readdirSync(base).filter((name) => /^[0-9a-f]{64}$/.test(name)); }
+  catch (error) { if (error.code === 'ENOENT') return { releases: [], hasMore: false }; throw error; }
+  const releases = names.sort((a, b) => (a < b ? 1 : -1)).slice(0, limit).map((id) => {
+    const path = join(base, id);
+    let version = null, verified = false;
+    try {
+      verifyRelease({ id, path });
+      const pkg = readRecord(join(path, 'package.json')).value;
+      version = typeof pkg?.version === 'string' ? pkg.version : null;
+      verified = true;
+    } catch { /* an unverified release keeps its id and paths so drift stays visible */ }
+    return { id, version, channel: join(path, 'channel.mjs'), extension: join(path, 'extension.mjs'), verified };
+  });
+  return { releases, hasMore: names.length > limit };
+}
+
 export function runtimeInfo(root = defaultRoot()) {
   let pi = null;
   try { pi = findPiEntry(); } catch { /* Missing optional runtime is a diagnostic, not activation. */ }
   const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
+  const extension = join(packageRoot, 'extension.mjs'), channel = join(packageRoot, 'channel.mjs');
+  const installed = verifiedReleases(root);
   return { status: pi ? 'available' : 'needs_pi', version: pkg.version, nodeVersion: process.versions.node,
     cli: join(packageRoot, 'cli.mjs'), guide: join(packageRoot, 'getting-started.md'), registryRoot: resolve(root), pi,
+    extension: { path: extension, version: pkg.version, digest: digest(readFileSync(extension)) },
+    // The module a live session reports as `integration.modulePath` is the channel
+    // module, so drift is checked against `channel`, not `extension`.
+    channel: { path: channel, version: pkg.version, digest: digest(readFileSync(channel)) },
+    handOpened: { argv: ['pi', '-e', extension], load: `pi -e "${extension}"`, ownerRef: 'EDDA_OWNER_REF=<owner-reference>',
+      notice: 'A session Edda did not launch must load this installed extension (handOpened.argv) and declare EDDA_OWNER_REF. A live session reports its loaded channel as integration.modulePath in edda-pi list; if it matches neither runtime-info.channel.path nor a verified runtime-info.releases[].channel, it loaded a stale copy and owner-mailbox pickup fails silently.' },
+    releases: installed.releases, releasesHasMore: installed.hasMore,
     capabilities: { managedLaunch: true, sameSessionResume: true, explicitMessages: true, persistedManagedConversation: true,
       selectedTaskNotifications: true, managedFork: false, automaticProcessRestart: false, automaticOwnerWake: false },
     notice: 'Installed client capabilities only. Inspect run-status for the runtime actually loaded by a run. No session was started or upgraded.',

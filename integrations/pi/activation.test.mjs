@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { runtimeInfo, listManagedRuns } from './activation.mjs';
+import { installRuntime } from './managed-store.mjs';
 
 const exec = promisify(execFile), cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
 async function fixture(t) {
@@ -37,6 +38,32 @@ test('runtime-info and runs are read-only and publish honest capabilities', asyn
     .catch((error) => { assert.equal(error.code, 2); return error; });
   assert.equal(JSON.parse(result.stdout).registryRoot, root);
   assert.deepEqual(await readdir(dir), []);
+});
+
+test('runtime-info names the installed extension and digest-verified releases', async (t) => {
+  const dir = await fixture(t), root = join(dir, 'registry');
+  const info = runtimeInfo(root);
+  assert.match(info.extension.path, /extension\.mjs$/);
+  assert.match(info.extension.digest, /^[0-9a-f]{64}$/);
+  assert.equal(info.extension.version, info.version);
+  // Drift is checked against the channel module a live session reports, not the extension.
+  assert.match(info.channel.path, /channel\.mjs$/);
+  assert.match(info.channel.digest, /^[0-9a-f]{64}$/);
+  assert.equal(info.channel.version, info.version);
+  assert.deepEqual(info.handOpened.argv, ['pi', '-e', info.extension.path]);
+  assert.ok(info.handOpened.load.includes(`"${info.extension.path}"`), 'load command quotes the path');
+  assert.match(info.handOpened.ownerRef, /EDDA_OWNER_REF/);
+  assert.deepEqual(info.releases, []);
+  assert.equal(info.releasesHasMore, false);
+  assert.deepEqual(await readdir(dir), []); // the releases scan is read-only
+  const release = installRuntime(root), after = runtimeInfo(root);
+  assert.equal(after.releases.length, 1);
+  assert.equal(after.releases[0].id, release.id);
+  assert.equal(after.releases[0].verified, true);
+  assert.equal(after.releases[0].version, info.version);
+  assert.equal(after.releases[0].extension, join(release.path, 'extension.mjs'));
+  assert.equal(after.releases[0].channel, join(release.path, 'channel.mjs'));
+  assert.match(await readFile(info.guide, 'utf8'), /Hand-opened sessions are not wired automatically/);
 });
 
 test('run discovery preserves corrupt records and does not leak prompt/token/provider error', async (t) => {
