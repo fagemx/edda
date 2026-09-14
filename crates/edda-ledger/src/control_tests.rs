@@ -35,7 +35,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let store = edda_store::test_support::isolated_store_root().unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::control_workspace::process_scoped_workspace();
         Ledger::ensure_initialized(root.path()).unwrap();
         std::fs::write(
             root.path().join(".edda/actors.yaml"),
@@ -836,7 +836,7 @@ fn imported_manifest_and_forged_boolean_do_not_confer_authority() {
         .pop()
         .unwrap();
 
-    let target = tempfile::tempdir().unwrap();
+    let target = crate::control_workspace::process_scoped_workspace();
     let target_ledger = Ledger::open_or_init(target.path()).unwrap();
     let mut imported = manifest_event;
     imported.parent_hash = None;

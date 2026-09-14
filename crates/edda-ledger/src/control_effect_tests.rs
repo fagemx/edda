@@ -6,6 +6,78 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+/// GH-1235: the control-effect fixture is process-scoped, so two test
+/// processes can never resolve the same workspace lock. Both children
+/// construct a fixture and report the `.edda/LOCK` path they would use; the
+/// parent proves the paths are distinct and neither aliases the parent's.
+#[test]
+fn control_effect_workspaces_are_distinct_across_processes() {
+    if contender_role().is_some() {
+        return workspace_isolation_probe();
+    }
+    let scratch = crate::control_workspace::process_scoped_workspace();
+    let out_one = scratch.path().join("probe-out-one");
+    let out_two = scratch.path().join("probe-out-two");
+    let gate = scratch.path().join("probe-gate");
+    let mut one = spawn_contender(
+        "control_tests::effect_tests::control_effect_workspaces_are_distinct_across_processes",
+        &[(PROBE_OUT_ENV, out_one.display().to_string())],
+        &gate,
+    );
+    let mut two = spawn_contender(
+        "control_tests::effect_tests::control_effect_workspaces_are_distinct_across_processes",
+        &[(PROBE_OUT_ENV, out_two.display().to_string())],
+        &gate,
+    );
+    let status_one = wait_bounded(&mut one, Duration::from_secs(60)).expect("first probe finished");
+    let status_two =
+        wait_bounded(&mut two, Duration::from_secs(60)).expect("second probe finished");
+    assert!(status_one.success(), "first probe failed: {status_one:?}");
+    assert!(status_two.success(), "second probe failed: {status_two:?}");
+    let lock_one = std::fs::read_to_string(&out_one).expect("first probe lock path");
+    let lock_two = std::fs::read_to_string(&out_two).expect("second probe lock path");
+    let parent_pid = std::process::id().to_string();
+    for report in [&lock_one, &lock_two] {
+        let (pid, lock) = report
+            .split_once('\t')
+            .expect("probe reports its process id and lock path");
+        assert!(
+            lock.ends_with(".edda/LOCK") || lock.ends_with(".edda\\LOCK"),
+            "probe did not report a workspace lock path: {lock}"
+        );
+        assert_ne!(pid, parent_pid, "probe must be its own process");
+        assert!(
+            lock.contains(pid),
+            "lock path {lock:?} does not name its owning process {pid}, so another process \
+             could resolve the same workspace (GH-1235)"
+        );
+    }
+    let lock_one = lock_one.split_once('\t').unwrap().1;
+    let lock_two = lock_two.split_once('\t').unwrap().1;
+    assert_ne!(
+        lock_one, lock_two,
+        "two test processes resolved the same workspace lock"
+    );
+}
+
+/// GH-1235: a fork must not happen while any workspace lock is open in this
+/// process. `spawn_contender` takes the write half of this gate; every
+/// `WorkspaceLock` holds the read half for its lifetime, so a contender cannot
+/// inherit `.edda/LOCK`.
+#[test]
+fn a_held_workspace_lock_blocks_the_fork_gate() {
+    let fixture = Fixture::new();
+    let paths = crate::EddaPaths::discover(fixture.root.path());
+    let lock = crate::WorkspaceLock::acquire(&paths).unwrap();
+    assert!(
+        crate::lock::fork_gate::WORKSPACE_LOCK_FORK_GATE
+            .try_write()
+            .is_err(),
+        "a held workspace lock must block a contender fork (GH-1235)"
+    );
+    drop(lock);
+}
+
 /// The stable repository key every controlled effect test binds to.
 fn bound_portable() -> String {
     format!("repo_{}", "d".repeat(64))
@@ -36,6 +108,7 @@ const CLAIM_ENV: &str = "EDDA_CONTROL_TEST_CLAIM";
 const MARKER_ENV: &str = "EDDA_CONTROL_TEST_MARKER";
 const OUT_ENV: &str = "EDDA_CONTROL_TEST_OUT";
 const GATE_ENV: &str = "EDDA_CONTROL_TEST_GATE";
+const PROBE_OUT_ENV: &str = "EDDA_CONTROL_TEST_PROBE_OUT";
 
 /// True only inside a spawned contender; the parent never sets this in its own
 /// environment.
@@ -71,6 +144,14 @@ fn spawn_contender(test_name: &str, env: &[(&str, String)], gate: &Path) -> Cont
     for (key, value) in env {
         command.env(*key, value);
     }
+    // No workspace lock may be open in this process while a child is forked:
+    // the child would inherit the `.edda/LOCK` descriptor and keep the lock
+    // alive after the parent releases it (GH-1235). The gate is reset by the
+    // child's `exec`, so the contender still acquires its own lock normally.
+    #[cfg(test)]
+    let _fork_gate = crate::lock::fork_gate::WORKSPACE_LOCK_FORK_GATE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Contender(command.spawn().expect("spawn contender process"))
 }
 
@@ -200,6 +281,20 @@ fn review_claim_contender() {
         Ok(ControlReviewClaimOutcomeV1::RefusedLive) => write_outcome(&out, "refused_live"),
         Err(error) => write_outcome(&out, &format!("error={error:#}")),
     }
+}
+
+/// GH-1235 probe: a real second process constructs the same fixture the suite
+/// uses and reports the workspace lock path it would contend on. The parent
+/// asserts the two probe processes never name the same lock file.
+fn workspace_isolation_probe() {
+    let out = PathBuf::from(require_env(PROBE_OUT_ENV));
+    let workspace = crate::control_workspace::process_scoped_workspace();
+    let paths = crate::EddaPaths::discover(workspace.path());
+    std::fs::write(
+        &out,
+        format!("{}\t{}", std::process::id(), paths.lock_file.display()),
+    )
+    .expect("write probe lock path");
 }
 
 #[test]

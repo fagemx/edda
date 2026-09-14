@@ -25,12 +25,36 @@ pub fn is_busy_error(err: &anyhow::Error) -> bool {
 /// Automatically released when dropped.
 pub struct WorkspaceLock {
     _file: File,
+    #[cfg(test)]
+    _fork_gate: std::sync::RwLockReadGuard<'static, ()>,
+}
+
+/// Test-only admission gate for forked contender processes (GH-1235).
+///
+/// A process that holds a workspace lock must not `fork()`: the child inherits
+/// the open `.edda/LOCK` descriptor and keeps the `flock` alive even after the
+/// parent closes it, so the very next acquisition in the parent fails with
+/// "workspace is locked by another process". The control-effect contender
+/// harness takes this gate exclusively around `Command::spawn`, so no workspace
+/// lock is open at fork time. The child then `exec`s (which resets the gate)
+/// and acquires its own workspace lock normally.
+#[cfg(test)]
+pub(crate) mod fork_gate {
+    use std::sync::RwLock;
+
+    pub(crate) static WORKSPACE_LOCK_FORK_GATE: RwLock<()> = RwLock::new(());
 }
 
 impl WorkspaceLock {
     /// Try to acquire the workspace lock (non-blocking).
     /// Returns an error if already locked by another process.
     pub fn acquire(paths: &EddaPaths) -> anyhow::Result<Self> {
+        // Take the shared gate before the file lock: a fork between the two
+        // would otherwise inherit the lock descriptor (GH-1235).
+        #[cfg(test)]
+        let fork_gate = fork_gate::WORKSPACE_LOCK_FORK_GATE
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -48,7 +72,11 @@ impl WorkspaceLock {
             )
         })?;
 
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: file,
+            #[cfg(test)]
+            _fork_gate: fork_gate,
+        })
     }
 }
 

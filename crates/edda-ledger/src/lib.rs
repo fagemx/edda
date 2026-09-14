@@ -24,6 +24,8 @@ pub mod view;
 
 #[cfg(test)]
 mod control_tests;
+#[cfg(test)]
+mod control_workspace;
 
 pub use blob_meta::{BlobClass, BlobMetaEntry, BlobMetaMap, ClassChange};
 pub use blob_store::{
