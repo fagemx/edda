@@ -85,7 +85,9 @@ export class AgentManager {
     const view = this.view(added, observation);
     this.views.set(added.id, view);
     this.store.observation(added.id, hash(JSON.stringify([added.sessionId, 'registered'])), `${added.name}：已從候選加入管理`);
-    return view;
+    // The response is a browser projection: the newly added run's pinned owner
+    // mailbox root is an absolute registry path and stays internal.
+    return this.publicAgent(view);
   }
   private view(binding: AgentBinding, observation = unavailable()): AgentView {
     return { ...observation, id: binding.id, name: binding.name, role: binding.role, projectId: binding.projectId,

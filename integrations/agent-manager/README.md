@@ -196,8 +196,10 @@ managed candidate exists only for a selected agent whose binding carries that
 run's `runId` and whose run declares this owner reference (`edda-pi run-status`
 reports its `ownerRoot`, defaulting to `<registryRoot>/owner-mailbox`); without a
 `runId` the run is never read and that candidate is absent. The last candidate is
-deliberately not pinned: the `edda return` CLI resolves the enclosing Edda root
-of the work workspace itself. The first candidate whose `.edda/returns` layout
+deliberately not pinned to the workspace directory: the `edda return` CLI
+resolves the enclosing Edda root of the work workspace itself, and an ambient
+`EDDA_RETURN_ROOT` is cleared for that read (the CLI reads an empty override as
+absent) so the card and the read can never point at different roots. The first candidate whose `.edda/returns` layout
 exists is read; a higher-precedence candidate with no mailbox is disclosed in a
 bounded notice while a first-choice read stays silent. If no candidate holds a
 mailbox the card reports honest unavailability (with a non-null error) instead of

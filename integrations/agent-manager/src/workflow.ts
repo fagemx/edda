@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { ManagerError, type AgentBinding, type AgentView, type RuntimeState } from './contracts.js';
 import { hash, object, parseConfig, parseSend, selectionRevision, slug, text, uuid } from './config.js';
@@ -17,6 +18,63 @@ const PREFIX = 'edda.manager-work.v1 ';
 export const OWNER_MAILBOX_SOURCE: Record<OwnerMailboxKind, string> = { binding: '工作設定指定的 owner mailbox',
   env: '管理服務環境指定的 owner mailbox', managed: '受管理啟動的 owner mailbox', workspace: '工作目錄預設 mailbox' };
 interface ResolvedOwnerMailbox { kind: OwnerMailboxKind; root: string; label: string; present: boolean; notice: string | null }
+const isDirectory = (path: string): boolean => { try { return lstatSync(path).isDirectory(); } catch { return false; } };
+const samePath = (left: string, right: string): boolean => process.platform === 'win32'
+  ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right);
+/** Mirror of `edda_core::git::resolve_git_root`: the repository root that owns
+ *  `start` — the directory holding `.git`, or, when `start` is a git worktree
+ *  whose `.git` is a file pointing at `<main>/.git/worktrees/<name>`, the main
+ *  repository above that common git dir. */
+export function gitRepoRoot(start: string): string | null {
+  let dir = resolve(start);
+  for (let level = 0; level < 32; level += 1) {
+    const marker = join(dir, '.git');
+    if (existsSync(marker)) {
+      if (isDirectory(marker)) return dir;
+      try {
+        const text = readFileSync(marker, 'utf8').trim();
+        const pointer = text.startsWith('gitdir:') ? text.slice('gitdir:'.length).trim().replace(/\\/g, '/') : null;
+        const at = pointer?.indexOf('/worktrees/') ?? -1;
+        // Normalise the separator style so the same mailbox always hashes to one label.
+        if (pointer && at >= 0) return resolve(dirname(pointer.slice(0, at)));
+      } catch { /* an unreadable pointer falls back to this directory, as the Rust reader does */ }
+      return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+/** Mirror of `EddaPaths::find_root` (`crates/edda-ledger/src/paths.rs`), which is
+ *  how the `edda return` CLI resolves its mailbox from `cwd`. Home is never taken
+ *  as a workspace root (its `.edda` is user state), a `.git` directory is a
+ *  boundary, and a worktree root resolves to the main repository. Returns the
+ *  workspace itself where the CLI would fall back to `cwd` (`unwrap_or(cwd)`), so
+ *  the presence probe lands where the read lands. Bounded, read-only, no scan. */
+export function cliMailboxRoot(workspace: string, home = homedir()): string {
+  const start = resolve(workspace);
+  let dir = start;
+  for (let level = 0; level < 32; level += 1) {
+    const isHome = samePath(dir, home);
+    if (!isHome && isDirectory(join(dir, '.edda'))) return dir;
+    const marker = join(dir, '.git');
+    if (existsSync(marker)) {
+      if (!isDirectory(marker)) {
+        const main = gitRepoRoot(dir);
+        if (main && isDirectory(join(main, '.edda'))) return main;
+      }
+      // A git boundary the CLI does not climb above: find_root returns None and
+      // the CLI falls back to cwd.
+      return start;
+    }
+    if (isHome) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return start;
+}
 interface WorkEvent { version: 1; taskKey: string; previous: string | null; action: WorkAction; fingerprint: string; target: AgentBinding | null; transportStoreId: string; priorFailedOperation: string | null }
 interface ReadWork { task: CanonicalTask; events: Array<WorkEvent & { id: string; at: string }>; view: WorkView }
 export function parseWorkAction(input: unknown): WorkAction {
@@ -371,10 +429,16 @@ export class WorkManager {
     const cached = this.returns.get(binding.id);
     if (!spawn || (cached && Date.now() - cached.at < RETURN_CACHE_MS)) return cached?.value ?? null;
     const mailbox = binding.ownerRef ? this.resolveOwnerMailbox(binding, agents) : null;
-    // The workspace candidate is the CLI's own default, so it is deliberately not
-    // pinned: the CLI resolves the enclosing Edda root of `cwd` itself
-    // (`EddaPaths::find_root`), which is what this read did before this change.
-    const env = mailbox && mailbox.kind !== 'workspace' && isAbsolute(mailbox.root) ? { EDDA_RETURN_ROOT: mailbox.root } : undefined;
+    // The workspace candidate is the CLI's own default, so it is never pinned to
+    // the workspace directory: the CLI resolves the enclosing Edda root of `cwd`
+    // itself (`EddaPaths::find_root`). An empty override is how the CLI reads
+    // "absent" (`cmd_return::mailbox_root`), so it also neutralises an ambient
+    // `EDDA_RETURN_ROOT` that the resolver already ranked and rejected — the read
+    // and the card must not point at different roots.
+    const env = mailbox
+      ? mailbox.kind === 'workspace' ? { EDDA_RETURN_ROOT: '' }
+        : isAbsolute(mailbox.root) ? { EDDA_RETURN_ROOT: mailbox.root } : undefined
+      : undefined;
     let value: OwnerReturnRead | null;
     try { value = this.ledger.returns ? await this.ledger.returns(binding, env) : null; }
     catch {
@@ -400,7 +464,7 @@ export class WorkManager {
     if (envRoot && isAbsolute(envRoot)) candidates.push({ kind: 'env', root: envRoot });
     const managed = this.managedMailbox(binding, agents);
     if (managed) candidates.push({ kind: 'managed', root: managed });
-    candidates.push({ kind: 'workspace', root: this.cliMailboxRoot(binding.workspace) });
+    candidates.push({ kind: 'workspace', root: cliMailboxRoot(binding.workspace) });
     const found = candidates.findIndex((candidate) => existsSync(join(candidate.root, '.edda', 'returns')));
     const index = found < 0 ? 0 : found, selected = candidates[index]!;
     const present = found >= 0, label = rootLabel(selected.root), source = OWNER_MAILBOX_SOURCE[selected.kind];
@@ -421,16 +485,6 @@ export class WorkManager {
    *  must be probed there rather than pinned to the workspace directory. Bounded to
    *  16 levels and never a directory scan; a tree with no `.edda` above it keeps
    *  the workspace path, and an unconfirmable mailbox is reported as such. */
-  private cliMailboxRoot(workspace: string): string {
-    let dir = resolve(workspace);
-    for (let level = 0; level < 16; level += 1) {
-      if (existsSync(join(dir, '.edda'))) return dir;
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-    return resolve(workspace);
-  }
   /** The first project Pi agent — the work's owner agent first — whose observed
    *  owner mailbox names this work's owner reference. Never invents a root. */
   private managedMailbox(binding: WorkBinding, agents: AgentView[]): string | null {

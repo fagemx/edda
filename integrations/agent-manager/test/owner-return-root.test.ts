@@ -11,7 +11,7 @@ import { parseConfig } from '../src/config.js';
 import { EddaWorkflowLedger, WorkflowLocks, type EddaRunner } from '../src/edda-workflow.js';
 import { ChannelAdapter, defaultPiRoot } from '../src/pi-adapter.js';
 import { rootLabel } from '../src/discovery.js';
-import { OWNER_MAILBOX_SOURCE } from '../src/workflow.js';
+import { OWNER_MAILBOX_SOURCE, cliMailboxRoot } from '../src/workflow.js';
 import { OWNER_MAILBOX_LABELS } from '../src/web/workboard.js';
 import type { AgentBinding, AgentObservation, PiAdapter, SendRequest } from '../src/contracts.js';
 
@@ -229,7 +229,9 @@ test('8. the workspace candidate is not pinned and is probed where the CLI resol
       assert.equal(work.ownerReturn?.mailbox.label, rootLabel(repo));
       assert.equal(work.ownerReturn?.notice, null);
       const env = calls.find((call) => call.args[0] === 'return' && call.args[1] === 'status')?.env;
-      assert.equal(env?.EDDA_RETURN_ROOT, undefined);
+      // Not pinned with the workspace path, but the ambient override is cleared so
+      // the CLI's own find_root decides (an empty override reads as absent).
+      assert.equal(env?.EDDA_RETURN_ROOT, '');
     });
   } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
 });
@@ -276,6 +278,56 @@ test('10. a transient unavailability keeps the pinned owner mailbox of the run',
       assert.equal(work.ownerReturn?.mailbox.present, true);
     });
   } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test('11. a rejected ambient EDDA_RETURN_ROOT is neutralised for the workspace candidate', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'owner-root-ambient-')), ambient = join(base, 'ambient-no-mailbox'), workspace = join(base, 'workspace');
+  mkdirSync(workspace); mailbox(workspace);
+  const calls: CallRecord[] = [];
+  const ledger = new EddaWorkflowLedger(runner(calls));
+  const config = workspaceConfig(base, workspace);
+  const store = new ManagerStore(base);
+  const manager = new AgentManager(config, store, adapterFor(() => live(), randomUUID()), { ledger, locks: new WorkflowLocks(join(base, 'locks')) });
+  try {
+    // The ambient root is ranked above the workspace candidate and rejected for
+    // having no mailbox; the child must not silently read it anyway.
+    await withEnv(ambient, async () => {
+      const work = (await manager.works.list()).works[0]!;
+      assert.equal(work.ownerReturn?.mailbox.kind, 'workspace');
+      assert.equal(work.ownerReturn?.mailbox.present, true);
+      assert.match(work.ownerReturn?.notice ?? '', /沒有信箱紀錄/);
+      const env = calls.find((call) => call.args[0] === 'return' && call.args[1] === 'status')?.env;
+      // An empty override is how the CLI reads "absent", so its own find_root applies.
+      assert.equal(env?.EDDA_RETURN_ROOT, '');
+    });
+  } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test('12. the workspace probe mirrors EddaPaths::find_root boundaries', () => {
+  const base = mkdtempSync(join(tmpdir(), 'owner-root-find-'));
+  try {
+    // Home is never a workspace root, even when it holds a global .edda.
+    const home = join(base, 'home'); mkdirSync(join(home, '.edda'), { recursive: true });
+    const underHome = join(home, 'project', 'sub'); mkdirSync(underHome, { recursive: true });
+    assert.equal(cliMailboxRoot(underHome, home), underHome);
+    // The nearest ancestor with .edda wins.
+    const repo = join(base, 'repo'), inner = join(repo, 'sub'); mkdirSync(inner, { recursive: true });
+    mkdirSync(join(repo, '.edda'), { recursive: true });
+    assert.equal(cliMailboxRoot(inner, home), repo);
+    // A .git directory is a boundary: no escape above it, fall back to cwd.
+    const bare = join(base, 'bare'), bareInner = join(bare, 'sub'); mkdirSync(bareInner, { recursive: true }); mkdirSync(join(bare, '.git'));
+    assert.equal(cliMailboxRoot(bareInner, home), bareInner);
+    // A worktree root (.git file) resolves to the main repository's .edda.
+    const main = join(base, 'main'); mkdirSync(join(main, '.git', 'worktrees', 'w'), { recursive: true }); mkdirSync(join(main, '.edda'), { recursive: true });
+    const tree = join(base, 'tree'); mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, '.git'), 'gitdir: ' + join(main, '.git', 'worktrees', 'w') + String.fromCharCode(10));
+    assert.equal(cliMailboxRoot(tree, home), main);
+    // A worktree whose main repository has no .edda falls back to cwd.
+    const main2 = join(base, 'main2'); mkdirSync(join(main2, '.git', 'worktrees', 'w'), { recursive: true });
+    const tree2 = join(base, 'tree2'); mkdirSync(tree2, { recursive: true });
+    writeFileSync(join(tree2, '.git'), 'gitdir: ' + join(main2, '.git', 'worktrees', 'w') + String.fromCharCode(10));
+    assert.equal(cliMailboxRoot(tree2, home), tree2);
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
 test('7. the card mailbox source labels are pinned to the server names', () => {
