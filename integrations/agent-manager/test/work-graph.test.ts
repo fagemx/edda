@@ -382,6 +382,40 @@ test('the fixed-argument edda return read parses, filters and fails closed', asy
   assert.equal(await broken.returns({ id: 'w', projectId: 'p', taskId: 7, workspace: '/ws', ownerAgentId: 'a' }), null);
 });
 
+test('the owner-return read matches across the scan window before bounding the display', async () => {
+  const many = (count: number, work = '7', status = 'done'): unknown[] =>
+    Array.from({ length: count }, (_, index) => ({ version: 1, id: `m${index}`, owner: 'assistant/owner', work, status, result: 'ok', posted_by_session: 's', posted_at: at(index + 1) }));
+  const ledgerFor = (pending: unknown[]): EddaWorkflowLedger =>
+    new EddaWorkflowLedger(async (_cwd, args) => args[1] === 'status'
+      ? JSON.stringify({ owner: 'assistant/owner', holder: 'holder-session', pending: pending.length, total: pending.length })
+      : JSON.stringify({ owner: 'assistant/owner', count: pending.length, pending }));
+  const binding: WorkBinding = { id: 'w', projectId: 'p', taskId: 7, workspace: '/ws', ownerAgentId: 'a', ownerRef: 'assistant/owner' };
+
+  // 25 matching returns: the 20 NEWEST are shown (so the phase's newest-wins rule
+  // cannot lose a fresher return to the display bound) and the 5-item overflow is
+  // counted rather than hidden.
+  const manyView = await ledgerFor(many(25)).returns(binding);
+  assert.equal(manyView?.matched.length, 20);
+  assert.equal(manyView?.dropped, 5);
+  assert.equal(manyView?.matched[0]?.id, 'm24');
+  assert.equal(manyView?.matched[19]?.id, 'm5');
+
+  // Another work's return is never matched and never counted as dropped.
+  const otherView = await ledgerFor([...many(1, '999'), ...many(1, '999', 'weird')]).returns(binding);
+  assert.equal(otherView?.matched.length, 0);
+  assert.equal(otherView?.dropped, 0);
+
+  // A matched item whose status is outside the bounded vocabulary is dropped.
+  const weirdView = await ledgerFor(many(1, '7', 'weird')).returns(binding);
+  assert.equal(weirdView?.matched.length, 0);
+  assert.equal(weirdView?.dropped, 1);
+
+  // Pending items past the scan bound were not examined and are counted as unsafe.
+  const wideView = await ledgerFor(many(205)).returns(binding);
+  assert.equal(wideView?.matched.length, 20);
+  assert.equal(wideView?.dropped, 185);
+});
+
 test('the wait-target surface has no tool entry and no tool member (GH1189 F2)', () => {
   assert.ok(!Object.keys(waitTargets).includes('tool'));
   // A compile-time assertion: 'tool' is no longer assignable to WorkWaitingFor.

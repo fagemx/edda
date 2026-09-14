@@ -145,7 +145,7 @@ export class WorkBoard {
       this.details.append(el('p', `回件信箱：${OWNER_MAILBOX_LABELS[ownerReturn.mailbox.kind]}（${ownerReturn.mailbox.label}）${ownerReturn.mailbox.present ? '' : ' · 尚無信箱紀錄'}`, 'muted'));
       if (ownerReturn.notice) this.details.append(el('p', ownerReturn.notice, 'notice'));
       if (ownerReturn.error) this.details.append(el('p', `負責人回件狀態不可用：${ownerReturn.error}`, 'notice'));
-      if (ownerReturn.dropped > 0) this.details.append(el('p', `有 ${ownerReturn.dropped} 筆負責人回件無法讀取或狀態不在允許範圍；未列入上方清單。`, 'notice'));
+      if (ownerReturn.dropped > 0) this.details.append(el('p', `有 ${ownerReturn.dropped} 筆負責人回件無法使用、超出顯示範圍或超出掃描上限；未列入上方清單。`, 'notice'));
       for (const fact of ownerReturn.matched) this.details.append(el('p', `回件 ${fact.work} · ${fact.status} · ${fact.postedAt}${fact.result ? ` · ${fact.result}` : ''} · ${fact.id.slice(0, 12)}`, 'public-text identity'));
     }
     const buttons = el('div', '', 'work-links');
