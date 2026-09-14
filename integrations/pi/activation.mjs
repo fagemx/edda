@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultRoot, readRecord, validateId } from './store.mjs';
 import { findPiEntry, managedDir } from './managed-store.mjs';
+export { RECEIPT_VERSION, releaseIdentity, activationReceipt, evaluateCoherence } from './activation-receipt.mjs';
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 export function runtimeInfo(root = defaultRoot()) {
