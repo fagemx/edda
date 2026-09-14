@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -201,6 +201,7 @@ test('managed launch records the stable owner reference and exposes it even when
   assert.equal(launched.owner, 'assistant/project');
   assert.equal(launched.returnOwner, 'assistant/return');
   assert.match(launched.ownerRoot, /owner-mailbox$/);
+  assert.equal(launched.continuity, 'owner-bound');
   await assert.rejects(launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO',
     provider: 'fixture', model: 'echo', owner: 'assistant/other', returnOwner: 'assistant/return' }), /different launch inputs/);
   await assert.rejects(launchManaged(f.registry, { runId: randomUUID(), project: f.project, piEntry: f.entry, owner: 'bad\u0000owner' }), /owner/);
@@ -213,11 +214,32 @@ test('managed launch records the stable owner reference and exposes it even when
   const stopped = await managedStatus(f.registry, f.runId);
   assert.equal(stopped.owner, 'assistant/project');
   assert.equal(stopped.returnOwner, 'assistant/return');
+  assert.equal(stopped.continuity, 'owner-bound');
   await writeFile(join(managedDir(f.registry, f.runId), 'state.json'), Buffer.alloc(1887, 0));
   const degraded = await managedStatus(f.registry, f.runId);
   assert.equal(degraded.status, 'record_unavailable');
   assert.equal(degraded.owner, 'assistant/project');
   assert.equal(degraded.returnOwner, 'assistant/return');
+});
+
+test('run-status classifies an unowned run as session-addressed, not owner-bound', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
+  const status = await managedStatus(f.registry, f.runId);
+  assert.equal(status.owner, null);
+  assert.equal(status.continuity, 'session-addressed');
+});
+
+test('run-status keeps an owned run owner-bound when the state record lacks the owner field', async (t) => {
+  const f = await fixture(t);
+  const dir = managedDir(f.registry, f.runId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ version: 1, runId: f.runId, root: resolve(f.registry), project: f.project,
+    owner: 'assistant/owned', release: { id: 'a'.repeat(64), path: f.root } }));
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ runId: f.runId, phase: 'launch_requested' }));
+  const status = await managedStatus(f.registry, f.runId);
+  assert.equal(status.status, 'runner_unreachable');
+  assert.equal(status.continuity, 'owner-bound');
 });
 
 test('managed runner strips an inherited owner identity and passes only the configured contract', async (t) => {

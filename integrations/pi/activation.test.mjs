@@ -66,6 +66,15 @@ test('runtime-info names the installed extension and digest-verified releases', 
   assert.match(await readFile(info.guide, 'utf8'), /Hand-opened sessions are not wired automatically/);
 });
 
+test('run rows classify continuity from the owner reference', async (t) => {
+  const root = await fixture(t), owned = randomUUID(), unowned = randomUUID();
+  await record(root, owned, { config: { owner: 'assistant/x' } });
+  await record(root, unowned);
+  const runs = listManagedRuns(root).runs;
+  assert.equal(runs.find((r) => r.runId === owned).continuity, 'owner-bound');
+  assert.equal(runs.find((r) => r.runId === unowned).continuity, 'session-addressed');
+});
+
 test('run discovery preserves corrupt records and does not leak prompt/token/provider error', async (t) => {
   const root = await fixture(t), good = randomUUID(), bad = randomUUID();
   await record(root, good); await record(root, bad);
