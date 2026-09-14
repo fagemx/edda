@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import extension from './extension.mjs';
+import extension, { managedOwnerRefs } from './extension.mjs';
 import { listSessions, requestSession, getReceipt } from './client.mjs';
 import { listInbox, readInbox } from './inbox-manager.mjs';
 
@@ -67,4 +67,16 @@ test('Pi lifecycle, tool spans, queued messages, UI waits, settlement and sessio
   const rows = await listSessions(root);
   assert.equal(rows.find((r) => r.sessionId === prior).state, 'stopped');
   assert.equal(rows.find((r) => r.sessionId === sid).live, true);
+});
+
+test('managedOwnerRefs reads an adopted owner from a managed run state', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'edda-owner-refs-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runId = randomUUID(), ownerRoot = join(root, 'owner-mailbox');
+  await mkdir(join(root, 'managed', runId), { recursive: true });
+  await writeFile(join(root, 'managed', runId, 'state.json'), JSON.stringify({ runId,
+    owner: 'assistant/adopted', returnOwner: 'assistant/return', ownerRoot }));
+  assert.deepEqual(managedOwnerRefs(root, runId), { owner: 'assistant/adopted', returnOwner: 'assistant/return', ownerRoot });
+  assert.equal(managedOwnerRefs(root, randomUUID()), null); // no state record
+  assert.equal(managedOwnerRefs(root, 'not-a-run'), null);  // not a managed run id
 });

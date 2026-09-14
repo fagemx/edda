@@ -39,7 +39,7 @@ async function jsonBody(req) {
 }
 
 export async function startChannel({ root, sessionId, cwd, label = '', deliver, getConversation, heartbeatMs = 5000,
-  dependencyCommand, dependencyPollMs = 60000, ownerRef, returnOwner, ownerCommand }) {
+  dependencyCommand, dependencyPollMs = 60000, ownerRef, returnOwner, ownerRoot, ownerCommand }) {
   validateSession(sessionId);
   const instanceId = randomUUID();
   const token = randomBytes(32).toString('hex');
@@ -52,15 +52,16 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   let ownerSubscription = store.dir;
   let dependencyOwnerRef = null;
   let ownerError = null;
+  let currentReturnOwner = returnOwner || null;
   // An unavailable owner mailbox leaves the channel fully functional, but the
   // failure stays visible in the snapshot instead of looking like "no owner".
-  const createMailbox = (ref) => {
-    try { mailbox = createOwnerMailbox({ owner: ref, sessionId, cwd, command: ownerCommand }); ownerError = null; }
+  const createMailbox = (ref, root) => {
+    try { mailbox = createOwnerMailbox({ owner: ref, sessionId, cwd, command: ownerCommand, ownerRoot: root }); ownerError = null; }
     catch (error) { ownerError = error.message; mailbox = null; }
     return mailbox;
   };
   if (ownerRef) {
-    createMailbox(ownerRef);
+    createMailbox(ownerRef, ownerRoot);
     if (mailbox) {
       try { ownerSubscription = ownerSubscriptionDir(root, ownerRef); dependencyOwnerRef = ownerRef; }
       catch (error) { ownerError = error.message; }
@@ -111,7 +112,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
       owner: mailbox
         ? { ...mailbox.state(), dependencyScope: dependencyOwnerRef ? 'owner' : 'session', ...(ownerError ? { warning: ownerError } : {}) }
-        : (ownerRef ? { owner: ownerRef, status: 'unavailable', error: ownerError } : null), returnOwner: returnOwner || null,
+        : (ownerRef ? { owner: ownerRef, status: 'unavailable', error: ownerError } : null), returnOwner: currentReturnOwner,
       integration: { version: integrationVersion, modulePath: fileURLToPath(import.meta.url), releaseId: process.env.EDDA_PI_RELEASE_ID || null },
       capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
       inbox: inbox?.status() }),
@@ -122,9 +123,10 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     async adoptOwner(refs = {}) {
       const ref = typeof refs.owner === 'string' && refs.owner ? refs.owner : null;
       if (!ref) return { status: 'no-owner' };
+      if (typeof refs.returnOwner === 'string' && refs.returnOwner) currentReturnOwner = refs.returnOwner;
       if (mailbox && mailbox.owner === ref) return mailbox.state();
       if (mailbox) { const prior = mailbox; mailbox = null; prior.close(); }
-      createMailbox(ref);
+      createMailbox(ref, refs.ownerRoot);
       if (!mailbox) return { status: 'unavailable', owner: ref, error: ownerError };
       return { ...(await mailbox.bind()), owner: ref };
     },
