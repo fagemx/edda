@@ -28,9 +28,15 @@ export async function requestSession(root, sessionId, path, body, timeoutMs = 25
 export async function inspectSession(root, sessionId, options = {}) {
   let state;
   try { state = await requestSession(root, sessionId, '/status'); }
-  catch {
+  catch (error) {
     const stored = readJson(join(sessionDir(root, sessionId), 'state.json'));
-    if (!stored || stored.sessionId !== sessionId) throw new Error('No registered session state');
+    // A session absent from this registry is a different failure than an
+    // offline one: keep the registration error so the caller can name the
+    // registry instead of reporting a missing local state file.
+    if (!stored || stored.sessionId !== sessionId) {
+      if (/no reachable registered owner/.test(error.message)) throw error;
+      throw new Error('No registered session state');
+    }
     state = { ...stored, live: false, state: 'unreachable' };
   }
   let conversation;
@@ -89,9 +95,14 @@ function degradedRow(sessionId, error, owner) {
 export async function getReceipt(root, sessionId, id) {
   validateId(id);
   try { return await requestSession(root, sessionId, `/receipts/${id}`); }
-  catch {
+  catch (error) {
     const stored = readJson(join(sessionDir(root, sessionId), 'receipts', `${id.toLowerCase()}.json`));
-    if (!stored) throw new Error('Receipt not found; do not assume a new ID is safe');
+    if (!stored) {
+      // Absent from this registry: keep the registration error so `receipt`
+      // consumers can report the registry they looked in (issue #1247).
+      if (/no reachable registered owner/.test(error.message)) throw error;
+      throw new Error('Receipt not found; do not assume a new ID is safe');
+    }
     const { fingerprint, envelopeHash, ...publicRecord } = stored;
     return { ...publicRecord, status: ['settled', 'failed', 'unknown'].includes(stored.status) ? stored.status : 'unknown',
       lastRecordedStatus: stored.status, live: false };

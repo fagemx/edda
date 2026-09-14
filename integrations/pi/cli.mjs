@@ -85,6 +85,7 @@ for (const line of help.split('\n')) {
 }
 
 function registryRoot(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('--registry requires a directory (an empty value is not the default root)');
   const dir = resolve(value);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`--registry must be an existing directory: ${dir}`);
   return dir;

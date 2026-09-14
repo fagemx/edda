@@ -35,6 +35,15 @@ test('send, receipt and list address a session in another registry with --regist
   assert.match(miss.stderr, /No session .* in registry/);
   assert.match(miss.stderr, /--registry/);
   assert.equal(messages.length, 0);
+  const missReceipt = await run(['receipt', sid, '--id', randomUUID()], env);
+  assert.equal(missReceipt.status, 1);
+  assert.match(missReceipt.stderr, /No session .* in registry/);
+  const missConversation = await run(['conversation', sid], env);
+  assert.equal(missConversation.status, 1);
+  assert.match(missConversation.stderr, /No session .* in registry/);
+  const emptyRegistry = await run(['send', sid, '--message', 'x', '--id', randomUUID(), '--registry', ''], env);
+  assert.equal(emptyRegistry.status, 1);
+  assert.match(emptyRegistry.stderr, /--registry requires a directory/);
 
   // --registry A addresses the peer registry explicitly.
   const id = randomUUID();
