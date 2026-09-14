@@ -191,12 +191,17 @@ with `edda return bind`, so the work card can show that owner's pending returns.
 `ownerRoot` is also optional and pins the mailbox root explicitly (an absolute
 path). When it is absent the read resolves the root in precedence order: the
 pinned `works[].ownerRoot`, then an absolute `EDDA_RETURN_ROOT`, then the mailbox
-observed on the work owner's own managed run (whose default is
-`<registryRoot>/owner-mailbox`, the `ownerRoot` `edda-pi run-status` reports), then
-the work `workspace` default. The first candidate whose `.edda/returns` layout
+observed on the work owner's own managed run, then the CLI's own default. The
+managed candidate exists only for a selected agent whose binding carries that
+run's `runId` and whose run declares this owner reference (`edda-pi run-status`
+reports its `ownerRoot`, defaulting to `<registryRoot>/owner-mailbox`); without a
+`runId` the run is never read and that candidate is absent. The last candidate is
+deliberately not pinned: the `edda return` CLI resolves the enclosing Edda root
+of the work workspace itself. The first candidate whose `.edda/returns` layout
 exists is read; a higher-precedence candidate with no mailbox is disclosed in a
-bounded notice. If no candidate holds a mailbox the card reports honest
-unavailability (with a non-null error) instead of a healthy zero.
+bounded notice while a first-choice read stays silent. If no candidate holds a
+mailbox the card reports honest unavailability (with a non-null error) instead of
+a healthy zero.
 
 Use an actual task number from `edda task list`, not the illustrative number
 above. The task's title/status/receipt are read from `edda task show --json`.

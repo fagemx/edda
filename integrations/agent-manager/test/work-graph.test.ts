@@ -303,7 +303,7 @@ test('a corrupt managed state.json degrades one row to recoverable through the r
   } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
 });
 
-test('an overview() failure at the read boundary degrades only the affected row (GH1189 F4)', async () => {
+test('a failure while acquiring the shared observation snapshot degrades only the affected row (GH1189 F4)', async () => {
   const root = mkdtempSync(join(tmpdir(), 'work-graph-row-error-')), instanceId = randomUUID(), ledger = new MemoryLedger();
   const config = parseConfig({ version: 1, projects: [{ id: 'p', name: 'Project' }], agents: [
     { id: 'owner', name: 'Owner', projectId: 'p', role: 'manager', registryRoot: root, workspace: root, sessionId: 'owner-session' },
@@ -311,9 +311,13 @@ test('an overview() failure at the read boundary degrades only the affected row 
     { id: 'w2', projectId: 'p', taskId: 8, workspace: root, ownerAgentId: 'owner' }] });
   const { manager, store } = open(config, ledger, root, adapterFor((binding) => live(`${binding.id}-session`), instanceId));
   try {
-    const original = manager.overview.bind(manager);
+    const original = manager.agentViews.bind(manager);
     let calls = 0;
-    manager.overview = () => { if (calls++ === 0) throw new Error('overview unavailable'); return original(); };
+    // The snapshot seam is `agentViews()` (in-memory; the store-reading
+    // `overview()` is the browser projection and is no longer on this path), but
+    // the invariant is unchanged: it is acquired inside the per-row try, so a
+    // throw here degrades one row instead of rejecting the whole response.
+    manager.agentViews = () => { if (calls++ === 0) throw new Error('snapshot unavailable'); return original(); };
     const snapshot = await manager.works.list();
     assert.equal(snapshot.works.length, 2);
     const errored = snapshot.works.filter((w) => w.error !== null);

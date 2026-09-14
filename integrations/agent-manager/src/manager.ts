@@ -91,10 +91,20 @@ export class AgentManager {
     return { ...observation, id: binding.id, name: binding.name, role: binding.role, projectId: binding.projectId,
       workspace: binding.workspace, transport: binding.transport ?? 'pi', selectionRevision: selectionRevision(binding), ...summary(binding) };
   }
+  /** Internal agent views. The observation snapshot the work projection and the
+   *  owner inbox consume; unlike `overview()` it keeps the pinned owner mailbox
+   *  root, which is an absolute registry path and must not reach the browser. */
+  agentViews(): AgentView[] { return this.config.agents.map((a) => this.views.get(a.id) || this.view(a)); }
+  /** The browser projection of one agent. The pinned owner mailbox root stays
+   *  internal: the work card learns which mailbox was read from
+   *  `WorkView.ownerReturn.mailbox`, which carries only an opaque label. */
+  private publicAgent(view: AgentView): AgentView {
+    return view.ownerMailbox ? { ...view, ownerMailbox: { ref: view.ownerMailbox.ref, root: null } } : view;
+  }
   overview(): Overview {
     const selected = new Set(this.config.agents.map((a) => a.id));
     return { version: 1, generatedAt: new Date().toISOString(), startedAt: this.startedAt, refreshMs: this.config.refreshMs,
-      projects: this.config.projects, agents: this.config.agents.map((a) => this.views.get(a.id) || this.view(a)),
+      projects: this.config.projects, agents: this.agentViews().map((view) => this.publicAgent(view)),
       events: this.store.events().filter((e) => selected.has(e.agentId)), operations: this.store.operations().filter((op) => selected.has(op.agentId)) };
   }
   async refresh(): Promise<void> {
@@ -108,7 +118,11 @@ export class AgentManager {
       try { observation = await this.adapter.observe(binding); } catch { observation = unavailable(); }
       const prior = this.views.get(binding.id);
       if (observation.source === 'unavailable' && prior) observation = { ...observation, latestMessage: observation.latestMessage ?? prior.latestMessage, model: observation.model ?? prior.model,
-        usage: observation.usage ?? prior.usage, lastProgressAt: observation.lastProgressAt ?? prior.lastProgressAt, heartbeatAt: observation.heartbeatAt ?? prior.heartbeatAt };
+        usage: observation.usage ?? prior.usage, lastProgressAt: observation.lastProgressAt ?? prior.lastProgressAt, heartbeatAt: observation.heartbeatAt ?? prior.heartbeatAt,
+        // The run's pinned owner mailbox is a config fact, not a liveness fact: a
+        // transient managedStatus failure must not drop it and silently move the
+        // work's return read to a less specific mailbox root.
+        ownerMailbox: observation.ownerMailbox ?? prior.ownerMailbox };
       const view = this.view(binding, observation);
       this.views.set(binding.id, view);
       const fingerprint = hash(JSON.stringify([view.instanceId, view.state, view.source, view.stale, view.reason, view.latestMessage?.id]));
@@ -118,7 +132,7 @@ export class AgentManager {
       .map((op) => this.reconcile(op).catch(() => op)));
     await this.refreshOwnerInbox();
   }
-  async refreshOwnerInbox(): Promise<void> { this.ownerInbox.refresh(this.overview().agents, await this.works.list()); }
+  async refreshOwnerInbox(): Promise<void> { this.ownerInbox.refresh(this.agentViews(), await this.works.list()); }
   async start(): Promise<void> { await this.refresh(); this.timer = setInterval(() => { void this.refresh().catch(() => {}); }, this.config.refreshMs); }
   async stop(): Promise<void> { clearInterval(this.timer); await this.continuation.stop(); await this.works.stop(); if (this.refreshing) await this.refreshing; await Promise.allSettled(this.checking.values()); }
   async conversation(id: string, after?: string): Promise<ConversationView> {

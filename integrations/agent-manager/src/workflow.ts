@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { ManagerError, type AgentBinding, type AgentView, type RuntimeState } from './contracts.js';
 import { hash, object, parseConfig, parseSend, selectionRevision, slug, text, uuid } from './config.js';
 import { EddaWorkflowLedger, WorkflowLocks, type CanonicalTask, type WorkflowLedger } from './edda-workflow.js';
@@ -267,7 +267,7 @@ export class WorkManager {
         // D7: an exception from overview() degrades only the affected row, never
         // the whole `list()` response. One native observation snapshot per pass,
         // not one full overview() per work.
-        try { snapshot ??= this.manager.overview().agents; await this.read(binding, snapshot); }
+        try { snapshot ??= this.manager.agentViews(); await this.read(binding, snapshot); }
         catch (error) {
           const view = { ...(cached?.view ?? empty(binding)), error: error instanceof ManagerError ? error.message : '此工作的 Edda 紀錄暫時無法讀取。' };
           this.cache.set(binding.id, { at: Date.now(), view });
@@ -290,7 +290,7 @@ export class WorkManager {
     // A return read is fail-closed inside the ledger and never blocks the row; a
     // ledger that throws unexpectedly still degrades to an honest unavailable DTO.
     // A mutation read (`returns: false`) only reuses the cached snapshot.
-    const agentViews = agents ?? this.manager.overview().agents;
+    const agentViews = agents ?? this.manager.agentViews();
     const ownerReturn = await this.ownerReturns(binding, agentViews, options.returns !== false);
     const [task, notes] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding)]);
     const events: ReadWork['events'] = [];
@@ -371,7 +371,10 @@ export class WorkManager {
     const cached = this.returns.get(binding.id);
     if (!spawn || (cached && Date.now() - cached.at < RETURN_CACHE_MS)) return cached?.value ?? null;
     const mailbox = binding.ownerRef ? this.resolveOwnerMailbox(binding, agents) : null;
-    const env = mailbox && isAbsolute(mailbox.root) ? { EDDA_RETURN_ROOT: mailbox.root } : undefined;
+    // The workspace candidate is the CLI's own default, so it is deliberately not
+    // pinned: the CLI resolves the enclosing Edda root of `cwd` itself
+    // (`EddaPaths::find_root`), which is what this read did before this change.
+    const env = mailbox && mailbox.kind !== 'workspace' && isAbsolute(mailbox.root) ? { EDDA_RETURN_ROOT: mailbox.root } : undefined;
     let value: OwnerReturnRead | null;
     try { value = this.ledger.returns ? await this.ledger.returns(binding, env) : null; }
     catch {
@@ -397,11 +400,13 @@ export class WorkManager {
     if (envRoot && isAbsolute(envRoot)) candidates.push({ kind: 'env', root: envRoot });
     const managed = this.managedMailbox(binding, agents);
     if (managed) candidates.push({ kind: 'managed', root: managed });
-    candidates.push({ kind: 'workspace', root: binding.workspace });
+    candidates.push({ kind: 'workspace', root: this.cliMailboxRoot(binding.workspace) });
     const found = candidates.findIndex((candidate) => existsSync(join(candidate.root, '.edda', 'returns')));
     const index = found < 0 ? 0 : found, selected = candidates[index]!;
     const present = found >= 0, label = rootLabel(selected.root), source = OWNER_MAILBOX_SOURCE[selected.kind];
-    let notice: string | null;
+    let notice: string | null = null;
+    // A notice discloses a fallback or an absent mailbox; a first-choice read that
+    // found its mailbox is already named by the card's mailbox line.
     if (!present) notice = `找不到任何 owner mailbox（${label}）；無法確認是否有回件。`;
     else if (index > 0) {
       const higher = rootLabel(candidates[0]!.root);
@@ -409,8 +414,22 @@ export class WorkManager {
         ? `指定的 owner mailbox（${higher}）沒有信箱紀錄；改讀工作目錄預設信箱。`
         : `較高順位的 owner mailbox（${higher}）沒有信箱紀錄；已改用${source}（${label}）。`;
     }
-    else notice = selected.kind === 'workspace' ? null : `已使用${source}（${label}）。`;
     return { kind: selected.kind, root: selected.root, label, present, notice };
+  }
+  /** Where the `edda return` CLI itself would look: `EddaPaths::find_root` climbs
+   *  from `cwd` to the nearest ancestor holding `.edda`, so the workspace candidate
+   *  must be probed there rather than pinned to the workspace directory. Bounded to
+   *  16 levels and never a directory scan; a tree with no `.edda` above it keeps
+   *  the workspace path, and an unconfirmable mailbox is reported as such. */
+  private cliMailboxRoot(workspace: string): string {
+    let dir = resolve(workspace);
+    for (let level = 0; level < 16; level += 1) {
+      if (existsSync(join(dir, '.edda'))) return dir;
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return resolve(workspace);
   }
   /** The first project Pi agent — the work's owner agent first — whose observed
    *  owner mailbox names this work's owner reference. Never invents a root. */

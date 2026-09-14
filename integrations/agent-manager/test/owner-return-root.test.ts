@@ -73,6 +73,7 @@ test('1. a pinned works[].ownerRoot mailbox shows holder/pending and the child e
       assert.equal(work.ownerReturn?.pending, 1);
       assert.equal(work.ownerReturn?.matched[0]?.work, '7');
       assert.equal(work.ownerReturn?.matched[0]?.status, 'done');
+      assert.equal(work.ownerReturn?.notice, null);
       const env = calls.find((call) => call.args[0] === 'return' && call.args[1] === 'status')?.env;
       assert.equal(env?.EDDA_RETURN_ROOT, pinned);
     });
@@ -97,6 +98,7 @@ test('2. a managed run observation derives the mailbox and the return is project
       assert.equal(work.ownerReturn?.mailbox.present, true);
       assert.equal(work.ownerReturn?.error, null);
       assert.equal(work.ownerReturn?.matched[0]?.status, 'done');
+      assert.equal(work.ownerReturn?.notice, null);
       const env = calls.find((call) => call.args[0] === 'return' && call.args[1] === 'status')?.env;
       assert.equal(env?.EDDA_RETURN_ROOT, managedRoot);
     });
@@ -118,6 +120,7 @@ test('3. an absolute EDDA_RETURN_ROOT in the service environment is used', async
       assert.equal(work.ownerReturn?.mailbox.present, true);
       assert.equal(work.ownerReturn?.error, null);
       assert.equal(work.ownerReturn?.matched[0]?.work, '7');
+      assert.equal(work.ownerReturn?.notice, null);
       const env = calls.find((call) => call.args[0] === 'return' && call.args[1] === 'status')?.env;
       assert.equal(env?.EDDA_RETURN_ROOT, envRoot);
     });
@@ -206,6 +209,73 @@ test('6. ownerMailbox is projected from the managed record on the live and degra
     assert.equal(recordUnavailable.degraded?.code, 'record_unavailable');
     assert.deepEqual(recordUnavailable.ownerMailbox, { ref: 'assistant/owner', root: join(registry, 'owner-mailbox') });
   } finally { await channel.close(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test('8. the workspace candidate is not pinned and is probed where the CLI resolves it', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'owner-root-workspace-')), repo = join(base, 'repo'), nested = join(repo, 'sub', 'work');
+  mkdirSync(nested, { recursive: true }); mailbox(repo);
+  const calls: CallRecord[] = [];
+  const ledger = new EddaWorkflowLedger(runner(calls));
+  const config = workspaceConfig(base, nested);
+  const store = new ManagerStore(base);
+  const manager = new AgentManager(config, store, adapterFor(() => live(), randomUUID()), { ledger, locks: new WorkflowLocks(join(base, 'locks')) });
+  try {
+    await withEnv(undefined, async () => {
+      const work = (await manager.works.list()).works[0]!;
+      // The enclosing Edda root holds the mailbox, so the CLI's own resolution is
+      // what the probe must mirror, and the root must not be pinned for it.
+      assert.equal(work.ownerReturn?.mailbox.kind, 'workspace');
+      assert.equal(work.ownerReturn?.mailbox.present, true);
+      assert.equal(work.ownerReturn?.mailbox.label, rootLabel(repo));
+      assert.equal(work.ownerReturn?.notice, null);
+      const env = calls.find((call) => call.args[0] === 'return' && call.args[1] === 'status')?.env;
+      assert.equal(env?.EDDA_RETURN_ROOT, undefined);
+    });
+  } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test('9. the pinned owner mailbox root never leaves the manager as an agent field', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'owner-root-private-')), workspace = join(base, 'workspace'), managedRoot = join(base, 'owner-mailbox');
+  mkdirSync(workspace); mailbox(managedRoot);
+  const config = workspaceConfig(base, workspace);
+  const store = new ManagerStore(base);
+  const manager = new AgentManager(config, store, adapterFor(() => live({ ownerMailbox: { ref: 'assistant/owner', root: managedRoot } }), randomUUID()),
+    { ledger: new EddaWorkflowLedger(runner([])), locks: new WorkflowLocks(join(base, 'locks')) });
+  try {
+    await withEnv(undefined, async () => {
+      await manager.refresh();
+      // Internal view keeps it; the browser projection must not carry the path.
+      assert.equal(manager.agentViews()[0]?.ownerMailbox?.root, managedRoot);
+      assert.equal(manager.overview().agents[0]?.ownerMailbox?.root, null);
+      assert.ok(!JSON.stringify(manager.overview()).includes(managedRoot));
+      assert.ok(!JSON.stringify(manager.overview()).includes('registryRoot'));
+    });
+  } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test('10. a transient unavailability keeps the pinned owner mailbox of the run', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'owner-root-sticky-')), workspace = join(base, 'workspace'), managedRoot = join(base, 'owner-mailbox');
+  mkdirSync(workspace); mailbox(managedRoot);
+  const config = workspaceConfig(base, workspace);
+  const store = new ManagerStore(base);
+  let calls = 0;
+  const adapter: PiAdapter = { observe: async () => { calls += 1; if (calls > 1) throw new Error('transient'); return live({ ownerMailbox: { ref: 'assistant/owner', root: managedRoot } }); },
+    conversation: async () => ({ entries: [], instanceId: 'instance', cursor: null, headCursor: null, hasMore: false, observedAt: at(200), source: 'live' }),
+    send: async (binding, request) => ({ id: request.operationId, sessionId: binding.sessionId, instanceId: 'instance', status: 'started' }), receipt: async () => null };
+  const manager = new AgentManager(config, store, adapter, { ledger: new EddaWorkflowLedger(runner([])), locks: new WorkflowLocks(join(base, 'locks')) });
+  try {
+    await withEnv(undefined, async () => {
+      await manager.refresh();
+      await manager.refresh();
+      const view = manager.agentViews()[0]!;
+      assert.equal(view.source, 'unavailable');
+      // A config fact, not a liveness fact: it must survive the failed observation.
+      assert.equal(view.ownerMailbox?.root, managedRoot);
+      const work = (await manager.works.list()).works[0]!;
+      assert.equal(work.ownerReturn?.mailbox.kind, 'managed');
+      assert.equal(work.ownerReturn?.mailbox.present, true);
+    });
+  } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
 });
 
 test('7. the card mailbox source labels are pinned to the server names', () => {
