@@ -94,13 +94,17 @@ export class EddaWorkflowLedger implements WorkflowLedger {
           if (work === null || work === String(binding.taskId) || work === binding.id) dropped += 1;
         }
       }
-      // Matched facts past the display bound are counted, not hidden; likewise the
-      // pending items past the scan bound were never examined and may belong to
-      // this work. `dropped` therefore covers unusable, out-of-range and
-      // over-the-bound items, so the card never reports a healthy count while a
-      // return that might belong to this work is withheld.
-      const matched = matchedAll.slice(0, MAX_RETURN_MATCHED);
-      dropped += matchedAll.length - matched.length + (all.length - items.length);
+      // The display bound keeps the NEWEST matched facts: the card shows the
+      // freshest returns and `deriveWorkProgress`'s newest-wins rule must not lose
+      // a fresher return to the bound (the CLI orders `pending` oldest first).
+      // Matched facts past the bound are counted, not hidden; likewise the pending
+      // items past the scan bound were never examined and may belong to this work.
+      // `dropped` therefore covers unusable, out-of-range and over-the-bound
+      // items, so the card never reports a healthy count while a return that
+      // might belong to this work is withheld.
+      const orderedFacts = [...matchedAll].sort((a, b) => b.postedAt.localeCompare(a.postedAt) || a.id.localeCompare(b.id));
+      const matched = orderedFacts.slice(0, MAX_RETURN_MATCHED);
+      dropped += orderedFacts.length - matched.length + (all.length - items.length);
       return { owner, holder: typeof status.holder === 'string' ? status.holder.slice(0, 200) : null, pending: Number(pending), total, matched, dropped, error: null };
     } catch { return failed('負責人回件狀態暫時無法讀取；未自動重試。'); }
   }

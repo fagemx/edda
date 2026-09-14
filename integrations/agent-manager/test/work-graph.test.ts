@@ -391,12 +391,14 @@ test('the owner-return read matches across the scan window before bounding the d
       : JSON.stringify({ owner: 'assistant/owner', count: pending.length, pending }));
   const binding: WorkBinding = { id: 'w', projectId: 'p', taskId: 7, workspace: '/ws', ownerAgentId: 'a', ownerRef: 'assistant/owner' };
 
-  // 25 matching returns: the first 20 are shown and the 5-item overflow is counted.
+  // 25 matching returns: the 20 NEWEST are shown (so the phase's newest-wins rule
+  // cannot lose a fresher return to the display bound) and the 5-item overflow is
+  // counted rather than hidden.
   const manyView = await ledgerFor(many(25)).returns(binding);
   assert.equal(manyView?.matched.length, 20);
   assert.equal(manyView?.dropped, 5);
-  assert.equal(manyView?.matched[0]?.id, 'm0');
-  assert.equal(manyView?.matched[19]?.id, 'm19');
+  assert.equal(manyView?.matched[0]?.id, 'm24');
+  assert.equal(manyView?.matched[19]?.id, 'm5');
 
   // Another work's return is never matched and never counted as dropped.
   const otherView = await ledgerFor([...many(1, '999'), ...many(1, '999', 'weird')]).returns(binding);

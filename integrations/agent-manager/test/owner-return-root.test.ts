@@ -303,6 +303,33 @@ test('11. a rejected ambient EDDA_RETURN_ROOT is neutralised for the workspace c
   } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
 });
 
+test('12. the workspace probe mirrors EddaPaths::find_root boundaries', () => {
+  const base = mkdtempSync(join(tmpdir(), 'owner-root-find-'));
+  try {
+    // Home is never a workspace root, even when it holds a global .edda.
+    const home = join(base, 'home'); mkdirSync(join(home, '.edda'), { recursive: true });
+    const underHome = join(home, 'project', 'sub'); mkdirSync(underHome, { recursive: true });
+    assert.equal(cliMailboxRoot(underHome, home), underHome);
+    // The nearest ancestor with .edda wins.
+    const repo = join(base, 'repo'), inner = join(repo, 'sub'); mkdirSync(inner, { recursive: true });
+    mkdirSync(join(repo, '.edda'), { recursive: true });
+    assert.equal(cliMailboxRoot(inner, home), repo);
+    // A .git directory is a boundary: no escape above it, fall back to cwd.
+    const bare = join(base, 'bare'), bareInner = join(bare, 'sub'); mkdirSync(bareInner, { recursive: true }); mkdirSync(join(bare, '.git'));
+    assert.equal(cliMailboxRoot(bareInner, home), bareInner);
+    // A worktree root (.git file) resolves to the main repository's .edda.
+    const main = join(base, 'main'); mkdirSync(join(main, '.git', 'worktrees', 'w'), { recursive: true }); mkdirSync(join(main, '.edda'), { recursive: true });
+    const tree = join(base, 'tree'); mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, '.git'), 'gitdir: ' + join(main, '.git', 'worktrees', 'w') + String.fromCharCode(10));
+    assert.equal(cliMailboxRoot(tree, home), main);
+    // A worktree whose main repository has no .edda falls back to cwd.
+    const main2 = join(base, 'main2'); mkdirSync(join(main2, '.git', 'worktrees', 'w'), { recursive: true });
+    const tree2 = join(base, 'tree2'); mkdirSync(tree2, { recursive: true });
+    writeFileSync(join(tree2, '.git'), 'gitdir: ' + join(main2, '.git', 'worktrees', 'w') + String.fromCharCode(10));
+    assert.equal(cliMailboxRoot(tree2, home), tree2);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
 test('13. the managed mailbox prefers the owner agent and orders ties deterministically', async () => {
   const base = mkdtempSync(join(tmpdir(), 'owner-root-managed-order-')), workspace = join(base, 'workspace');
   mkdirSync(workspace);
@@ -351,33 +378,6 @@ test('13. the managed mailbox prefers the owner agent and orders ties determinis
         assert.equal(work.ownerReturn?.mailbox.label, rootLabel(workspace));
       });
     } finally { await manager.stop(); store.close(); }
-  } finally { rmSync(base, { recursive: true, force: true }); }
-});
-
-test('12. the workspace probe mirrors EddaPaths::find_root boundaries', () => {
-  const base = mkdtempSync(join(tmpdir(), 'owner-root-find-'));
-  try {
-    // Home is never a workspace root, even when it holds a global .edda.
-    const home = join(base, 'home'); mkdirSync(join(home, '.edda'), { recursive: true });
-    const underHome = join(home, 'project', 'sub'); mkdirSync(underHome, { recursive: true });
-    assert.equal(cliMailboxRoot(underHome, home), underHome);
-    // The nearest ancestor with .edda wins.
-    const repo = join(base, 'repo'), inner = join(repo, 'sub'); mkdirSync(inner, { recursive: true });
-    mkdirSync(join(repo, '.edda'), { recursive: true });
-    assert.equal(cliMailboxRoot(inner, home), repo);
-    // A .git directory is a boundary: no escape above it, fall back to cwd.
-    const bare = join(base, 'bare'), bareInner = join(bare, 'sub'); mkdirSync(bareInner, { recursive: true }); mkdirSync(join(bare, '.git'));
-    assert.equal(cliMailboxRoot(bareInner, home), bareInner);
-    // A worktree root (.git file) resolves to the main repository's .edda.
-    const main = join(base, 'main'); mkdirSync(join(main, '.git', 'worktrees', 'w'), { recursive: true }); mkdirSync(join(main, '.edda'), { recursive: true });
-    const tree = join(base, 'tree'); mkdirSync(tree, { recursive: true });
-    writeFileSync(join(tree, '.git'), 'gitdir: ' + join(main, '.git', 'worktrees', 'w') + String.fromCharCode(10));
-    assert.equal(cliMailboxRoot(tree, home), main);
-    // A worktree whose main repository has no .edda falls back to cwd.
-    const main2 = join(base, 'main2'); mkdirSync(join(main2, '.git', 'worktrees', 'w'), { recursive: true });
-    const tree2 = join(base, 'tree2'); mkdirSync(tree2, { recursive: true });
-    writeFileSync(join(tree2, '.git'), 'gitdir: ' + join(main2, '.git', 'worktrees', 'w') + String.fromCharCode(10));
-    assert.equal(cliMailboxRoot(tree2, home), tree2);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 

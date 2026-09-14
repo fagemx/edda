@@ -28,8 +28,8 @@ export type WorkWaitingFor = 'worker' | 'verifier' | 'dependency' | 'user_decisi
 export type WorkRootRelation = 'in_root' | 'not_in_root' | 'root_not_registered' | 'unknown';
 export interface WorkRegistryRelation { relation: WorkRootRelation; message: string }
 // Owner-bound `edda return` facts for one work, read through the fixed-argument
-// CLI. `matched` is the bounded subset of pending returns whose `work` matches
-// this work's task id or work id.
+// CLI. `matched` is the bounded, newest-first subset of pending returns whose
+// `work` matches this work's task id or work id.
 export interface OwnerReturnFact { id: string; work: string; status: 'done' | 'failed'; result: string | null; postedAt: string }
 // `dropped` counts pending items that could not be used and may belong to this
 // work — matched-but-unusable facts, matched facts beyond the display bound, and
