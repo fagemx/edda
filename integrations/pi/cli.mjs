@@ -19,7 +19,8 @@ import { activationReceipt } from './activation-receipt.mjs';
 const help = `Edda Pi session channel (same-user, same-machine)
   edda-pi --version
   edda-pi runtime-info                 installed version, capabilities and guide path (read-only)
-  edda-pi activation [--json] [--check] [--repo PATH] [--client-root PATH]
+  edda-pi activation [--json] [--check] [--repo PATH] [--registry-root PATH]
+                     [--manager-root PATH] [--edda-bin PATH] [--client-root PATH] [--timeout MS]
                                        read-only merge/install/running revision receipt (--check exits 2 unless coherent)
   edda-pi runs [--limit 50] [--after RUN_ID]   recorded managed runs, including stopped ones
   node integrations/pi/cli.mjs list

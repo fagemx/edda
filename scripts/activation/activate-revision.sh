@@ -26,7 +26,9 @@ Activate one merged revision across the Edda delivery carriers (Job C)
   --repo PATH          Edda checkout (default: current git toplevel)
   --revision SHA       exact 40-hex revision to activate (default: HEAD)
   --edda-bin PATH      installed shipping binary to verify (default: edda)
-  --edda-from PATH     prebuilt binary to copy-install instead of cargo install
+  --edda-from PATH     prebuilt binary to copy-install (skips the local build)
+  --cargo-install      use `cargo install --path crates/edda-cli --force` instead of
+                       the default `cargo build --release -p edda` + copy-install
   --manager-root PATH  agent-manager service root (default: ~/.edda-agent-manager)
   --registry-root PATH Pi private registry root (default: the installed client default)
   --no-edda            skip the shipping-binary step
@@ -45,6 +47,11 @@ By default the route refuses to activate a checkout that is not current `origin/
 and under --allow-stale it also refuses to overwrite newer installed content unless
 --allow-downgrade is given. This route installs from the checkout, so activating a stale
 checkout would silently downgrade installed Pi content or the manager release (issue #1217).
+
+The shipping-binary step builds with `cargo build --release -p edda` and copies the
+artifact: a copy either works or reports the Windows lock, instead of `cargo install`
+failing its own move after a long link (GH #1209). An interrupted route terminates the
+child it started so a superseded compile cannot outlive it.
 EOF
 }
 
@@ -52,7 +59,7 @@ die() { printf 'activate-revision: %s\n' "$*" >&2; exit 2; }
 
 repo=""; revision=""; edda_bin="edda"; edda_from=""; manager_root=""; registry_root=""
 dry_run=0; json=0; do_edda=1; do_pi=1; do_manager=1
-offline=0; allow_stale=0; allow_downgrade=0
+offline=0; allow_stale=0; allow_downgrade=0; cargo_install=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -60,6 +67,7 @@ while [ $# -gt 0 ]; do
     --revision) [ $# -ge 2 ] || die "missing value for --revision"; revision=$2; shift 2 ;;
     --edda-bin) [ $# -ge 2 ] || die "missing value for --edda-bin"; edda_bin=$2; shift 2 ;;
     --edda-from) [ $# -ge 2 ] || die "missing value for --edda-from"; edda_from=$2; shift 2 ;;
+    --cargo-install) cargo_install=1; shift ;;
     --manager-root) [ $# -ge 2 ] || die "missing value for --manager-root"; manager_root=$2; shift 2 ;;
     --registry-root) [ $# -ge 2 ] || die "missing value for --registry-root"; registry_root=$2; shift 2 ;;
     --no-edda) do_edda=0; shift ;;
@@ -134,6 +142,50 @@ run() {
   fi
 }
 
+# ── Interrupt safety (GH #1209) ────────────────────────────────────────
+# The shipping-binary build can run for many minutes. A route that is
+# interrupted must not leave a superseded compile running, so the one long
+# child is tracked and terminated on HUP/INT/TERM.
+pack_dir=""
+child_pid=""
+terminate_child() {
+  [ -n "$child_pid" ] || return 0
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Git Bash pids are not Windows pids; /proc/<pid>/winpid maps to one.
+      winpid=$(cat "/proc/$child_pid/winpid" 2>/dev/null) || winpid=""
+      if [ -n "$winpid" ]; then
+        MSYS_NO_PATHCONV=1 taskkill /PID "$winpid" /T /F >/dev/null 2>&1 || true
+      else
+        kill "$child_pid" 2>/dev/null || true
+      fi
+      ;;
+    *)
+      kill -TERM "$child_pid" 2>/dev/null || true
+      command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$child_pid" 2>/dev/null || true
+      ;;
+  esac
+}
+cleanup() {
+  [ -n "$child_pid" ] && terminate_child
+  [ -n "$pack_dir" ] && rm -rf "$pack_dir"
+  return 0
+}
+signal_exit() { cleanup; exit 130; }
+trap cleanup 0
+trap signal_exit HUP INT TERM
+# Runs one long child in a directory; `exec` makes the recorded pid the real
+# process, so terminating it terminates the compiler rather than a wrapper.
+run_child_in() {
+  child_dir=$1
+  shift
+  ( cd "$child_dir" && exec "$@" ) & child_pid=$!
+  rc=0
+  wait "$child_pid" || rc=$?
+  child_pid=""
+  return "$rc"
+}
+
 # ── Downgrade guard (#1217) ────────────────────────────────────────────
 # Under --allow-stale the checkout may be older than installed state; refuse to
 # overwrite newer installed Pi content or a manager configured at a newer
@@ -165,8 +217,10 @@ if [ "$do_edda" = 1 ]; then
   if [ "$dry_run" = 1 ]; then
     if [ -n "$edda_from" ]; then
       printf 'plan: copy-install %s over the resolved %s\n' "$edda_from" "$edda_bin"
-    else
+    elif [ "$cargo_install" = 1 ]; then
       printf 'plan: cargo install --path crates/edda-cli --force (cwd %s)\n' "$repo"
+    else
+      printf 'plan: cargo build --release -p edda, then copy target/release/edda over the resolved %s (cwd %s)\n' "$edda_bin" "$repo"
     fi
     printf 'plan: verify %s --version revision matches %s\n' "$edda_bin" "$revision"
   else
@@ -175,9 +229,21 @@ if [ "$do_edda" = 1 ]; then
       target_bin=$(command -v "$edda_bin" 2>/dev/null) || die "--edda-bin $edda_bin is not on PATH"
       # Copy-install (GH #1133): a release artifact installs by copy, so a running
       # process holding the old file does not fail the install.
-      cp "$edda_from" "$target_bin"
+      cp "$edda_from" "$target_bin" || die "could not replace $target_bin (a running process may hold it); close it and retry"
+      printf 'activate-revision: installed edda by copy from %s\n' "$edda_from"
+    elif [ "$cargo_install" = 1 ]; then
+      run_child_in "$repo" cargo install --path crates/edda-cli --force || die "cargo install failed"
+      printf 'activate-revision: installed edda with cargo install\n'
     else
-      ( cd "$repo" && cargo install --path crates/edda-cli --force )
+      # Default: build + copy-install. A copy either works or reports the Windows
+      # lock, instead of `cargo install` failing its own move after a long link.
+      run_child_in "$repo" cargo build --release -p edda || die "cargo build failed"
+      artifact="$repo/target/release/edda"
+      [ -f "$artifact" ] || artifact="$artifact.exe"
+      [ -f "$artifact" ] || die "cargo build did not produce target/release/edda"
+      target_bin=$(command -v "$edda_bin" 2>/dev/null) || die "--edda-bin $edda_bin is not on PATH"
+      cp "$artifact" "$target_bin" || die "could not replace $target_bin (a running process may hold it); close it and retry"
+      printf 'activate-revision: installed edda by build+copy from %s\n' "$artifact"
     fi
     line=$("$edda_bin" --version 2>/dev/null) || die "installed $edda_bin could not report its version"
     rev=$(printf '%s' "$line" | sed -n 's/^[^(]*(\([0-9a-f][0-9a-f]*\).*/\1/p')
@@ -198,7 +264,6 @@ if [ "$do_pi" = 1 ]; then
     printf 'plan: verify installed Pi release id == repo integrations/pi release id\n'
   else
     pack_dir=$(mktemp -d)
-    trap 'rm -rf "$pack_dir"' 0 HUP INT TERM
     tgz=$( cd "$repo" && npm pack ./integrations/pi --ignore-scripts --pack-destination "$pack_dir" --json \
       | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);process.stdout.write(j[0].filename)})" )
     [ -n "$tgz" ] || die "npm pack produced no tarball name"
