@@ -29,14 +29,17 @@ export const sessionDir = (root, id) => join(resolve(root), digest(validateSessi
 // still means the script ran and verified, a non-timeout error still fails on the
 // first attempt, and an exhausted window is a typed failure — never a skipped
 // check.
-const PRIVATE_DIRECTORY_TIMEOUT_MS = 15000;
-// The pause before retry `i + 1`; cumulative wall time ~2 s, so a hung PowerShell
-// cannot withhold the caller for much longer than the original single attempt.
+//
+// The per-attempt spawn timeout shrinks on retry, so the whole bounded sequence
+// costs ~24 s of PowerShell time — not three full 15 s attempts — while still
+// giving a loaded runner a fresh chance after a cold-start overrun.
+const ACL_ATTEMPT_TIMEOUT_MS = [12000, 6000, 6000];
+// The pause before retry `i + 1`.
 const ACL_RETRY_MS = [0, 500, 1500];
 const aclIo = {
-  run: (script, root) => execFileSync('powershell.exe',
+  run: (script, root, timeout) => execFileSync('powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, '-Path', root],
-    { windowsHide: true, timeout: PRIVATE_DIRECTORY_TIMEOUT_MS, stdio: 'pipe' }),
+    { windowsHide: true, timeout, stdio: 'pipe' }),
   // `sleepSync` is declared below with the record-write retry; the arrow defers
   // the lookup so it is initialized by the time `privateRoot` runs.
   sleep: (ms) => sleepSync(ms),
@@ -60,10 +63,11 @@ export class PrivateRootError extends Error {
 export function runPrivateDirectoryAcl(root, io = aclIo) {
   const script = fileURLToPath(new URL('./private-directory.ps1', import.meta.url));
   for (let attempt = 0; ; attempt += 1) {
-    try { io.run(script, root); return; }
+    const timeout = ACL_ATTEMPT_TIMEOUT_MS[Math.min(attempt, ACL_ATTEMPT_TIMEOUT_MS.length - 1)];
+    try { io.run(script, root, timeout); return; }
     catch (error) {
       if (error.code !== 'ETIMEDOUT') throw error;
-      if (attempt >= ACL_RETRY_MS.length - 1) throw new PrivateRootError(root, attempt + 1, error);
+      if (attempt >= ACL_ATTEMPT_TIMEOUT_MS.length - 1) throw new PrivateRootError(root, attempt + 1, error);
       io.sleep(ACL_RETRY_MS[attempt + 1]);
     }
   }

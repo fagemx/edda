@@ -19,12 +19,14 @@ test('a transient ACL timeout is retried and the secure step is applied', () => 
   const sleeps = [];
   const seen = [];
   const io = {
-    run: (script, root) => { calls += 1; seen.push({ script, root }); if (calls <= 2) throw aclTimeout(); },
+    run: (script, root, timeout) => { calls += 1; seen.push({ script, root, timeout }); if (calls <= 2) throw aclTimeout(); },
     sleep: (ms) => sleeps.push(ms),
   };
   runPrivateDirectoryAcl('C:/registry', io);
   assert.equal(calls, 3, 'two timeouts then a success');
   assert.deepEqual(sleeps, [500, 1500], 'the bounded backoff pauses were used');
+  assert.deepEqual(seen.map(({ timeout }) => timeout), [12000, 6000, 6000],
+    'the per-attempt timeout shrinks so the whole window is ~24 s, not three full 15 s attempts');
   assert.ok(seen.every(({ script, root }) => /private-directory\.ps1$/.test(script) && root === 'C:/registry'),
     'every attempt ran the real ACL script against the requested root');
 });
