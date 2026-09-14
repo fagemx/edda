@@ -284,6 +284,11 @@ needs no checkout. Requires Node 24+ and an installed Pi. Follow the
 [activation and fresh-session guide](integrations/pi/getting-started.md) for
 launch, result inspection, explicit continuation, upgrade and removal. Installation
 is not automatic task recovery; the guide lists exact lifecycle boundaries.
+When a merged revision must become the running revision, the
+[activation and revision receipt guide](docs/guides/activation-receipt.md) covers
+one supported route and the read-only receipt that distinguishes the repository
+merge, installed `edda`, installed Pi package identity and the agent-manager
+configured/running revision.
 This client is distinct from Rust `edda dispatch --agent pi` and does not require
 a workbench or a second supervisor model.
 
