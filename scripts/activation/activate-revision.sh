@@ -182,10 +182,16 @@ terminate_child() {
   kill -TERM "$child_pid" 2>/dev/null || true
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
-      self_winpid=$(cat "/proc/$$/winpid" 2>/dev/null) || self_winpid=""
-      if [ -n "$self_winpid" ]; then
-        MSYS_NO_PATHCONV=1 taskkill /PID "$self_winpid" /T /F >/dev/null 2>&1 || true
-      fi
+      # Only when this file is the running script; a sourced snapshot must not
+      # kill the sourcing shell's process tree.
+      case "$0" in
+        *activate-revision.sh)
+          self_winpid=$(cat "/proc/$$/winpid" 2>/dev/null) || self_winpid=""
+          if [ -n "$self_winpid" ]; then
+            MSYS_NO_PATHCONV=1 taskkill /PID "$self_winpid" /T /F >/dev/null 2>&1 || true
+          fi
+          ;;
+      esac
       ;;
   esac
   return 0
