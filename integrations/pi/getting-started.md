@@ -216,7 +216,12 @@ enrollment also needs `--scope` (the capsule's `edda-management` block does not
 substitute for it); later adoptions reuse the recorded scope. Unavailable, stale, wrong-repository, malformed
 or oversize capsules fail with a `capsule_*` status (exit 2) before any
 enrollment, handoff, message or model launch, so uncertain delivery is never
-replayed. `--edda-bin <path>` (or `EDDA_BIN`) selects the native executable.
+replayed. The raw `restore` envelope is read under a 512 KiB bound (a larger one
+fails as `capsule_too_large`), and the repository-membership listing under a 16 MiB
+bound (a larger history fails as `capsule_unavailable`, membership unverifiable).
+Native repository scoping always includes `legacy_partial` projections regardless
+of repository id, so a legacy-partial capsule is surfaced with its warning rather
+than refused as wrong-repository. `--edda-bin <path>` (or `EDDA_BIN`) selects the native executable.
 
 ## What happens across lifecycle boundaries
 

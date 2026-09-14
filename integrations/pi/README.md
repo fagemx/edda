@@ -235,9 +235,19 @@ An unavailable, stale, wrong-repository, malformed or oversize capsule refuses w
 `capsule_unavailable`, `capsule_stale`, `capsule_wrong_repository`, `capsule_invalid`
 or `capsule_too_large` (exit 2) during preflight, before any enrollment, handoff,
 observation or message, so nothing is launched and uncertain delivery is never
-replayed. Branch mismatch, a detached/dirty checkout and imported/legacy flags are
+replayed. The raw `restore --json` envelope is read under a 512 KiB bound (twice the
+context bound), so an oversize restore refuses as `capsule_too_large`; the
+repository-membership preflight reads the repository-scoped `continuity list --json`
+under a fixed 16 MiB bound, so a larger capsule history refuses as
+`capsule_unavailable` (membership unverifiable) rather than reading without bound.
+Branch mismatch, a detached/dirty checkout and imported/legacy flags are
 surfaced verbatim as warnings; only the native `saved commit is absent from the
-current clone` warning is treated as `capsule_stale`. `--edda-bin PATH` (or
+current clone` warning is treated as `capsule_stale`. Repository membership is the
+native repository-scoped listing, whose pre-existing semantics always include
+`legacy_partial` projections regardless of their `portable_repo_id`; a legacy-partial
+capsule from another repository can therefore pass membership and is surfaced with
+its legacy-partial warning and provenance rather than refused as
+`capsule_wrong_repository`. `--edda-bin PATH` (or
 `EDDA_BIN`) selects the native executable.
 
 Adoption reads all prerequisites before applying setup, with an eight-task maximum.
