@@ -18,6 +18,13 @@ test('per-verb --help prints that verb usage and exits 0', () => {
   assert.match(run(['launch', '--help']).stdout, /--owner REF/);
 });
 
+test('owner --help prints the adopt usage', () => {
+  const result = run(['owner', '--help']);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: edda-pi owner/);
+  assert.match(result.stdout, /owner adopt --run RUN_ID/);
+});
+
 test('an unknown verb with --help names where the supported usage lives', () => {
   const result = run(['not-a-verb', '--help']);
   assert.equal(result.status, 1);

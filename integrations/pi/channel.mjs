@@ -54,9 +54,13 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   let ownerError = null;
   // An unavailable owner mailbox leaves the channel fully functional, but the
   // failure stays visible in the snapshot instead of looking like "no owner".
-  if (ownerRef) {
-    try { mailbox = createOwnerMailbox({ owner: ownerRef, sessionId, cwd, command: ownerCommand }); }
+  const createMailbox = (ref) => {
+    try { mailbox = createOwnerMailbox({ owner: ref, sessionId, cwd, command: ownerCommand }); ownerError = null; }
     catch (error) { ownerError = error.message; mailbox = null; }
+    return mailbox;
+  };
+  if (ownerRef) {
+    createMailbox(ownerRef);
     if (mailbox) {
       try { ownerSubscription = ownerSubscriptionDir(root, ownerRef); dependencyOwnerRef = ownerRef; }
       catch (error) { ownerError = error.message; }
@@ -112,6 +116,18 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
       inbox: inbox?.status() }),
     claimOwnerReturns: () => mailbox ? mailbox.claim() : Promise.resolve({ status: 'disabled', returns: [] }),
+    // Bind (or rebind) this live channel to an owner reference after launch, so a
+    // run adopted post-launch claims owner returns on its next turn. Idempotent
+    // for the current owner; a failure leaves the channel functional.
+    async adoptOwner(refs = {}) {
+      const ref = typeof refs.owner === 'string' && refs.owner ? refs.owner : null;
+      if (!ref) return { status: 'no-owner' };
+      if (mailbox && mailbox.owner === ref) return mailbox.state();
+      if (mailbox) { const prior = mailbox; mailbox = null; prior.close(); }
+      createMailbox(ref);
+      if (!mailbox) return { status: 'unavailable', owner: ref, error: ownerError };
+      return { ...(await mailbox.bind()), owner: ref };
+    },
     get dependencies() { return dependencies; },
     handoffContext: (budget) => handoff.context(channel.snapshot(), budget),
     reportHandoff(id, value) {

@@ -109,6 +109,21 @@ test('a channel with an owner binds on start and claims exactly once', async (t)
   assert.deepEqual(await channel.claimOwnerReturns(), { status: 'empty', returns: [] });
 });
 
+test('a channel can adopt an owner reference after start', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'edda-owner-adopt-'));
+  const root = join(cwd, 'private');
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd, ownerCommand: fixture(), deliver() {} });
+  t.after(async () => { await channel.close(); await rm(cwd, { recursive: true, force: true }); });
+  assert.equal(channel.snapshot().owner, null);
+  const adopted = await channel.adoptOwner({ owner });
+  assert.equal(adopted.status, 'bound');
+  assert.deepEqual(channel.snapshot().owner, { owner, status: 'bound', replaced: false, dependencyScope: 'session' });
+  await postReturn(cwd, { work: 'job-adopted' });
+  const claimed = await channel.claimOwnerReturns();
+  assert.equal(claimed.status, 'ok');
+  assert.equal(claimed.returns[0].work, 'job-adopted');
+});
+
 test('a channel without an owner reports disabled owner returns', async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), 'edda-owner-mailbox-'));
   const root = join(cwd, 'private');

@@ -11,7 +11,7 @@ import { listInbox, readInbox, acknowledgeInbox, recordAuthorization, revokeAuth
 import { wakeCapability } from './inbox-store.mjs';
 import { readBoundedFile } from './compose-sources.mjs';
 import { installRuntime } from './managed-store.mjs';
-import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation } from './managed-client.mjs';
+import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation, adoptOwner } from './managed-client.mjs';
 import { startSupervisor, supervisorStatus, stopSupervisor } from './supervisor-client.mjs';
 import { runtimeInfo, listManagedRuns } from './activation.mjs';
 import { activationReceipt } from './activation-receipt.mjs';
@@ -54,6 +54,8 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs runtime-install
   node integrations/pi/cli.mjs launch --project PATH [--pi-entry FILE] [--provider NAME] [--model NAME] [--thinking LEVEL] [--prompt-file FILE] [--run-id UUID] [--extension FILE] [--agent-dir PATH] [--no-tools] [--owner REF] [--return-owner REF] [--owner-root DIR]
   node integrations/pi/cli.mjs run-status RUN_ID
+  node integrations/pi/cli.mjs owner adopt --run RUN_ID --owner REF [--return-owner REF] [--owner-root DIR]
+                                       adopt an already-launched run into the owner lifecycle (same run, next turn)
   node integrations/pi/cli.mjs run-conversation RUN_ID [--after ENTRY_ID] [--limit 20]
   node integrations/pi/cli.mjs run-stop RUN_ID [--abort]
   node integrations/pi/cli.mjs run-resume RUN_ID
@@ -119,11 +121,12 @@ async function main(args) {
     'inbox-respond': ['--message', '--message-file', '--authorization', '--consumer'], 'inbox-wake': [],
     'runtime-install': [], launch: ['--project', '--pi-entry', '--provider', '--model', '--thinking', '--prompt-file', '--run-id', '--extension', '--agent-dir', '--no-tools', '--owner', '--return-owner', '--owner-root'],
     'run-status': [], 'run-conversation': ['--after', '--limit'], 'run-stop': ['--abort'], 'run-resume': [],
+    owner: ['--run', '--owner', '--return-owner', '--owner-root'],
     'supervisor-start': ['--config', '--id'], 'supervisor-status': [], 'supervisor-stop': [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
-  const counts = command === 'doctor' ? [0, 1] : [['runtime-info', 'activation', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
+  const counts = ['doctor', 'owner'].includes(command) ? [0, 1] : [['runtime-info', 'activation', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
   if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
@@ -156,6 +159,11 @@ async function main(args) {
       owner: options['--owner'], returnOwner: options['--return-owner'], ownerRoot: options['--owner-root'] });
   }
   if (command === 'run-status') result = await managedStatus(root, sessionId);
+  if (command === 'owner') {
+    if (positional[0] !== 'adopt') throw new Error("owner supports only the 'adopt' subcommand; use --help");
+    if (!options['--run'] || !options['--owner']) throw new Error('owner adopt requires --run and --owner');
+    result = await adoptOwner(root, options['--run'], { owner: options['--owner'], returnOwner: options['--return-owner'], ownerRoot: options['--owner-root'] });
+  }
   if (command === 'run-conversation') result = await managedConversation(root, sessionId, { after: options['--after'], limit: options['--limit'] });
   if (command === 'run-stop') result = await stopManaged(root, sessionId, { abort: options['--abort'] === true });
   if (command === 'run-resume') result = await resumeManaged(root, sessionId);

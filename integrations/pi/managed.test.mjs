@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { installRuntime, verifyRelease, rpcFrames, managedDir, alive } from './managed-store.mjs';
-import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation } from './managed-client.mjs';
+import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation, adoptOwner } from './managed-client.mjs';
 import { requestSession } from './client.mjs';
 import { readJson, writeJson } from './store.mjs';
 import { listInbox } from './inbox-manager.mjs';
@@ -220,6 +220,24 @@ test('managed launch records the stable owner reference and exposes it even when
   assert.equal(degraded.status, 'record_unavailable');
   assert.equal(degraded.owner, 'assistant/project');
   assert.equal(degraded.returnOwner, 'assistant/return');
+});
+
+test('owner adopt binds an already-launched run without relaunching it', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
+  const before = await managedStatus(f.registry, f.runId);
+  assert.equal(before.owner, null);
+  assert.equal(before.continuity, 'session-addressed');
+  const adopted = await adoptOwner(f.registry, f.runId, { owner: 'assistant/adopted', returnOwner: 'assistant/return' });
+  assert.equal(adopted.status, 'owner-bound');
+  assert.equal(adopted.owner, 'assistant/adopted');
+  assert.equal(adopted.returnOwner, 'assistant/return');
+  const after = await managedStatus(f.registry, f.runId);
+  assert.equal(after.owner, 'assistant/adopted');
+  assert.equal(after.returnOwner, 'assistant/return');
+  assert.equal(after.continuity, 'owner-bound');
+  assert.equal(after.sessionId, before.sessionId); // same run and session preserved
+  await assert.rejects(adoptOwner(f.registry, f.runId, { owner: 'bad\u0000owner' }), /owner/);
 });
 
 test('run-status classifies an unowned run as session-addressed, not owner-bound', async (t) => {
