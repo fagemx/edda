@@ -4472,39 +4472,38 @@ phases:
 
         let session_id = phase_session_id_attempt("hbdur", "a", 1).to_string();
         let path = hb_path(&cwd, &session_id);
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
 
-        // The heartbeat must reach the checking stage ...
-        let first_checking = loop {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if v["stage"] == "checking" {
-                        break v["last_heartbeat"].clone();
-                    }
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "heartbeat never reached the checking stage while checks ran"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        };
-        // ... and keep refreshing (1s interval vs 3s check) while the check
-        // is still running.
+        // Poll-until-condition (#1109): the wait's ceiling must not be the
+        // pass/fail line, or a slow host fails a correct run. It ends on the
+        // observed heartbeat or the run finishing, then asserts the observation.
+        let (mut first_checking, mut refreshed) = (None, false);
         loop {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if v["stage"] == "checking" && v["last_heartbeat"] != first_checking {
-                        break;
+                    let hb = &v["last_heartbeat"];
+                    if v["stage"] == "checking" {
+                        if first_checking.is_none() {
+                            first_checking = Some(hb.clone());
+                        } else if first_checking.as_ref() != Some(hb) {
+                            refreshed = true;
+                            break;
+                        }
                     }
                 }
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "heartbeat stopped refreshing during the running check"
-            );
+            if handle.is_finished() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        assert!(
+            first_checking.is_some(),
+            "the run finished without the heartbeat ever reaching the checking stage"
+        );
+        assert!(
+            refreshed,
+            "the run finished without the heartbeat ever refreshing during the running check"
+        );
 
         let state = handle.await.unwrap().unwrap();
         assert_eq!(state.plan_status, PlanStatus::Completed);
