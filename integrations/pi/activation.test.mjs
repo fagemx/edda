@@ -46,8 +46,12 @@ test('runtime-info names the installed extension and digest-verified releases', 
   assert.match(info.extension.path, /extension\.mjs$/);
   assert.match(info.extension.digest, /^[0-9a-f]{64}$/);
   assert.equal(info.extension.version, info.version);
-  assert.match(info.handOpened.load, /pi -e /);
-  assert.ok(info.handOpened.load.includes(info.extension.path));
+  // Drift is checked against the channel module a live session reports, not the extension.
+  assert.match(info.channel.path, /channel\.mjs$/);
+  assert.match(info.channel.digest, /^[0-9a-f]{64}$/);
+  assert.equal(info.channel.version, info.version);
+  assert.deepEqual(info.handOpened.argv, ['pi', '-e', info.extension.path]);
+  assert.ok(info.handOpened.load.includes(`"${info.extension.path}"`), 'load command quotes the path');
   assert.match(info.handOpened.ownerRef, /EDDA_OWNER_REF/);
   assert.deepEqual(info.releases, []);
   assert.equal(info.releasesHasMore, false);
@@ -58,6 +62,7 @@ test('runtime-info names the installed extension and digest-verified releases', 
   assert.equal(after.releases[0].verified, true);
   assert.equal(after.releases[0].version, info.version);
   assert.equal(after.releases[0].extension, join(release.path, 'extension.mjs'));
+  assert.equal(after.releases[0].channel, join(release.path, 'channel.mjs'));
   assert.match(await readFile(info.guide, 'utf8'), /Hand-opened sessions are not wired automatically/);
 });
 
