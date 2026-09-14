@@ -60,6 +60,24 @@ fn control_effect_workspaces_are_distinct_across_processes() {
     );
 }
 
+/// GH-1235: a fork must not happen while any workspace lock is open in this
+/// process. `spawn_contender` takes the write half of this gate; every
+/// `WorkspaceLock` holds the read half for its lifetime, so a contender cannot
+/// inherit `.edda/LOCK`.
+#[test]
+fn a_held_workspace_lock_blocks_the_fork_gate() {
+    let fixture = Fixture::new();
+    let paths = crate::EddaPaths::discover(fixture.root.path());
+    let lock = crate::WorkspaceLock::acquire(&paths).unwrap();
+    assert!(
+        crate::lock::fork_gate::WORKSPACE_LOCK_FORK_GATE
+            .try_write()
+            .is_err(),
+        "a held workspace lock must block a contender fork (GH-1235)"
+    );
+    drop(lock);
+}
+
 /// The stable repository key every controlled effect test binds to.
 fn bound_portable() -> String {
     format!("repo_{}", "d".repeat(64))
@@ -126,6 +144,14 @@ fn spawn_contender(test_name: &str, env: &[(&str, String)], gate: &Path) -> Cont
     for (key, value) in env {
         command.env(*key, value);
     }
+    // No workspace lock may be open in this process while a child is forked:
+    // the child would inherit the `.edda/LOCK` descriptor and keep the lock
+    // alive after the parent releases it (GH-1235). The gate is reset by the
+    // child's `exec`, so the contender still acquires its own lock normally.
+    #[cfg(test)]
+    let _fork_gate = crate::lock::fork_gate::WORKSPACE_LOCK_FORK_GATE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Contender(command.spawn().expect("spawn contender process"))
 }
 
