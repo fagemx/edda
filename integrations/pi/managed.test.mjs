@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -228,6 +228,18 @@ test('run-status classifies an unowned run as session-addressed, not owner-bound
   const status = await managedStatus(f.registry, f.runId);
   assert.equal(status.owner, null);
   assert.equal(status.continuity, 'session-addressed');
+});
+
+test('run-status keeps an owned run owner-bound when the state record lacks the owner field', async (t) => {
+  const f = await fixture(t);
+  const dir = managedDir(f.registry, f.runId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ version: 1, runId: f.runId, root: resolve(f.registry), project: f.project,
+    owner: 'assistant/owned', release: { id: 'a'.repeat(64), path: f.root } }));
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ runId: f.runId, phase: 'launch_requested' }));
+  const status = await managedStatus(f.registry, f.runId);
+  assert.equal(status.status, 'runner_unreachable');
+  assert.equal(status.continuity, 'owner-bound');
 });
 
 test('managed runner strips an inherited owner identity and passes only the configured contract', async (t) => {

@@ -49,7 +49,7 @@ export async function managedStatus(root, id) {
       catch { initialReceipt = { id: initialReceipt.id, status: 'unknown', lastRecordedStatus: initialReceipt.status, live: false }; }
     }
     return { ...(state || {}), initialReceipt, runId: id, live: false, status: 'runner_unreachable', lastRecordedPhase: state?.phase,
-      release: config.release, continuity: continuityMode(state?.owner), nextAction: state?.sessionFile ? 'Inspect and explicitly run-resume; initial work is not replayed.' : 'Inspect the launch evidence; do not create a duplicate on a timeout.' };
+      release: config.release, continuity: continuityMode(state?.owner ?? config.owner), nextAction: state?.sessionFile ? 'Inspect and explicitly run-resume; initial work is not replayed.' : 'Inspect the launch evidence; do not create a duplicate on a timeout.' };
   }
 }
 export async function stopManaged(root, id, { abort = false } = {}) {
