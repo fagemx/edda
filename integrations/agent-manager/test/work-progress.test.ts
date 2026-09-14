@@ -28,7 +28,7 @@ function binding(role: WorkSessionBinding['role'], agentId: string): WorkSession
 function view(overrides: Partial<WorkView> = {}): WorkView {
   return { id: 'work', projectId: 'p', taskId: 7, title: 'Task 7', taskStatus: 'running', taskReceipt: null,
     ownerAgentId: 'owner', assigneeAgentId: 'worker', nextStep: 'Deliver', stage: 'executing', revision: 'r',
-    phase: 'uninitialized', waitingFor: null, waitEvidence: null, ownerReturn: null, registry: { relation: 'in_root', message: '測試用來源關聯' },
+    phase: 'uninitialized', waitingFor: null, waitEvidence: null, attempt: 1, ownerReturn: null, registry: { relation: 'in_root', message: '測試用來源關聯' },
     evidence: null, waitingReason: null, pendingInstruction: null,
     deliveryOperationId: 'op-1', deliveryStatus: 'started', updatedAt: at(2), error: null, history: [], lastActionId: null,
     confirmedActionId: null, sessions: [binding('worker', 'worker')], ...overrides };

@@ -205,7 +205,8 @@ authorized owner record **驗收與收尾** after the project's existing gates.
 
 Read the work card top-down, in native order rather than by identifier: the role
 chain (負責人 → worker/verifier, derived from the recorded bindings and their
-recorded parent relation), the native phase from the task rail, delivery receipt,
+recorded parent relation) with the current attempt (第 N 次交辦嘗試, counted from
+the recorded hand-off chain), the native phase from the task rail, delivery receipt,
 observed sessions and owner inbox, the typed wait target with the evidence that
 produced it, and process liveness (source, heartbeat, staleness) as separate
 fields. Run/session ids stay available but secondary. A bounded **來源關聯** line

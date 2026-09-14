@@ -123,7 +123,8 @@ export class WorkBoard {
     // recorded parent relation. Unlinked is explicit; a role is never guessed.
     const active = (work.sessions ?? []).filter(session => !session.unboundAt);
     const chain = [`負責人 ${this.name(work.ownerAgentId)}`, ...active.map(session => `${roleNames[session.role]} ${this.name(session.agentId)}${session.parentAgentId ? `（上層 ${this.name(session.parentAgentId)}）` : ''}`)];
-    this.details.append(el('p', `角色鏈：${chain.join(' → ')}${active.length ? '' : ' → 尚無已綁定的執行／審查 session（unlinked）'}`, 'muted'));
+    const attempt = work.attempt > 0 ? ` · 第 ${work.attempt} 次交辦嘗試` : ' · 尚未有交辦嘗試';
+    this.details.append(el('p', `角色鏈：${chain.join(' → ')}${active.length ? '' : ' → 尚無已綁定的執行／審查 session（unlinked）'}${attempt}`, 'muted'));
     this.details.append(el('p', `Edda 任務狀態：${work.taskStatus} · 手動交接紀錄：${labels[work.stage]}`, 'muted'));
     if (stageStale(work)) this.details.append(el('p', '手動交接紀錄顯示執行中，但原生來源無法確認有子代理正在工作；以原生階段為準。', 'notice'));
     if (work.waitingReason) this.details.append(el('p', `手動等待原因（次要）：${work.waitingReason}`, 'muted'));

@@ -101,6 +101,33 @@ test('the role chain derives owner → worker → verifier from the recorded bin
   } finally { await manager.stop(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('the current attempt is derived from the recorded hand-off chain, not an identifier', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-graph-attempt-')), instanceId = randomUUID(), ledger = new MemoryLedger();
+  const config = parseConfig({ version: 1, projects: [{ id: 'p', name: 'Project' }], agents: [
+    { id: 'owner', name: 'Owner', projectId: 'p', role: 'manager', registryRoot: root, workspace: root, sessionId: 'owner-session' },
+    { id: 'worker', name: 'Worker', projectId: 'p', role: 'worker', registryRoot: root, workspace: root, sessionId: 'worker-session' },
+  ], works: [{ id: 'w', projectId: 'p', taskId: 7, workspace: root, ownerAgentId: 'owner' }] });
+  const { manager, store } = open(config, ledger, root, adapterFor((binding) => live(`${binding.id}-session`, { instanceId }), instanceId));
+  try {
+    await manager.refresh();
+    assert.equal((await manager.works.list()).works[0]!.attempt, 0);
+    await act(manager, 'w', { kind: 'initialize' as const, nextStep: 'Assign.' });
+    assert.equal((await manager.works.list()).works[0]!.attempt, 0);
+    await act(manager, 'w', { kind: 'assign', agentId: 'worker', nextStep: 'Return.', send: sendFor(config, 'worker', instanceId) });
+    assert.equal((await manager.works.list()).works[0]!.attempt, 1);
+    const intervene = { actionId: randomUUID(), kind: 'intervene' as const, revision: (await manager.works.list()).works[0]!.revision, send: sendFor(config, 'worker', instanceId) };
+    await manager.works.act('w', intervene);
+    assert.equal((await manager.works.list()).works[0]!.attempt, 2);
+    await manager.works.act('w', { actionId: randomUUID(), kind: 'acknowledge', revision: (await manager.works.list()).works[0]!.revision,
+      instructionId: intervene.actionId, evidence: 'worker confirmed the new direction' });
+    await manager.works.act('w', { actionId: randomUUID(), kind: 'intervene', revision: (await manager.works.list()).works[0]!.revision, send: sendFor(config, 'worker', instanceId) });
+    const final = (await manager.works.list()).works[0]!;
+    assert.equal(final.attempt, 3);
+    assert.equal(final.assigneeAgentId, 'worker');
+    assert.equal(final.waitingFor, 'worker');
+  } finally { await manager.stop(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('a single-root healthy work is in_root', async () => {
   const root = mkdtempSync(join(tmpdir(), 'work-graph-in-root-')), instanceId = randomUUID(), ledger = new MemoryLedger();
   const config = parseConfig({ version: 1, projects: [{ id: 'p', name: 'Project' }], agents: [

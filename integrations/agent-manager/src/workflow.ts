@@ -41,6 +41,7 @@ export function parseWorkAction(input: unknown): WorkAction {
 function empty(binding: WorkBinding): WorkView {
   return { id: binding.id, projectId: binding.projectId, taskId: binding.taskId, title: `Edda #${binding.taskId}`, taskStatus: 'unknown', taskReceipt: null,
     ownerAgentId: binding.ownerAgentId, assigneeAgentId: null, nextStep: '設定下一步並開始追蹤。', stage: 'uninitialized', revision: '', evidence: null,
+    attempt: 0,
     phase: 'uninitialized', waitingFor: null, waitEvidence: null,
     ownerReturn: null, registry: { relation: 'unknown', message: '來源關聯尚未判定；空的讀取不代表沒有子代理正在工作。' },
     waitingReason: null, pendingInstruction: null, deliveryOperationId: null, deliveryStatus: null, updatedAt: null, error: null, history: [], lastActionId: null, confirmedActionId: null, sessions: [] };
@@ -316,6 +317,10 @@ export class WorkManager {
         summary: event.action.kind === 'attach_continuity' ? `連結原生上下文 ${event.action.reference.capsuleId}` : event.action.kind === 'intervene' ? event.action.send.message : 'nextStep' in event.action ? event.action.nextStep : 'evidence' in event.action ? event.action.evidence : event.action.kind === 'bind_session' ? event.action.expectedEvent : '解除 session 綁定' });
     }
     view.revision = hash(JSON.stringify([binding, task.key, task.updatedAt, previous]));
+    // The current attempt counts the recorded hand-off operations; it is derived
+    // from the same native chain as the role bindings, never from an id the
+    // operator would have to translate.
+    view.attempt = ordered.filter((e) => 'send' in e.action).length;
     if (view.deliveryOperationId) {
       const event = ordered.findLast((e) => 'send' in e.action && e.action.send.operationId === view.deliveryOperationId);
       const op = event ? this.associatedOperation(event) : null;

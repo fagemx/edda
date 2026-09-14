@@ -42,6 +42,10 @@ export interface WorkSessionBinding {
 export interface WorkView {
   id: string; projectId: string; taskId: number; title: string; taskStatus: string; taskReceipt: string | null;
   ownerAgentId: string; assigneeAgentId: string | null; nextStep: string; stage: WorkStage; revision: string;
+  // The current attempt: how many hand-off operations (`assign`/`intervene` sends)
+  // this work's recorded chain contains. 0 before the first hand-off, so the
+  // operator reads "第 N 次嘗試" without needing a run or operation id.
+  attempt: number;
   phase: WorkPhase; waitingFor: WorkWaitingFor; waitEvidence: string | null;
   ownerReturn: OwnerReturnView | null; registry: WorkRegistryRelation;
   evidence: string | null; waitingReason: string | null; pendingInstruction: WorkInstruction | null;
