@@ -108,6 +108,10 @@ object with `entries`, `cursor`, `headCursor` and `hasMore`. Drain `hasMore` wit
 
 ## 4. Send a concrete next instruction
 
+`<sessionId>` is the Pi **channel session id**, read from `edda-pi run-status <runId>`
+(the `sessionId` field) or the launch output — not the managed run id that a child sees
+as `EDDA_SESSION_ID`.
+
 ```text
 edda-pi send <sessionId> --message-file <absolute-next-step-file> --sender controller
 edda-pi receipt <sessionId> --id <messageId>
@@ -221,7 +225,9 @@ Cross-machine process migration is not supported by this client.
 
 `edda-pi inbox` / `inbox-read <eventId>` read durable Pi stopping evidence.
 `follow <sessionId> --project <path> --tasks <ids> --scope <existing-scope> --notify`
-can notify a **running** Pi about explicitly selected Edda task changes. It is
+can notify a **running** Pi about explicitly selected Edda task changes. `<sessionId>` is the Pi
+**channel session id** from `edda-pi run-status <runId>` (the `sessionId` field) or the launch
+output, not the managed run id a child sees as `EDDA_SESSION_ID`. It is
 opt-in, may use model turns, and an owner-bound subscription survives session
 replacement without a manual refollow: the subscription is stored under the
 stable owner/work identity, a replacement holder adopts it and resumes
