@@ -77,6 +77,11 @@ export function findPiEntry(explicit) {
   }
   throw new Error('Pi installation not found; supply --pi-entry with its installed dist/bundle/cli.js');
 }
+/// A run with no owner reference can only be session-addressed; the projection
+/// must never let a null owner read as owner-bound. A run launched without
+/// `--owner` cannot be owner-bound in place (no adoption path exists).
+export const continuityMode = (owner) => (typeof owner === 'string' && owner.length > 0 ? 'owner-bound' : 'session-addressed');
+
 export function alive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; }

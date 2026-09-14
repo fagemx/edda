@@ -3,7 +3,7 @@ import { mkdirSync, openSync, closeSync, unlinkSync, realpathSync, lstatSync, re
 import { join, resolve, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { managedDir, installRuntime, verifyRelease, findPiEntry, alive, inside } from './managed-store.mjs';
+import { managedDir, installRuntime, verifyRelease, findPiEntry, alive, inside, continuityMode } from './managed-store.mjs';
 import { readJson, readRecord, writeJson, validateId, digest, sessionDir, recover } from './store.mjs';
 import { requestSession, getReceipt } from './client.mjs';
 import { readTranscript } from './conversation.mjs';
@@ -27,14 +27,17 @@ async function runnerRequest(root, id, operation, abort = false) {
 export async function managedStatus(root, id) {
   id = validateId(id);
   const { dir, config } = runConfig(root, id);
-  try { return await runnerRequest(root, id, 'status'); }
-  catch {
+  try {
+    const snapshot = await runnerRequest(root, id, 'status');
+    return { ...snapshot, continuity: continuityMode(snapshot.owner) };
+  } catch {
     const { value: state, error: stateError } = readRecord(join(dir, 'state.json'));
     // A corrupt state.json is a per-run degradation: config.json still holds the
     // run identity. Whitelist fields; never spread config (it holds the prompt).
     if (stateError) return { runId: id, project: config.project, release: config.release,
       provider: config.provider ?? null, model: config.model ?? null, thinking: config.thinking ?? null,
       owner: config.owner ?? null, returnOwner: config.returnOwner ?? null, ownerRoot: config.ownerRoot ?? null,
+      continuity: continuityMode(config.owner),
       status: 'record_unavailable', state: 'record_unavailable', live: false, lastRecordedPhase: null,
       initialReceipt: { status: 'unknown', live: false }, error: stateError,
       nextAction: 'The run state record is unreadable and was not repaired. Use the identity shown; inspect the owned session directory before any resume.' };
@@ -46,7 +49,7 @@ export async function managedStatus(root, id) {
       catch { initialReceipt = { id: initialReceipt.id, status: 'unknown', lastRecordedStatus: initialReceipt.status, live: false }; }
     }
     return { ...(state || {}), initialReceipt, runId: id, live: false, status: 'runner_unreachable', lastRecordedPhase: state?.phase,
-      release: config.release, nextAction: state?.sessionFile ? 'Inspect and explicitly run-resume; initial work is not replayed.' : 'Inspect the launch evidence; do not create a duplicate on a timeout.' };
+      release: config.release, continuity: continuityMode(state?.owner), nextAction: state?.sessionFile ? 'Inspect and explicitly run-resume; initial work is not replayed.' : 'Inspect the launch evidence; do not create a duplicate on a timeout.' };
   }
 }
 export async function stopManaged(root, id, { abort = false } = {}) {
