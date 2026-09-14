@@ -167,15 +167,11 @@ pid_descendants() {
 terminate_child() {
   [ -n "$child_pid" ] || return 0
   targets=$(pid_descendants "$child_pid")
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*)
-      # Git Bash pids are not Windows pids; /proc/<pid>/winpid maps to one.
-      winpid=$(cat "/proc/$child_pid/winpid" 2>/dev/null) || winpid=""
-      if [ -n "$winpid" ]; then
-        MSYS_NO_PATHCONV=1 taskkill /PID "$winpid" /T /F >/dev/null 2>&1 || true
-      fi
-      ;;
-  esac
+  # MSYS `ps` and `kill` reach MSYS-descended processes (the stub builds in the
+  # tests), but not native Windows children such as cargo.exe/rustc.exe. Those
+  # are reached by asking `taskkill /T` to walk this script's own Windows
+  # process tree, which is the last thing done here because it also ends this
+  # script.
   for p in $targets; do
     kill -TERM "$p" 2>/dev/null || true
     wp=$(cat "/proc/$p/winpid" 2>/dev/null) || wp=""
@@ -184,11 +180,19 @@ terminate_child() {
     fi
   done
   kill -TERM "$child_pid" 2>/dev/null || true
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      self_winpid=$(cat "/proc/$$/winpid" 2>/dev/null) || self_winpid=""
+      if [ -n "$self_winpid" ]; then
+        MSYS_NO_PATHCONV=1 taskkill /PID "$self_winpid" /T /F >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
   return 0
 }
 cleanup() {
-  if [ -n "$child_pid" ]; then terminate_child; child_pid=""; fi
   if [ -n "$pack_dir" ]; then rm -rf "$pack_dir"; pack_dir=""; fi
+  if [ -n "$child_pid" ]; then terminate_child; child_pid=""; fi
   return 0
 }
 signal_exit() { cleanup; exit 130; }
