@@ -1096,7 +1096,7 @@ tokens or transcripts, and import never writes `owners/` or `claims/`; an import
 pending but stays unclaimable until the receiving machine binds the owner locally. The file carries a
 logical return identity that excludes the local posting session, so importing the same export twice
 (or the same logical return from two machines) appends each return once. Import fails closed: an
-unknown version/kind or a foreign/duplicate-key envelope refuses the whole file with per-envelope
+unknown version/kind or a foreign-key envelope refuses the whole file with per-envelope
 reasons and writes nothing.
 
 ```bash

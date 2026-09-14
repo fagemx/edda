@@ -114,6 +114,13 @@ fn record_logical_id(record: &MessageRecord) -> String {
 }
 
 fn envelope_of(record: &MessageRecord, machine: &str) -> ReplicateEnvelope {
+    // A record that was itself imported keeps the origin it came from, so a
+    // relay does not relabel provenance with the relaying machine.
+    let origin_machine = record
+        .origin
+        .as_ref()
+        .map(|origin| origin.machine.clone())
+        .unwrap_or_else(|| machine.to_owned());
     ReplicateEnvelope {
         logical_id: record_logical_id(record),
         message_id: record.id.clone(),
@@ -124,7 +131,7 @@ fn envelope_of(record: &MessageRecord, machine: &str) -> ReplicateEnvelope {
         deliverable: record.deliverable.clone(),
         message: record.message.clone(),
         posted_at: record.posted_at.clone(),
-        origin_machine: machine.to_owned(),
+        origin_machine,
     }
 }
 /// Ids on the wire are lowercase sha256 hex only, the same shape the local
@@ -254,8 +261,20 @@ fn replicate_export(dir: &Path, file: &str, args: &ReplicateArgs) -> Result<()> 
                 .as_deref()
                 .is_none_or(|owner| owner == record.owner)
         })
-        .map(|record| serde_json::to_value(envelope_of(record, &machine)))
-        .collect::<serde_json::Result<Vec<_>>>()?;
+        .map(|record| {
+            let envelope = envelope_of(record, &machine);
+            // The same bounds import enforces: a file this verb writes must be a
+            // file this verb can apply, so an out-of-bound local record is refused
+            // here rather than emitted into an unimportable file.
+            validate_envelope(&envelope).with_context(|| {
+                format!(
+                    "cannot export return '{}' for owner '{}'",
+                    record.id, record.owner
+                )
+            })?;
+            Ok(serde_json::to_value(envelope)?)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let count = returns.len();
     let document = ReplicateFile {
         version: 1,
@@ -322,6 +341,9 @@ fn replicate_import(dir: &Path, file: &str) -> Result<ImportCounts> {
         );
     }
     validate_label("originMachine", &document.origin_machine)?;
+    if document.exported_at.is_empty() || document.exported_at.len() > 64 {
+        bail!("invalid exportedAt: expected 1..=64 bytes");
+    }
     let mut envelopes = Vec::new();
     let mut reasons = Vec::new();
     for (index, value) in document.returns.iter().enumerate() {
@@ -557,6 +579,11 @@ mod tests {
         let version_file = target.join("version.json");
         write_document(&version_file, &version);
         assert!(import_registry(&target, &version_file).is_err());
+        let mut stamp = exported_document(&source, "stamp.json", "machine-a");
+        stamp["exportedAt"] = serde_json::json!("x".repeat(65));
+        let stamp_file = target.join("stamp.json");
+        write_document(&stamp_file, &stamp);
+        assert!(import_registry(&target, &stamp_file).is_err());
         assert_eq!(message_count(&target), 0);
         assert!(!target.join("owners").exists());
         assert!(!target.join("claims").exists());
@@ -639,5 +666,79 @@ mod tests {
         );
         assert_eq!(pending_messages(&target, "assistant/p").unwrap().len(), 1);
         assert!(claim(&target, "assistant/p", "s1").is_err());
+    }
+
+    #[test]
+    fn replicate_import_refuses_an_id_collision_with_a_different_identity() {
+        let a = temp();
+        let b = temp();
+        bind(&a, "assistant/p", "sA", None).unwrap();
+        post(&a, "assistant/p", "job-a", "controller-1").unwrap();
+        let first = exported_document(&a, "first.json", "machine-a");
+        let first_file = a.join("first.json");
+        assert_eq!(import_registry(&b, &first_file).unwrap().appended, 1);
+        let message_id = first["returns"][0]["messageId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // A different logical return that names the already-stored message id.
+        post(&a, "assistant/p", "job-b", "controller-1").unwrap();
+        let mut colliding = exported_document(&a, "colliding.json", "machine-a");
+        colliding["returns"][1]["messageId"] = serde_json::json!(message_id);
+        let colliding_file = b.join("colliding.json");
+        write_document(&colliding_file, &colliding);
+        let counts = import_registry(&b, &colliding_file).unwrap();
+        assert_eq!(counts.appended, 0);
+        assert_eq!(counts.refused, 1);
+        assert_eq!(message_count(&b), 1);
+        // The verb itself must exit non-zero when anything was refused.
+        assert!(
+            super::execute(&b, replicate_args(None, Some(&colliding_file), None, None)).is_err()
+        );
+    }
+
+    #[test]
+    fn replicate_export_refuses_a_record_its_own_import_would_reject() {
+        let a = temp();
+        ensure_layout(&a).unwrap();
+        let id = "a".repeat(64);
+        let record = MessageRecord {
+            version: 1,
+            id: id.clone(),
+            owner: "assistant/p".into(),
+            work: "job-a".into(),
+            status: "done".into(),
+            result: None,
+            deliverable: None,
+            message: Some("x".repeat((1 << 20) + 1)),
+            posted_by_session: String::new(),
+            posted_at: now(),
+            origin: None,
+        };
+        write_atomic(&message_file(&a, &id), &record).unwrap();
+        let file = a.join("big.json");
+        assert!(
+            export_registry(&a, &file, "machine-a").is_err(),
+            "an over-bound local record must not become an unimportable file"
+        );
+        assert!(!file.exists(), "a refused export writes no file");
+    }
+
+    #[test]
+    fn replicate_re_export_preserves_the_original_origin_machine() {
+        let a = temp();
+        let b = temp();
+        bind(&a, "assistant/p", "sA", None).unwrap();
+        post(&a, "assistant/p", "job-a", "controller-1").unwrap();
+        let from_a = a.join("from-a.json");
+        export_registry(&a, &from_a, "machine-a").unwrap();
+        import_registry(&b, &from_a).unwrap();
+        // Relaying B must not relabel the return with B's own machine.
+        let from_b = b.join("from-b.json");
+        export_registry(&b, &from_b, "machine-b").unwrap();
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&from_b).unwrap()).unwrap();
+        assert_eq!(document["originMachine"], "machine-b");
+        assert_eq!(document["returns"][0]["originMachine"], "machine-a");
     }
 }
