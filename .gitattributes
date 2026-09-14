@@ -11,3 +11,11 @@ scripts/test-doc-citations.sh text eol=lf
 # writing one convention rewrites untouched lines as a side effect.
 *.md text eol=lf
 
+# Pi package files are read as raw bytes for a content identity (digest-addressed
+# runtime releases and the activation receipt) and are also packed by npm, which
+# normalizes a shebang line to LF. On a core.autocrlf=true checkout the working
+# tree was CRLF, so `releaseIdentity(integrations/pi)` never matched what npm
+# installed and the activation route could not verify its own Pi step. Pin them
+# to LF so the identity is the same on every platform.
+integrations/pi/** text eol=lf
+
