@@ -181,9 +181,13 @@ same project. No task is automatically created or completed by the console.
   "projectId": "edda",
   "taskId": 217,
   "workspace": "C:/ai_agent/edda",
-  "ownerAgentId": "edda"
+  "ownerAgentId": "edda",
+  "ownerRef": "assistant/owner"
 }
 ```
+
+`ownerRef` is optional; when present it names the owner mailbox already registered
+with `edda return bind`, so the work card can show that owner's pending returns.
 
 Use an actual task number from `edda task list`, not the illustrative number
 above. The task's title/status/receipt are read from `edda task show --json`.
@@ -198,6 +202,28 @@ bounded brief. A channel accepting a message does not mean the agent has started
 A started receipt proves execution; a settled receipt means the reply ended and
 delivery evidence is still due. Record **交付** with evidence, then have the
 authorized owner record **驗收與收尾** after the project's existing gates.
+
+Read the work card top-down, in native order rather than by identifier: the role
+chain (負責人 → worker/verifier, derived from the recorded bindings and their
+recorded parent relation), the native phase from the task rail, delivery receipt,
+observed sessions and owner inbox, the typed wait target with the evidence that
+produced it, and process liveness (source, heartbeat, staleness) as separate
+fields. Run/session ids stay available but secondary. A bounded **來源關聯** line
+states whether the work's executor source is inside the registry roots this
+project already knows, names the project's other known roots by their selected
+agent names, and says plainly that an empty read does not mean no child is
+working. A session whose native record cannot be read shows `可恢復` with its
+preserved identity, the unreadable record and the bounded recovery point instead
+of vanishing. When a work sets the optional `ownerRef`, the same card shows the
+owner-bound `edda return` status (owner, holder, pending count and each matched
+return). A fresher native fact — the task rail, a delivery receipt, a bound
+session, an owner-inbox event or a posted return — always wins over a stale
+manual stage.
+
+Capability boundary: this projection reads and explains. It does not schedule,
+auto-register a source, wake an owner, restart or replay a worker, collect or
+claim a return, judge the semantic quality of a deliverable, or turn a recovered
+record into a new attempt.
 
 Use **變更工作指示** for a direction change that must remain visible to the owner.
 It sends a priority message to the current assignee and keeps a pending instruction
