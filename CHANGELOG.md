@@ -7,9 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-14
+
+### Added
+
+- **Installable Pi activation and managed recovery** — activation ships as one normal route with a read-only revision receipt, owner returns and dependency subscriptions wire into the managed lifecycle, managed sessions recover through a documented entry, and Windows activation spawns npm via its CLI with LF-pinned integrations (#1175, #1198, GH-1200, #1201, #1205)
+- **Managed Pi lifecycle and supervision** — owned Pi sessions launch and recover, adopted sessions carry task dependencies, dependency changes notify their owners, a non-blocking manager inbox accepts replies, and assigned task pairs run supervised (#1149, #1151, #1153, #1155, #1158, #1160)
+- **Native operator-visible work graph** — the agent manager derives work phase and wait reason from native task/run/events, discovers managed Pi runs in the running workbench, tracks task handoffs and operator interventions, binds sessions with a durable owner event inbox, completes native context handoff with crash recovery, and adds a local progress console with direct Pi chat (#1166, #1169, #1172, #1174, GH-1176, GH-1181)
+- **Portable continuity** — a portable local continuity slice ships, owner-bound return continuity survives project-assistant replacement, and native continuity capsules adopt through public `edda continuity restore` (#1156, GH-1177, GH-1192)
+- **coord-delegate skill** — a host-selected assistant-to-controller delegation entry (GH-1185), joined by the coord-run runtime skill and coord-orchestrate prepare mode (S7.1, #1171)
+- **Merge-gate receipts** — dirty receipts are path-aware and declared gates map to exact CI jobs (#1140, #1142)
+
 ### Changed
 
 - **Legacy merge-check compatibility converges on the product gate** — live `edda prs check-merge` forwards to `edda review merge`, while its retained host-agnostic scalar forms are explicitly deprecated advisory diagnostics and cannot merge (GH-1145)
+- **Rolling delivery converges** — rolling delivery, review continuity, and the advisory issue line share one delivery path (#1164)
+- **Control effects are integrated on accepted main** (#1167)
+- **deepseek-flash is qualified** for the R22 shipping and internal-tool surfaces (#1188)
+- **Release assets are portable** — the release workflow enforces portable archives, checksum sidecar comparison, aligned split-job references, and isolated publication credentials
+
+### Fixed
+
+- **Managed Pi state durability** — corrupt managed-run records degrade per record instead of aborting reads (GH-1182), and managed state writes flush before rename so an interruption cannot leave `state.json` all-NUL (#1191)
+- **Unconfirmed dependency-delivery wait is bounded** — a dependency delivery that never confirms can no longer withhold later revisions (GH-1202)
+- **Merge-gate diagnostics** — cross-PR drift is reported instead of refused (GH-1124), absent required-check output is tolerated (#1137), and required-check merge refusals are diagnosed (#1143)
+
+### Docs
+
+- **Fleet and controller guidance** — the controller's dispatch paths and post-PR review loop with a brief template (#1122), standing controller merge authority (#1139), R6-aligned merge guidance (#1146), and the GATE-01 identity rule as written (#1128)
 
 ## [0.6.1] - 2026-09-10
 
