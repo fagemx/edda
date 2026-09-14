@@ -18,7 +18,7 @@ You recover bounded continuation state and render it for a human or agent to ass
 Parse the arguments as:
 
 - a `cap_...` ID: restore that exact logical capsule;
-- no argument or `latest`: restore the newest capsule matching the current portable repository and current Git branch.
+- no argument or `latest`: restore the newest capsule matching the current portable repository and current Git branch. A legacy-partial projection is included regardless of its portable repository id, so `latest` is repository-scoped for every other capsule and only branch-scoped for legacy partials; such a capsule is returned with its legacy-partial warning and provenance (native pre-existing semantics; GH #1180).
 
 Prefer exact ID whenever the caller supplies one. Exact mode must not perform a preliminary list, alias lookup through another command, or latest selection.
 

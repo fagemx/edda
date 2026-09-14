@@ -10,8 +10,15 @@ export const MAX_CONTINUITY_CONTEXT_BYTES = 262144;
 // `continuity list --json` serializes every capsule in the workspace ledger, so
 // its output is not bounded by the context document bound. The membership
 // preflight still must not grow without bound: verify within this fixed cap and
-// fail closed (capsule_unavailable) beyond it rather than reading indefinitely.
+// fail closed — `capsule_unavailable`, membership unverifiable — beyond it
+// rather than reading indefinitely. The bound and its refusal are documented in
+// README.md ("Start here: adopt an existing session").
 const MAX_CONTINUITY_LIST_BYTES = 16 * 1024 * 1024;
+// The raw `restore --json` envelope is read under this bound. Node aborts a child
+// that exceeds it with ERR_CHILD_PROCESS_STDIO_MAXBUFFER, which the restore path
+// classifies as the documented `capsule_too_large` refusal rather than the
+// generic `capsule_unavailable` (#1180).
+const MAX_CONTINUITY_RESTORE_BYTES = MAX_CONTINUITY_CONTEXT_BYTES * 2;
 const MAX_CAPSULE_ID = 100;
 const CAPSULE_ID = /^cap_[a-z0-9]+$/;
 const exec = promisify(execFile);
@@ -137,7 +144,7 @@ export function capsuleContextDocument(envelope, nativeRevision) {
   return `${lines.join('\n')}\n`;
 }
 
-async function runEdda(project, command, args, signal, maxBytes = MAX_CONTINUITY_CONTEXT_BYTES * 2) {
+async function runEdda(project, command, args, signal, maxBytes = MAX_CONTINUITY_RESTORE_BYTES) {
   const result = await exec(command.file, [...command.args, ...args], {
     cwd: project, windowsHide: true, timeout: 15000, maxBuffer: maxBytes,
     encoding: 'utf8', signal,
@@ -170,7 +177,12 @@ export async function restoreCapsuleContext({ project, capsuleId, eddaCommand, s
   // repository-scoped public list. No substitute capsule is ever selected.
   let listed;
   try { listed = await runEdda(cwd, command, ['continuity', 'list', '--json'], signal, MAX_CONTINUITY_LIST_BYTES); }
-  catch { return refusal('capsule_unavailable', id, 'The installed edda could not list native continuity capsules for this project within the bounded read; no capsule was adopted'); }
+  catch (error) {
+    if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      return refusal('capsule_unavailable', id, "The repository capsule listing exceeds the bounded read, so this capsule's repository membership cannot be verified; no capsule was adopted");
+    }
+    return refusal('capsule_unavailable', id, 'The installed edda could not list native continuity capsules for this project; no capsule was adopted');
+  }
   let listValue;
   try { listValue = JSON.parse(listed); }
   catch { return refusal('capsule_invalid', id, 'Native continuity list output was not JSON'); }
@@ -191,14 +203,17 @@ export async function restoreCapsuleContext({ project, capsuleId, eddaCommand, s
   }
 
   let raw;
-  try { raw = await runEdda(cwd, command, ['continuity', 'restore', id, '--json'], signal); }
+  try { raw = await runEdda(cwd, command, ['continuity', 'restore', id, '--json'], signal, MAX_CONTINUITY_RESTORE_BYTES); }
   catch (error) {
+    if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      return refusal('capsule_too_large', id, 'Native continuity restore output exceeds the bounded read');
+    }
     const unknown = error?.killed === true || error?.signal != null;
     return refusal('capsule_unavailable', id, unknown
       ? 'The native continuity restore outcome is unknown; it was not retried and no context was adopted'
       : 'The installed edda could not restore the requested capsule; no context was adopted');
   }
-  if (Buffer.byteLength(raw) > MAX_CONTINUITY_CONTEXT_BYTES * 2) {
+  if (Buffer.byteLength(raw) > MAX_CONTINUITY_RESTORE_BYTES) {
     return refusal('capsule_too_large', id, 'Native continuity restore output exceeds the bounded read');
   }
   let value;

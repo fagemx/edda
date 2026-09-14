@@ -131,6 +131,12 @@ test('wrong repository, unavailable, malformed, oversize and stale capsules refu
   assert.equal(dangling.status, 'capsule_invalid');
 });
 
+test('a restore envelope over the 512 KiB read bound refuses as capsule_too_large', async (t) => {
+  const f = await fixture(t, { capsuleText: JSON.stringify(envelope({ capsuleState: state({ summary: 'x'.repeat(2 * MAX_CONTINUITY_CONTEXT_BYTES + 4096) }) })) });
+  const restored = await restoreCapsuleContext({ project: f.project, capsuleId: CAPSULE_ID_VALUE, eddaCommand: command });
+  assert.equal(restored.status, 'capsule_too_large');
+});
+
 test('a repository listing larger than the context bound still verifies membership', async (t) => {
   const filler = Array.from({ length: 12000 }, (_, index) => ({ capsule: { capsule_id: `cap_filler${index.toString(36).padStart(8, '0')}` } }));
   const f = await fixture(t, { listEntries: [{ capsule: { capsule_id: CAPSULE_ID_VALUE } }, ...filler] });
