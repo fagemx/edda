@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { openStore, digest, validateSession, validateId } from './store.mjs';
+import { openStore, digest, readJson, writeJson, validateSession, validateId } from './store.mjs';
 import { createHandoff } from './handoff.mjs';
 import { createDependencyObserver, ownerSubscriptionDir } from './dependency-observer.mjs';
 import { createOwnerMailbox } from './owner-mailbox.mjs';
@@ -9,6 +9,7 @@ import { createInboxProducer } from './inbox-producer.mjs';
 import { inboxStore, inboxId, messageId } from './inbox-store.mjs';
 import { assertCurrentEvent } from './inbox-binding.mjs';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const integrationVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
@@ -55,9 +56,11 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   let currentReturnOwner = returnOwner || null;
   // An unavailable owner mailbox leaves the channel fully functional, but the
   // failure stays visible in the snapshot instead of looking like "no owner".
+  let mailboxRoot = null;
   const createMailbox = (ref, root) => {
-    try { mailbox = createOwnerMailbox({ owner: ref, sessionId, cwd, command: ownerCommand, ownerRoot: root }); ownerError = null; }
-    catch (error) { ownerError = error.message; mailbox = null; }
+    try { mailbox = createOwnerMailbox({ owner: ref, sessionId, cwd, command: ownerCommand, ownerRoot: root });
+      ownerError = null; mailboxRoot = root ?? null; }
+    catch (error) { ownerError = error.message; mailbox = null; mailboxRoot = null; }
     return mailbox;
   };
   if (ownerRef) {
@@ -107,6 +110,35 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     state.state = closed ? 'stopped' : storageError ? 'unavailable' : waiting ? 'waiting_user' : tools.size ? 'executing_tool' : busy ? 'running' : 'idle';
     state.toolNames = [...new Set(tools.values())];
   };
+  // The dependency observer is (re)built for the current owner identity, so an
+  // adopted run rebinds its subscription to the stable owner store instead of
+  // staying session-scoped.
+  const buildDependencies = (subscriptionDir, depOwnerRef) => createDependencyObserver({
+    dir: store.dir, subscriptionDir, ownerRef: depOwnerRef, sessionId, instanceId,
+    policy: () => readEnrollment(root, sessionId), runtime: () => channel.snapshot(),
+    manifestRevision: () => handoff.currentRevision(), send: (body) => submitMessage(body, true),
+    receipt: (id) => receipts.get(id), command: dependencyCommand, pollMs: dependencyPollMs });
+  async function rebindDependencies(ref) {
+    let dir;
+    try { dir = ownerSubscriptionDir(root, ref); }
+    catch (error) { return { scope: 'session', error: error.message }; }
+    // Move an existing session-scoped subscription into the owner-scoped store
+    // (the same store) so it survives replacement without a manual refollow.
+    if (!readJson(join(dir, 'dependencies.json'))) {
+      const sessionRecord = readJson(join(store.dir, 'dependencies.json'));
+      if (sessionRecord) {
+        const enrollment = readEnrollment(root, sessionId);
+        writeJson(join(dir, 'dependencies.json'), { ...sessionRecord, ownerRef: ref, holderSession: sessionId, sessionId,
+          enabled: enrollment?.enabled === true,
+          scope: typeof enrollment?.scope === 'string' ? enrollment.scope : sessionRecord.scope });
+      }
+    }
+    const prior = dependencies;
+    try { dependencies = buildDependencies(dir, ref); ownerSubscription = dir; dependencyOwnerRef = ref; }
+    catch (error) { return { scope: 'session', error: error.message }; }
+    await prior?.close?.();
+    return { scope: 'owner' };
+  }
   const channel = {
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
@@ -124,11 +156,14 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       const ref = typeof refs.owner === 'string' && refs.owner ? refs.owner : null;
       if (!ref) return { status: 'no-owner' };
       if (typeof refs.returnOwner === 'string' && refs.returnOwner) currentReturnOwner = refs.returnOwner;
-      if (mailbox && mailbox.owner === ref) return mailbox.state();
-      if (mailbox) { const prior = mailbox; mailbox = null; prior.close(); }
-      createMailbox(ref, refs.ownerRoot);
+      const nextRoot = typeof refs.ownerRoot === 'string' && refs.ownerRoot ? refs.ownerRoot : mailboxRoot;
+      if (mailbox && mailbox.owner === ref && mailboxRoot === nextRoot) return mailbox.state();
+      if (mailbox) { const prior = mailbox; mailbox = null; mailboxRoot = null; prior.close(); }
+      createMailbox(ref, nextRoot);
       if (!mailbox) return { status: 'unavailable', owner: ref, error: ownerError };
-      return { ...(await mailbox.bind()), owner: ref };
+      const bound = await mailbox.bind();
+      const dependency = await rebindDependencies(ref);
+      return { ...bound, owner: ref, ...(dependency ? { dependency } : {}) };
     },
     get dependencies() { return dependencies; },
     handoffContext: (budget) => handoff.context(channel.snapshot(), budget),
@@ -287,11 +322,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       inbox = { status: () => ({ status: 'storage_error', error: error.message, wake: { status: 'unsupported', notified: false } }),
         begin() {}, assistant() {}, settled() {}, reconcile() {} };
     }
-    dependencies = createDependencyObserver({ dir: store.dir, subscriptionDir: ownerSubscription,
-      ownerRef: dependencyOwnerRef, sessionId, instanceId,
-      policy: () => readEnrollment(root, sessionId), runtime: () => channel.snapshot(),
-      manifestRevision: () => handoff.currentRevision(), send: (body) => submitMessage(body, true),
-      receipt: (id) => receipts.get(id), command: dependencyCommand, pollMs: dependencyPollMs });
+    dependencies = buildDependencies(ownerSubscription, dependencyOwnerRef);
     await new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);

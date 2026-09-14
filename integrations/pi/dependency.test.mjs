@@ -402,3 +402,24 @@ test('an unreadable owner record is surfaced, not silently skipped', async (t) =
   assert.equal(paused.status, 'paused');
   assert.equal(paused.scope, 'owner');
 });
+
+test('adoption migrates a session-scoped dependency subscription to the owner store', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-rebind-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/rebind-owner';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
+  await enroll(root, channel.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await channel.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  assert.equal(channel.dependencies.status().scope, 'session');
+  const result = await channel.adoptOwner({ owner: ownerRef });
+  assert.equal(result.dependency?.scope, 'owner');
+  assert.equal(channel.dependencies.status().scope, 'owner');
+  assert.equal(channel.dependencies.status().configured, true); // the migrated subscription is adopted, not lost
+  const migrated = readJson(join(ownerSubscriptionDir(root, ownerRef), 'dependencies.json'));
+  assert.equal(migrated.ownerRef, ownerRef);
+  assert.deepEqual(migrated.taskIds, ['17']);
+  assert.equal(typeof migrated.scope, 'string');
+});
