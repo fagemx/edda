@@ -51,7 +51,7 @@ export function projectCandidates(report: DiscoveryReport, agents: AgentBinding[
     .sort((left, right) => (Number(right.live) - Number(left.live)) || (left.sessionId ?? left.runId ?? '').localeCompare(right.sessionId ?? right.runId ?? ''))
     .map((run) => ({
       id: candidateId(run), sessionId: run.sessionId, runId: run.runId, instanceId: run.instanceId, state: run.state, live: run.live,
-      source: run.source, workspace: run.workspace, lastProgressAt: run.lastProgressAt, reason: run.reason,
+      source: run.source, workspace: run.workspace, lastProgressAt: run.lastProgressAt, reason: run.reason, degraded: run.degraded ?? null,
       configuredAgentId: run.sessionId ? configured.get(`${run.registryRoot}\0${run.sessionId}`) ?? null : null,
     }));
   const issues = [...new Map(report.failures.map((failure) => [`${rootLabel(failure.registryRoot)}\0${failure.message}`,

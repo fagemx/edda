@@ -11,7 +11,7 @@ import { parseConfig, selectionRevision } from '../src/config.js';
 import { EddaWorkflowLedger, WorkflowLocks, type CanonicalTask, type LedgerNote, type WorkflowLedger } from '../src/edda-workflow.js';
 import { ChannelAdapter, defaultPiRoot } from '../src/pi-adapter.js';
 import { WorkManager } from '../src/workflow.js';
-import { rootLabel } from '../src/discovery.js';
+import { rootLabel, projectCandidates } from '../src/discovery.js';
 import { waitTargets } from '../src/web/workboard.js';
 import type { AgentBinding, AgentObservation, ManagerConfig, PiAdapter, SendRequest } from '../src/contracts.js';
 import type { OwnerReturnView, WorkAction, WorkBinding, WorkView, WorkWaitingFor } from '../src/workflow-contracts.js';
@@ -121,6 +121,31 @@ test('a single-root healthy work is in_root', async () => {
   } finally { await manager.stop(); store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('an initialized work with no bound executor is unknown, never a claimed in_root', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'work-graph-no-executor-')), instanceId = randomUUID(), ledger = new MemoryLedger();
+  const config = parseConfig({ version: 1, projects: [{ id: 'p', name: 'Project' }], agents: [
+    { id: 'owner', name: 'Owner', projectId: 'p', role: 'manager', registryRoot: root, workspace: root, sessionId: 'owner-session' },
+    { id: 'worker', name: 'Worker', projectId: 'p', role: 'worker', registryRoot: root, workspace: root, sessionId: 'worker-session' },
+  ], works: [{ id: 'w', projectId: 'p', taskId: 7, workspace: root, ownerAgentId: 'owner' }] });
+  const { manager, store } = open(config, ledger, root, adapterFor((binding) => live(`${binding.id}-session`, { instanceId }), instanceId));
+  try {
+    await manager.refresh();
+    await act(manager, 'w', { kind: 'initialize' as const, nextStep: 'Assign.' });
+    const unassigned = (await manager.works.list()).works[0]!;
+    assert.equal(unassigned.assigneeAgentId, null);
+    assert.equal(unassigned.registry.relation, 'unknown');
+    assert.match(unassigned.registry.message, /尚未綁定可判定的執行 session/);
+    assert.match(unassigned.registry.message, /Worker/);
+    assert.match(unassigned.registry.message, /空的讀取不代表沒有子代理正在工作/);
+    assert.doesNotMatch(unassigned.registry.message, /觀測到對應的執行來源/);
+    // The observed-source wording appears only with a real bound executor.
+    await act(manager, 'w', { kind: 'bind_session', agentId: 'worker', role: 'worker', parentAgentId: 'owner', reviewedSha: null, expectedEvent: 'deliver', nextExpectedAt: null });
+    const bound = (await manager.works.list()).works[0]!;
+    assert.equal(bound.registry.relation, 'in_root');
+    assert.match(bound.registry.message, /觀測到對應的執行來源/);
+  } finally { await manager.stop(); store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('a work whose other known root owns the run is not_in_root with a locator by agent name', async () => {
   const root = mkdtempSync(join(tmpdir(), 'work-graph-not-in-root-')), instanceId = randomUUID(), ledger = new MemoryLedger();
   const rootA = join(root, 'registry-a'), rootB = join(root, 'registry-b');
@@ -179,14 +204,21 @@ test('a corrupt managed state.json degrades one row to recoverable through the r
   writeFileSync(join(registryRoot, 'managed', runId, 'config.json'), JSON.stringify({ version: 1, runId, root: registryRoot, project: workspace, release: {} }));
   // The 2026-09-13 shape: a normal-length record whose bytes are all NUL.
   writeFileSync(join(registryRoot, 'managed', runId, 'state.json'), Buffer.alloc(2048));
+  // A healthy sibling run proves a non-degraded candidate row carries `null`.
+  const healthyRunId = randomUUID(), healthySessionId = randomUUID();
+  mkdirSync(join(registryRoot, 'managed', healthyRunId), { recursive: true });
+  writeFileSync(join(registryRoot, 'managed', healthyRunId, 'config.json'), JSON.stringify({ version: 1, runId: healthyRunId, root: registryRoot, project: workspace, release: {} }));
+  writeFileSync(join(registryRoot, 'managed', healthyRunId, 'state.json'), JSON.stringify({ runId: healthyRunId, sessionId: healthySessionId, phase: 'ready', updatedAt: at(1) }));
   const activation = await import(pathToFileURL(join(defaultPiRoot(), 'activation.mjs')).href) as
     { listManagedRuns(root: string, options?: { limit?: number }): Promise<{ runs: Array<{ runId: string; project: string | null; error: { code: string; record: string; message: string } | null }> }> };
   const managedClient = await import(pathToFileURL(join(defaultPiRoot(), 'managed-client.mjs')).href) as
     { managedStatus(root: string, id: string): Promise<Record<string, unknown>> };
   const listed = await activation.listManagedRuns(registryRoot);
-  assert.deepEqual(listed.runs.map((run) => [run.runId, run.project]), [[runId, workspace]]);
-  assert.equal(listed.runs[0]?.error?.code, 'record_unavailable');
-  assert.equal(listed.runs[0]?.error?.record, 'state.json');
+  const corrupt = listed.runs.find((run) => run.runId === runId)!;
+  assert.equal(corrupt.project, workspace);
+  assert.equal(corrupt.error?.code, 'record_unavailable');
+  assert.equal(corrupt.error?.record, 'state.json');
+  assert.equal(listed.runs.find((run) => run.runId === healthyRunId)?.error, null);
   const managed = await managedClient.managedStatus(registryRoot, runId);
   assert.equal(managed.runId, runId);
   assert.equal(managed.status, 'record_unavailable');
@@ -211,6 +243,13 @@ test('a corrupt managed state.json degrades one row to recoverable through the r
     assert.equal(run.degraded?.code, 'record_unavailable');
     assert.equal(run.degraded?.record, 'state.json');
     assert.match(run.reason ?? '', /state\.json/);
+    // The candidate projection carries the degradation, and a healthy run's row
+    // carries null.
+    const candidates = projectCandidates(report, config.agents);
+    const degradedCandidate = candidates.candidates.find((c) => c.runId === runId)!;
+    assert.equal(degradedCandidate.degraded?.code, 'record_unavailable');
+    assert.equal(degradedCandidate.degraded?.record, 'state.json');
+    assert.equal(candidates.candidates.find((c) => c.runId === healthyRunId)?.degraded, null);
     await manager.refresh();
     await act(manager, 'w', { kind: 'initialize' as const, nextStep: 'Assign.' });
     await act(manager, 'w', { kind: 'bind_session', agentId: 'degraded', role: 'worker', parentAgentId: 'owner', reviewedSha: null, expectedEvent: 'deliver', nextExpectedAt: null });

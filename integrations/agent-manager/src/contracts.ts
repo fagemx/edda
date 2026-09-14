@@ -73,7 +73,7 @@ export interface DiscoveryReport { runs: DiscoveredRun[]; failures: Array<{ regi
 export interface CandidateView {
   id: string; sessionId: string | null; runId: string | null; instanceId: string | null; state: RuntimeState; live: boolean;
   source: 'live' | 'recorded'; workspace: string | null; lastProgressAt: string | null;
-  reason: string | null; configuredAgentId: string | null;
+  reason: string | null; degraded: RecordDegradation | null; configuredAgentId: string | null;
 }
 export interface CandidateListView { candidates: CandidateView[]; issues: Array<{ label: string; message: string }>; generatedAt: string }
 export interface RegisterCandidateRequest { candidateId: string; id: string; name: string; role: 'manager' | 'worker'; projectId: string }

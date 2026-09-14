@@ -54,11 +54,7 @@ function empty(binding: WorkBinding): WorkView {
 const INTERRUPTING_INBOX: readonly OwnerInboxKind[] = ['interrupted', 'provider_error', 'unavailable', 'overdue'];
 const PROGRESS_STATES: readonly RuntimeState[] = ['running', 'executing_tool'];
 const MAX_WAIT_EVIDENCE = 300;
-export interface NativeWorkInputs { task: CanonicalTask; view: WorkView; agents: AgentView[]; inbox: OwnerInboxEvent[];
-  // The bounded known-root relation is computed by the caller (WorkManager.doRead)
-  // where the config is available and is rendered from `WorkView.registry`; it is
-  // carried on every native input so the projection's inputs are explicit.
-  registry: WorkRegistryRelation }
+export interface NativeWorkInputs { task: CanonicalTask; view: WorkView; agents: AgentView[]; inbox: OwnerInboxEvent[] }
 export interface NativeWorkProgress { phase: WorkPhase; waitingFor: WorkWaitingFor; waitEvidence: string | null }
 interface BoundSession { session: WorkSessionBinding; agent: AgentView | null }
 /** A binding is only this session when the observed agent still carries its
@@ -336,7 +332,7 @@ export class WorkManager {
     const agentViews = agents ?? this.manager.overview().agents;
     view.ownerReturn = ownerReturn ?? null;
     view.registry = this.registryRelation(binding, view, agentViews);
-    const native = deriveWorkProgress({ task, view, agents: agentViews, registry: view.registry,
+    const native = deriveWorkProgress({ task, view, agents: agentViews,
       inbox: this.manager.store.inboxEvents(view.id, binding.projectId, binding.taskId, 201) });
     view.phase = native.phase; view.waitingFor = native.waitingFor; view.waitEvidence = native.waitEvidence;
     this.cache.set(binding.id, { at: Date.now(), view }); return { task, events: ordered, view };
@@ -350,31 +346,38 @@ export class WorkManager {
     const roots = allRoots.slice(0, 32);
     const truncated = allRoots.length - roots.length;
     const suffix = truncated > 0 ? `（來源超過 32 個上限，其餘 ${truncated} 個未列出）` : '';
-    const notRegistered = (): WorkRegistryRelation => ({ relation: 'root_not_registered',
-      message: `此工作紀錄的執行來源不在本專案已選取的清單中；請重新選擇來源，或從候選清單加入。${suffix}`.slice(0, 600) });
+    // The locator names the project's known roots only by selected agent names and
+    // an opaque root label — never a registry path.
+    const locator = (excludeRoot: string | null): string => {
+      const selected = roots.filter(root => root !== excludeRoot).map(root => {
+        const names = projectAgents.filter(a => a.registryRoot === root).map(a => a.name).slice(0, 3);
+        return `${rootLabel(root)}（${names.join('、')}）`;
+      });
+      return selected.length ? selected.join('、') : '無';
+    };
     const executor = view.sessions.filter(s => !s.unboundAt).find(s => s.agentId === view.assigneeAgentId && s.role !== 'reviewer')
       ?? view.sessions.filter(s => !s.unboundAt && s.role === 'worker')[0] ?? null;
-    const boundAgentId = executor?.agentId ?? null;
-    const executorId = boundAgentId ?? view.assigneeAgentId ?? binding.ownerAgentId;
+    // No bound executor means no observed source to relate: never claim one was
+    // observed. The known roots are still named so an empty read cannot read as
+    // global no-work.
+    if (!executor) return { relation: 'unknown',
+      message: `此工作尚未綁定可判定的執行 session；專案已知來源：${locator(null)}。空的讀取不代表沒有子代理正在工作。${suffix}`.slice(0, 600) };
     // The recorded session binding is authoritative: if its agent left the
     // configuration, the relation is honestly unregistered rather than guessed.
-    const configured = this.manager.config.agents.find(a => a.id === executorId && a.projectId === binding.projectId);
-    if (!configured) return notRegistered();
+    const configured = this.manager.config.agents.find(a => a.id === executor.agentId && a.projectId === binding.projectId);
+    if (!configured) return { relation: 'root_not_registered',
+      message: `此工作紀錄的執行來源不在本專案已選取的清單中；請重新選擇來源，或從候選清單加入。${suffix}`.slice(0, 600) };
     if ((configured.transport ?? 'pi') !== 'pi') return { relation: 'unknown',
       message: `此工作的執行來源不是 Pi 來源，registry 關聯不適用。${suffix}`.slice(0, 600) };
     if (!roots.includes(configured.registryRoot)) return { relation: 'unknown',
       message: `此工作的執行來源不在本專案已知的 32 個來源內；請確認設定後再判斷。${suffix}`.slice(0, 600) };
     const observed = agents.find(a => a.id === configured.id && a.projectId === binding.projectId);
-    const linked = !!observed && (!executor || (observed.selectionRevision === executor.selectionRevision &&
-      observed.transport === executor.transport && observed.sessionEvidence?.sessionId === executor.sessionId));
+    const linked = !!observed && observed.selectionRevision === executor.selectionRevision &&
+      observed.transport === executor.transport && observed.sessionEvidence?.sessionId === executor.sessionId;
     if (linked) return { relation: 'in_root',
       message: `已在本專案已知的來源中觀測到對應的執行來源（${configured.name}）。${suffix}`.slice(0, 600) };
-    const others = roots.filter(root => root !== configured.registryRoot).map(root => {
-      const names = projectAgents.filter(a => a.registryRoot === root).map(a => a.name).slice(0, 3);
-      return `${rootLabel(root)}（${names.join('、')}）`;
-    });
     return { relation: 'not_in_root',
-      message: `「${configured.name}」目前沒有可對應的觀測 session；專案其他已知來源：${others.length ? others.join('、') : '無'}。空的讀取不代表沒有子代理正在工作。${suffix}`.slice(0, 600) };
+      message: `「${configured.name}」目前沒有可對應的觀測 session；專案其他已知來源：${locator(configured.registryRoot)}。空的讀取不代表沒有子代理正在工作。${suffix}`.slice(0, 600) };
   }
   async continuationSnapshot(id: string): Promise<{ taskKey: string; view: WorkView; actions: WorkAction[] }> {
     const state = await this.read(this.binding(id)); return { taskKey: state.task.key, view: state.view, actions: state.events.map(e => e.action) };

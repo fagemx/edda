@@ -45,7 +45,7 @@ function inboxEvent(kind: OwnerInboxKind, when: string, summary = '原生事件'
     sessionId: 'worker-session', nativeEventId: `native-${kind}`, kind, at: when, summary, category: null, httpStatus: null,
     deliveryRecorded: false, acknowledgedAt: null, acknowledgementId: null, evidence: null, ownerAgentId: 'owner' };
 }
-const derive = (work: WorkView, agents: AgentView[] = [], inbox: OwnerInboxEvent[] = []) => deriveWorkProgress({ task: task(work.taskStatus), view: work, agents, inbox, registry: work.registry });
+const derive = (work: WorkView, agents: AgentView[] = [], inbox: OwnerInboxEvent[] = []) => deriveWorkProgress({ task: task(work.taskStatus), view: work, agents, inbox });
 
 test('task running with no live bound child is never working and names the pending role', () => {
   const work = view({ stage: 'assigned', deliveryStatus: 'started' });
