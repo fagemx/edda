@@ -11,6 +11,8 @@ import { parseConfig } from '../src/config.js';
 import { EddaWorkflowLedger, WorkflowLocks, type EddaRunner } from '../src/edda-workflow.js';
 import { ChannelAdapter, defaultPiRoot } from '../src/pi-adapter.js';
 import { rootLabel } from '../src/discovery.js';
+import { OWNER_MAILBOX_SOURCE } from '../src/workflow.js';
+import { OWNER_MAILBOX_LABELS } from '../src/web/workboard.js';
 import type { AgentBinding, AgentObservation, PiAdapter, SendRequest } from '../src/contracts.js';
 
 const at = (seconds: number): string => new Date(Date.UTC(2026, 8, 13, 0, 0, seconds)).toISOString();
@@ -204,4 +206,11 @@ test('6. ownerMailbox is projected from the managed record on the live and degra
     assert.equal(recordUnavailable.degraded?.code, 'record_unavailable');
     assert.deepEqual(recordUnavailable.ownerMailbox, { ref: 'assistant/owner', root: join(registry, 'owner-mailbox') });
   } finally { await channel.close(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test('7. the card mailbox source labels are pinned to the server names', () => {
+  // The browser bundle cannot import workflow.ts (node built-ins), so the display
+  // map is a second literal; this pins it to the server map so it cannot drift.
+  assert.deepEqual(OWNER_MAILBOX_LABELS, OWNER_MAILBOX_SOURCE);
+  assert.deepEqual(Object.keys(OWNER_MAILBOX_LABELS).sort(), ['binding', 'env', 'managed', 'workspace']);
 });

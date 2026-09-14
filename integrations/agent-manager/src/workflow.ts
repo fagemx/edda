@@ -11,8 +11,10 @@ import { rootLabel } from './discovery.js';
 
 const PREFIX = 'edda.manager-work.v1 ';
 // Human source names for the mailbox a return read resolved to. The label shown
-// beside them is the opaque root hash, never a path.
-const MAILBOX_SOURCE: Record<OwnerMailboxKind, string> = { binding: '工作設定指定的 owner mailbox',
+// beside them is the opaque root hash, never a path. Exported so the web layer's
+// display map is pinned to it by a test (the browser bundle cannot import this
+// module: it pulls in node built-ins).
+export const OWNER_MAILBOX_SOURCE: Record<OwnerMailboxKind, string> = { binding: '工作設定指定的 owner mailbox',
   env: '管理服務環境指定的 owner mailbox', managed: '受管理啟動的 owner mailbox', workspace: '工作目錄預設 mailbox' };
 interface ResolvedOwnerMailbox { kind: OwnerMailboxKind; root: string; label: string; present: boolean; notice: string | null }
 interface WorkEvent { version: 1; taskKey: string; previous: string | null; action: WorkAction; fingerprint: string; target: AgentBinding | null; transportStoreId: string; priorFailedOperation: string | null }
@@ -398,7 +400,7 @@ export class WorkManager {
     candidates.push({ kind: 'workspace', root: binding.workspace });
     const found = candidates.findIndex((candidate) => existsSync(join(candidate.root, '.edda', 'returns')));
     const index = found < 0 ? 0 : found, selected = candidates[index]!;
-    const present = found >= 0, label = rootLabel(selected.root), source = MAILBOX_SOURCE[selected.kind];
+    const present = found >= 0, label = rootLabel(selected.root), source = OWNER_MAILBOX_SOURCE[selected.kind];
     let notice: string | null;
     if (!present) notice = `找不到任何 owner mailbox（${label}）；無法確認是否有回件。`;
     else if (index > 0) {
