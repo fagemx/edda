@@ -2,7 +2,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { mkdirSync, lstatSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { digest, readJson, writeJson, validateId, privateRoot } from './store.mjs';
+import { digest, readJson, readRecord, writeJson, validateId, privateRoot } from './store.mjs';
 import { readTask, taskId } from './compose-sources.mjs';
 
 const now = () => new Date().toISOString();
@@ -74,17 +74,22 @@ export function findOwnerSubscription(root, sessionId) {
   const base = join(privateRoot(root), 'owner-lifecycle');
   let names;
   try { names = readdirSync(base); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  catch (error) { if (error.code === 'ENOENT') return { dir: null, ownerRef: null, unreadable: [] }; throw error; }
+  const unreadable = [];
   for (const name of names) {
     if (!/^[0-9a-f]{64}$/.test(name)) continue;
     const dir = join(base, name);
     let info; try { info = lstatSync(dir); } catch { continue; }
     if (!info.isDirectory() || info.isSymbolicLink()) continue;
-    let record; try { record = readJson(join(dir, 'dependencies.json')); } catch { continue; }
+    // Distinguish an absent record from an unreadable one: `readRecord` degrades
+    // per record with a typed error (never the record bytes) so an unreadable
+    // owner subscription is surfaced by the caller instead of silently skipped.
+    const { value: record, error } = readRecord(join(dir, 'dependencies.json'));
+    if (error) { unreadable.push({ dir, record: error.record, message: error.message }); continue; }
     if (!record || record.version !== 1 || typeof record.ownerRef !== 'string') continue;
-    if (record.holderSession === sessionId || record.sessionId === sessionId) return { dir, ownerRef: record.ownerRef };
+    if (record.holderSession === sessionId || record.sessionId === sessionId) return { dir, ownerRef: record.ownerRef, unreadable };
   }
-  return null;
+  return { dir: null, ownerRef: null, unreadable };
 }
 
 export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef = null, sessionId, instanceId, policy, runtime, manifestRevision,

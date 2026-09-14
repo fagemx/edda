@@ -204,6 +204,41 @@ fi
 wait "$driver_pid" 2>/dev/null || true
 pass "interrupt terminates the route's build child and its grandchild"
 
+# The native Windows compiler tree is only reachable through `taskkill /T` on the
+# route's own Windows pid (MSYS ps/kill cannot see it). This asserts that call is
+# actually issued, which the change under test is what makes possible; it skips
+# where that branch is not taken.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    tk_bin="$work/bin-tk"
+    mkdir -p "$tk_bin"
+    printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >> "$TASKILL_LOG"' 'exit 0' > "$tk_bin/taskkill"
+    chmod +x "$tk_bin/taskkill"
+    TASKILL_LOG="$work/taskkill.log"; export TASKILL_LOG
+    : > "$TASKILL_LOG"
+    STUB_PID_FILE="$work/stub2.pid"; export STUB_PID_FILE
+    PATH="$tk_bin:$stub_bin:$PATH" sh "$driver" --repo "$fixture" --offline --allow-stale --allow-downgrade \
+      --no-pi --no-manager --edda-bin edda >"$work/native-interrupt.txt" 2>&1 &
+    native_pid=$!
+    i=0
+    while [ ! -s "$work/stub2.pid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    # The route's own Windows pid is the one that must be targeted: the compiler's
+    # /proc winpid mapping does not survive exec of a native binary.
+    route_winpid=$(cat "/proc/$native_pid/winpid" 2>/dev/null || true)
+    kill -TERM "$native_pid" 2>/dev/null || true
+    sleep 2
+    if [ -n "$route_winpid" ] && grep -q -- "/PID $route_winpid /T" "$TASKILL_LOG"; then
+      pass "interrupt issues taskkill /T on the route's own Windows tree (native children)"
+    else
+      fail "interrupt did not target the route's own Windows pid (logged: $(tr '\n' ';' <"$TASKILL_LOG"))"
+    fi
+    stub2=$(cat "$work/stub2.pid" 2>/dev/null || true)
+    [ -n "$stub2" ] && kill -KILL "$stub2" 2>/dev/null || true
+    wait "$native_pid" 2>/dev/null || true
+    ;;
+  *) pass "native-tree taskkill assertion skipped (not Git Bash)" ;;
+esac
+
 # An unobservable installed identity must not read as "safe to overwrite".
 mkdir -p "$work/empty-client"
 if EDDA_PI_PACKAGE_ROOT="$work/empty-client" sh "$driver" --repo "$guarded" --manager-root "$work/none" --offline --allow-stale --dry-run >"$work/unobservable.txt" 2>&1; then

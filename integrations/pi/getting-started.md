@@ -146,6 +146,23 @@ assistant and controller are different project directories. An older installed
 `edda` without the `return` verb exits non-zero, where the session-addressed path
 above still works for the unchanged same-session case.
 
+## Hand-opened sessions are not wired automatically
+
+A session that Edda did not launch has no managed runner, so nothing records an owner holder or claims
+returns for it. To use the owner mailbox or dependency observation there:
+
+1. Load the **installed** extension by its exact path, printed by `edda-pi runtime-info` as
+   `extension.path` (with its `digest` and `version`) — for example `pi -e <extension.path>`.
+2. Set `EDDA_OWNER_REF=<owner-reference>` in the session environment so the runtime can record the holder
+   and claim pending returns on the next natural live turn.
+
+`edda-pi runtime-info` also reports the installed `channel` module and the digest-verified installed
+`releases` (`id`, `version`, `channel`, `extension`, `verified`). A live session reports its loaded channel
+as `integration.modulePath` in `edda-pi list`; if it matches neither `runtime-info.channel.path` nor a
+verified `runtime-info.releases[].channel`, the session loaded a stale or foreign copy and its owner-mailbox
+pickup fails silently. Re-open it with the installed extension path, or reinstall so a single installed copy
+is loaded.
+
 ## 6. Stop and resume without replay
 
 After confirming the run is idle:
