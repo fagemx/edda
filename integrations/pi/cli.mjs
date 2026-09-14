@@ -14,10 +14,13 @@ import { installRuntime } from './managed-store.mjs';
 import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation } from './managed-client.mjs';
 import { startSupervisor, supervisorStatus, stopSupervisor } from './supervisor-client.mjs';
 import { runtimeInfo, listManagedRuns } from './activation.mjs';
+import { activationReceipt } from './activation-receipt.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
   edda-pi --version
   edda-pi runtime-info                 installed version, capabilities and guide path (read-only)
+  edda-pi activation [--json] [--check] [--repo PATH] [--client-root PATH]
+                                       read-only merge/install/running revision receipt (--check exits 2 unless coherent)
   edda-pi runs [--limit 50] [--after RUN_ID]   recorded managed runs, including stopped ones
   node integrations/pi/cli.mjs list
   node integrations/pi/cli.mjs status SESSION_ID
@@ -78,13 +81,15 @@ async function main(args) {
   const options = {};
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
-    if (['--conversation', '--notify', '--preview', '--no-tools', '--abort'].includes(arg) && options[arg] === undefined) { options[arg] = true; continue; }
+    if (['--conversation', '--notify', '--preview', '--no-tools', '--abort', '--json', '--check'].includes(arg) && options[arg] === undefined) { options[arg] = true; continue; }
     if (!arg.startsWith('--')) { positional.push(arg); continue; }
     if (options[arg] !== undefined || rest[i + 1] === undefined || rest[i + 1].startsWith('--')) throw new Error(`Missing or duplicate option ${arg}`);
     options[arg] = rest[++i];
   }
   const allowed = {
-    'runtime-info': [], runs: ['--limit', '--after'],
+    'runtime-info': [],
+    activation: ['--json', '--check', '--repo', '--registry-root', '--manager-root', '--edda-bin', '--client-root', '--timeout'],
+    runs: ['--limit', '--after'],
     list: [], status: [], send: ['--message', '--message-file', '--id', '--sender', '--mode'],
     receipt: ['--id'], recover: ['--instance'],
     conversation: ['--after', '--limit'], enroll: ['--scope'], watch: ['--conversation'],
@@ -102,11 +107,19 @@ async function main(args) {
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
-  const counts = command === 'doctor' ? [0, 1] : [['runtime-info', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
+  const counts = command === 'doctor' ? [0, 1] : [['runtime-info', 'activation', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
   if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
   if (command === 'runtime-info') result = runtimeInfo(root);
+  if (command === 'activation') {
+    const timeout = options['--timeout'];
+    if (timeout !== undefined && !(Number(timeout) > 0)) throw new Error('--timeout must be a positive number');
+    result = await activationReceipt({ root: options['--registry-root'] ?? root, repo: options['--repo'], managerRoot: options['--manager-root'],
+      eddaBin: options['--edda-bin'], clientRoot: options['--client-root'],
+      timeoutMs: timeout === undefined ? undefined : Number(timeout) });
+    if (options['--check'] === true && result.coherence.status !== 'coherent') process.exitCode = 2;
+  }
   if (command === 'runs') result = listManagedRuns(root, { limit: options['--limit'], after: options['--after'] });
   if (command === 'supervisor-start') {
     const config = JSON.parse((await readBoundedFile(options['--config'])).text);

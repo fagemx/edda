@@ -15,6 +15,7 @@ import { installRuntime } from './managed-store.mjs';
 const exec = promisify(execFile);
 const packageDir = fileURLToPath(new URL('.', import.meta.url));
 const cli = fileURLToPath(new URL('./activation-receipt.mjs', import.meta.url));
+const channelCli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'edda-activation-receipt-test-'));
@@ -289,6 +290,22 @@ test('a checkout used as its own installed root fails closed instead of comparin
     '--manager-root', managerRoot, '--client-root', sameDir, '--edda-bin', fakeEdda], { timeout: 30000 }).catch((error) => error);
   assert.equal(outcome.code, 2);
   assert.equal(JSON.parse(outcome.stdout).coherence.status, 'partial');
+});
+
+test('the installed entry exposes the receipt through cli.mjs', async (t) => {
+  const { repo, managerRoot, registryRoot, fakeEdda, clientRoot, release } = await activationFixture(t);
+  const args = [channelCli, 'activation', '--json', '--repo', repo, '--registry-root', registryRoot,
+    '--manager-root', managerRoot, '--client-root', clientRoot, '--edda-bin', fakeEdda];
+  const ok = await exec(process.execPath, args, { env: { ...process.env, EDDA_PI_CHANNEL_DIR: registryRoot }, timeout: 30000 });
+  const receipt = JSON.parse(ok.stdout);
+  assert.equal(receipt.coherence.status, 'coherent');
+  const okCheck = await exec(process.execPath, [...args, '--check'], { env: { ...process.env, EDDA_PI_CHANNEL_DIR: registryRoot }, timeout: 30000 });
+  assert.equal(okCheck.code ?? 0, 0);
+
+  await writeFile(join(managerRoot, 'release.json'), JSON.stringify({ ...release, headSha: '0'.repeat(40) }));
+  const drifted = await exec(process.execPath, [...args, '--check'], { env: { ...process.env, EDDA_PI_CHANNEL_DIR: registryRoot }, timeout: 30000 }).catch((error) => error);
+  assert.equal(drifted.code, 2);
+  assert.equal(JSON.parse(drifted.stdout).coherence.status, 'drift');
 });
 
 test('the receipt never leaks the agent-manager owner token', async (t) => {

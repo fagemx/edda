@@ -22,13 +22,17 @@ to pack/install/restart by hand to make a merge real.
 read-only: it writes nothing anywhere, starts nothing, calls no model, and never
 prints a credential.
 
-From a checkout (the installed `cli.mjs` registration is sequenced behind a sibling
-controller, so the source entry is the runnable one today):
+From an installed client (`edda-pi activation`), or from a source checkout that
+has no installed client:
 
 ```text
-node integrations/pi/activation-receipt.mjs --json
-node integrations/pi/activation-receipt.mjs --check     # exit 2 unless coherent
+edda-pi activation --json
+edda-pi activation --check     # exit 2 unless coherent
 ```
+
+From a source checkout that has no installed client, the same entry runs as
+`node integrations/pi/cli.mjs activation …` (or directly as
+`node integrations/pi/activation-receipt.mjs …`).
 
 `--client-root PATH` (or `EDDA_PI_PACKAGE_ROOT`) selects the installed package
 directory when it is not the Node executable's sibling `node_modules`.
