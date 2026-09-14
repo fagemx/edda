@@ -150,7 +150,9 @@ test('a repository listing over the 16 MiB bound refuses as membership-unverifia
   const f = await fixture(t, { listRaw });
   const restored = await restoreCapsuleContext({ project: f.project, capsuleId: CAPSULE_ID_VALUE, eddaCommand: command });
   assert.equal(restored.status, 'capsule_unavailable');
-  assert.match(restored.reason, /bounded read/);
+  // The generic listing failure reports it could not list at all; only the
+  // read-bound branch says membership itself could not be verified.
+  assert.match(restored.reason, /membership cannot be verified/);
 });
 
 test('a repository listing larger than the context bound still verifies membership', async (t) => {
