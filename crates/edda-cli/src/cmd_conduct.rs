@@ -11,7 +11,7 @@ use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, update_state};
 use edda_conductor::tmux::TmuxSession;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 // ── CLI Schema ──
@@ -174,6 +174,16 @@ pub fn run(
         eprintln!("{warning}");
     }
 
+    // GH-557: record the store this run actually uses, so recovery verbs can
+    // find a plan launched from a directory no worktree scan can reach (the
+    // plan YAML's own folder). A dry run writes nothing.
+    if !dry_run {
+        let shell_cwd = std::env::current_dir().unwrap_or_else(|_| cwd.clone());
+        for root in store::registry_roots_for(&cwd, &shell_cwd) {
+            store::record_registry(&root, &plan.name, &cwd);
+        }
+    }
+
     // Load or create state
     let mut state = match load_state(&cwd, &plan.name)? {
         Some(s) => {
@@ -322,74 +332,111 @@ pub fn run(
 
 /// Execute `edda conduct status [plan-name]`
 pub fn status(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<()> {
-    let conductor_dir = repo_root.join(".edda").join("conductor");
-    if !conductor_dir.exists() {
-        if json {
-            println!("[]");
-        } else {
-            println!("No conductor state found.");
-        }
-        return Ok(());
-    }
+    print!("{}", status_impl(repo_root, plan_name, json)?);
+    Ok(())
+}
 
-    let plans: Vec<String> = if let Some(name) = plan_name {
-        vec![name.to_string()]
-    } else {
-        // List all plan directories
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&conductor_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    names.push(name.to_string());
-                }
-            }
+/// GH-557: plan state lives in the store that launched it (the invocation
+/// root or any git worktree) — scan all of them. Split from [`status`] so
+/// the rendered text is testable without stdout capture.
+fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<String> {
+    let mut out = String::new();
+    let plans: Vec<(String, PathBuf)> = if let Some(name) = plan_name {
+        match store::resolve_plan_store(repo_root, name)? {
+            Some(store) => vec![(name.to_string(), store)],
+            None => vec![(name.to_string(), repo_root.to_path_buf())],
         }
-        names.sort();
-        names
+    } else {
+        // One discovery pass shared with the recovery verbs, so the listing
+        // and the verbs can never disagree. A corrupt state file degrades to
+        // a stderr warning + omission on this read-only overview; mutating
+        // verbs propagate it instead.
+        let (mut found, corrupt) = store::discover_plans(repo_root);
+        for (name, store, e) in &corrupt {
+            eprintln!(
+                "⚠ plan \"{name}\" state in {} unreadable, omitted from the listing: {e:#}",
+                store.display()
+            );
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
     };
 
     if plans.is_empty() {
-        if json {
-            println!("[]");
-        } else {
-            println!("No plans found.");
-        }
-        return Ok(());
+        out.push_str(if json { "[]\n" } else { "No plans found.\n" });
+        return Ok(out);
     }
 
     if json {
-        let states: Vec<PlanState> = plans
-            .iter()
-            .filter_map(|name| load_state(repo_root, name).ok().flatten())
-            .collect();
-        // Single plan name specified: output object directly; otherwise array
+        // Every machine-readable object carries `store` so same-named plans
+        // across lanes are distinguishable; flattened so existing field
+        // paths (`plan_name`, `phases`, …) stay stable.
+        #[derive(serde::Serialize)]
+        struct StatusJson {
+            store: String,
+            #[serde(flatten)]
+            state: PlanState,
+        }
+        let row = |store: &Path, state: PlanState| StatusJson {
+            store: store::normalize_store_path(store),
+            state,
+        };
         if plan_name.is_some() {
-            if let Some(s) = states.into_iter().next() {
-                println!("{}", serde_json::to_string_pretty(&s)?);
-            } else {
-                println!("null");
+            let (name, store) = &plans[0];
+            match load_state(store, name)? {
+                Some(s) => {
+                    out.push_str(&serde_json::to_string_pretty(&row(store, s))?);
+                    out.push('\n');
+                }
+                None => out.push_str("null\n"),
             }
         } else {
-            println!("{}", serde_json::to_string_pretty(&states)?);
+            let mut states = Vec::new();
+            for (name, store) in &plans {
+                match load_state(store, name) {
+                    Ok(Some(s)) => states.push(row(store, s)),
+                    Ok(None) => eprintln!(
+                        "⚠ plan \"{name}\" state in {} disappeared before load, omitted",
+                        store.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "⚠ plan \"{name}\" state in {} unreadable at load, omitted: {e:#}",
+                        store.display()
+                    ),
+                }
+            }
+            out.push_str(&serde_json::to_string_pretty(&states)?);
+            out.push('\n');
         }
     } else {
-        for name in &plans {
-            let state = load_state(repo_root, name)?;
+        for (name, store) in &plans {
+            let state = load_state(store, name)?;
             match state {
-                Some(s) => print_status(&s),
-                None => println!("Plan \"{name}\": no state file found"),
+                Some(s) => {
+                    let label = if store::normalize_store_path(store)
+                        == store::normalize_store_path(repo_root)
+                    {
+                        "(invocation root)".to_string()
+                    } else {
+                        store::normalize_store_path(store)
+                    };
+                    out.push_str(&format!("  Store: {label}\n"));
+                    out.push_str(&print_status_to_string(&s));
+                }
+                None => out.push_str(&format!("Plan \"{name}\": no state file found\n")),
             }
         }
     }
 
-    Ok(())
+    Ok(out)
 }
 
 /// Execute `edda conduct retry <phase-id>`
 pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Result<()> {
-    let name = resolve_plan_name(repo_root, plan_name)?;
-    update_state(repo_root, &name, |state| {
+    let name = store::resolve_plan_name(repo_root, plan_name)?;
+    let store = store::resolve_plan_store(repo_root, &name)?
+        .ok_or_else(|| store::no_state_error(repo_root, &name))?;
+    let plan_file = update_state(&store, &name, |state| {
         let current_status = {
             let ps = state.get_phase_mut(phase_id)?;
             if ps.status != PhaseStatus::Failed
@@ -418,10 +465,22 @@ pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Resul
             state.plan_status = PlanStatus::Running;
         }
 
-        Ok(())
+        Ok(state.plan_file.clone())
     })?;
 
-    println!("Phase \"{phase_id}\" reset to Pending. Run `edda conduct run` to resume.");
+    println!("Phase \"{phase_id}\" reset to Pending.");
+    println!("  store: {}", store.display());
+    if plan_file.is_empty() {
+        println!(
+            "  resume: `edda conduct run <plan.yaml> --cwd {}`",
+            store.display()
+        );
+    } else {
+        println!(
+            "  resume: `edda conduct run {plan_file} --cwd {}`",
+            store.display()
+        );
+    }
     Ok(())
 }
 
@@ -432,8 +491,10 @@ pub fn skip(
     reason: Option<&str>,
     plan_name: Option<&str>,
 ) -> Result<()> {
-    let name = resolve_plan_name(repo_root, plan_name)?;
-    let is_waived = update_state(repo_root, &name, |state| {
+    let name = store::resolve_plan_name(repo_root, plan_name)?;
+    let store = store::resolve_plan_store(repo_root, &name)?
+        .ok_or_else(|| store::no_state_error(repo_root, &name))?;
+    let is_waived = update_state(&store, &name, |state| {
         let ps = state.get_phase_mut(phase_id)?;
         if ps.status == PhaseStatus::GateTimedOut {
             // GH-552: skipping a timed-out gate is a WAIVER — the phase ran and
@@ -476,13 +537,16 @@ pub fn skip(
     } else {
         println!("Phase \"{phase_id}\" skipped.");
     }
+    println!("  store: {}", store.display());
     Ok(())
 }
 
 /// Execute `edda conduct abort [plan-name]`
 pub fn abort(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
-    let name = resolve_plan_name(repo_root, plan_name)?;
-    update_state(repo_root, &name, |state| {
+    let name = store::resolve_plan_name(repo_root, plan_name)?;
+    let store = store::resolve_plan_store(repo_root, &name)?
+        .ok_or_else(|| store::no_state_error(repo_root, &name))?;
+    update_state(&store, &name, |state| {
         if state.plan_status == PlanStatus::Completed || state.plan_status == PlanStatus::Aborted {
             bail!("Plan \"{}\" is already {:?}.", name, state.plan_status);
         }
@@ -492,7 +556,7 @@ pub fn abort(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
         Ok(())
     })?;
 
-    println!("Plan \"{name}\" aborted.");
+    println!("Plan \"{name}\" aborted. (store: {})", store.display());
     Ok(())
 }
 
@@ -568,50 +632,21 @@ pub(crate) fn cost_line(total_cost_usd: f64, cost_measured: bool) -> String {
     }
 }
 
-fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String> {
-    if let Some(name) = explicit {
-        return Ok(name.to_string());
-    }
-
-    let conductor_dir = repo_root.join(".edda").join("conductor");
-    if !conductor_dir.exists() {
-        bail!("No conductor state found. Specify --plan <name>.");
-    }
-
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(&conductor_dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            if let Some(n) = entry.file_name().to_str() {
-                names.push(n.to_string());
-            }
-        }
-    }
-
-    match names.len() {
-        0 => bail!("No plans found."),
-        1 => Ok(names
-            .into_iter()
-            .next()
-            .context("expected exactly one plan")?),
-        _ => bail!(
-            "Multiple plans found: {}. Use --plan to specify.",
-            names.join(", ")
-        ),
-    }
-}
-
-fn print_status(state: &PlanState) {
-    println!("\nPlan: {} ({:?})", state.plan_name, state.plan_status);
+fn print_status_to_string(state: &PlanState) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "\nPlan: {} ({:?})\n",
+        state.plan_name, state.plan_status
+    ));
     if !state.plan_file.is_empty() {
-        println!("  File: {}", state.plan_file);
+        out.push_str(&format!("  File: {}\n", state.plan_file));
     }
-    println!(
-        "  Cost: {}",
+    out.push_str(&format!(
+        "  Cost: {}\n",
         cost_line(state.total_cost_usd, state.cost_measured)
-    );
+    ));
 
-    println!();
+    out.push('\n');
     for ps in &state.phases {
         let icon = match ps.status {
             PhaseStatus::Passed => "\u{2713}",                          // ✓
@@ -651,12 +686,13 @@ fn print_status(state: &PlanState) {
             .duration_ms
             .map(|ms| format!("{ms} ms"))
             .unwrap_or_else(|| "—".into());
-        println!(
-            "  {icon} {:<24} {:?} {detail} elapsed={elapsed}",
+        out.push_str(&format!(
+            "  {icon} {:<24} {:?} {detail} elapsed={elapsed}\n",
             ps.id, ps.status
-        );
+        ));
     }
-    println!();
+    out.push('\n');
+    out
 }
 
 fn now_rfc3339() -> String {
@@ -671,283 +707,7 @@ fn ctrlc_cancel(cancel: CancellationToken) {
     });
 }
 
+mod store;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-    use edda_conductor::plan::parser::parse_plan;
-
-    /// Minimal parser harness: `ConductCmd` is a `Subcommand`, so it needs a
-    /// root command to be parsed standalone.
-    #[derive(Parser)]
-    struct TestCli {
-        #[command(subcommand)]
-        cmd: ConductCmd,
-    }
-
-    fn parse(args: &[&str]) -> ConductCmd {
-        TestCli::try_parse_from(args)
-            .expect("args should parse")
-            .cmd
-    }
-
-    fn agent_of(cmd: ConductCmd) -> AgentKind {
-        match cmd {
-            ConductCmd::Run { agent, .. } => agent,
-            _ => panic!("expected the Run subcommand"),
-        }
-    }
-
-    #[test]
-    fn run_defaults_to_claude_agent() {
-        // Guards the single line keeping every existing `conduct run`
-        // invocation on the claude backend.
-        assert_eq!(
-            agent_of(parse(&["edda", "run", "plan.yaml"])),
-            AgentKind::Claude
-        );
-    }
-
-    #[test]
-    fn run_accepts_explicit_agents() {
-        assert_eq!(
-            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "pi"])),
-            AgentKind::Pi
-        );
-        assert_eq!(
-            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "claude"])),
-            AgentKind::Claude
-        );
-        assert_eq!(
-            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "codex"])),
-            AgentKind::Codex
-        );
-    }
-
-    #[test]
-    fn run_rejects_unknown_agent() {
-        let error = match TestCli::try_parse_from(["edda", "run", "plan.yaml", "--agent", "gpt"]) {
-            Err(error) => error,
-            Ok(_) => panic!("unknown agent must be rejected"),
-        };
-        let text = error.to_string();
-        for expected in ["claude", "pi", "codex"] {
-            assert!(
-                text.contains(expected),
-                "error should list the valid agents, missing {expected:?}: {text}"
-            );
-        }
-    }
-
-    #[test]
-    fn budget_warning_fires_for_codex_with_plan_budget() {
-        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\nbudget_usd: 5.0\n")
-            .expect("test plan parses");
-        let warning = budget_warning(&plan, AgentKind::Codex).expect("warning expected");
-        assert!(warning.contains("codex"), "{warning}");
-        assert!(warning.contains("budget_usd"), "{warning}");
-        assert!(warning.contains("not be enforced"), "{warning}");
-        assert!(warning.contains("cost is unavailable"), "{warning}");
-    }
-
-    #[test]
-    fn budget_warning_fires_for_codex_with_phase_budget() {
-        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n    budget_usd: 1.0\n")
-            .expect("test plan parses");
-        assert!(budget_warning(&plan, AgentKind::Codex).is_some());
-    }
-
-    #[test]
-    fn budget_warning_stays_silent_without_a_budget() {
-        let plan =
-            parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n").expect("test plan parses");
-        assert!(budget_warning(&plan, AgentKind::Codex).is_none());
-    }
-
-    #[test]
-    fn budget_warning_stays_silent_for_other_agents() {
-        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\nbudget_usd: 5.0\n")
-            .expect("test plan parses");
-        assert!(budget_warning(&plan, AgentKind::Claude).is_none());
-        assert!(budget_warning(&plan, AgentKind::Pi).is_none());
-    }
-
-    #[test]
-    fn budget_warning_for_agent_fires_on_codex_with_a_budget() {
-        // The flag form shared with `edda dispatch`.
-        assert!(budget_warning_for_agent(AgentKind::Codex, true).is_some());
-        assert!(budget_warning_for_agent(AgentKind::Codex, false).is_none());
-        assert!(budget_warning_for_agent(AgentKind::Claude, true).is_none());
-        assert!(budget_warning_for_agent(AgentKind::Pi, true).is_none());
-    }
-
-    #[test]
-    fn gate_preview_renders_gate_timeout_and_policy() {
-        let plan = parse_plan(
-            "name: t\nphases:\n  - id: a\n    prompt: x\n    gate: verdict\n    gate_timeout_sec: 3600\n    on_reject: halt\n",
-        )
-        .expect("test plan parses");
-        assert_eq!(
-            gate_preview(&plan.phases[0]),
-            "  [gate: verdict, timeout: 3600s, on_reject: halt]"
-        );
-    }
-
-    #[test]
-    fn gate_preview_spells_out_the_no_timeout_case() {
-        // The footgun for unattended batches must not render as a bare
-        // "timeout: -" or silently look bounded.
-        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n    gate: verdict\n")
-            .expect("test plan parses");
-        assert_eq!(
-            gate_preview(&plan.phases[0]),
-            "  [gate: verdict, timeout: waits until cancelled, on_reject: redispatch]"
-        );
-    }
-
-    #[test]
-    fn gate_preview_is_empty_for_ungated_phases() {
-        let plan =
-            parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n").expect("test plan parses");
-        assert_eq!(gate_preview(&plan.phases[0]), "");
-    }
-
-    #[test]
-    fn cost_line_reports_na_when_unmeasured() {
-        // GH-533: measured-ness comes from the model, not the zero sentinel.
-        assert_eq!(cost_line(0.0, false), "n/a (no usage data reported)");
-    }
-
-    #[test]
-    fn cost_line_formats_a_measured_total() {
-        assert_eq!(cost_line(1.234, true), "$1.23");
-    }
-
-    #[test]
-    fn cost_line_asserts_a_genuinely_measured_zero() {
-        // A backend that reported usage summing to zero measured a real $0.00;
-        // the model now distinguishes it from "nobody measured anything".
-        assert_eq!(cost_line(0.0, true), "$0.00");
-    }
-
-    /// GH-564 P1-1: `conduct run` builds its notifier through
-    /// `ChannelNotifier::for_repo`, so a `phase_terminal` channel configured
-    /// in `.edda/config.json` actually receives terminal events instead of
-    /// every event being dropped by a bare `StdoutNotifier`.
-    #[test]
-    fn run_notifier_delivers_phase_terminal_to_configured_channel() {
-        use edda_conductor::runner::notify::Notifier;
-        use std::io::Read;
-        use std::time::Duration;
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".edda")).unwrap();
-        std::fs::write(
-            dir.path().join(".edda").join("config.json"),
-            format!(
-                r#"{{"notify_channels":[{{"type":"webhook","url":"http://127.0.0.1:{port}","events":["phase_terminal"]}}]}}"#
-            ),
-        )
-        .unwrap();
-
-        let notifier = ChannelNotifier::for_repo(dir.path());
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            notifier
-                .notify_phase_terminal(edda_notify::NotifyEvent::PhaseTerminal {
-                    plan: "gh564".into(),
-                    phase: "implement".into(),
-                    state: "Passed".into(),
-                    attempt: 1,
-                    final_output: Some("PR: https://github.com/x/y/pull/620".into()),
-                })
-                .await;
-        });
-
-        // Dispatch finished before notify_phase_terminal returned; the local
-        // webhook must have received the event.
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut request = String::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => request.push_str(&String::from_utf8_lossy(&buf[..n])),
-            }
-            if request.contains("phase_terminal") {
-                break;
-            }
-        }
-        assert!(
-            request.contains("phase_terminal")
-                && request.contains("PR: https://github.com/x/y/pull/620"),
-            "configured webhook channel must receive the terminal event, got: {request}"
-        );
-    }
-
-    /// GH-751 P1-2: `conduct run` builds its notifier through
-    /// `ChannelNotifier::for_repo`, so a `gate_progress` channel configured
-    /// in `.edda/config.json` actually receives progress events instead of
-    /// being dropped by ChannelNotifier.
-    #[test]
-    fn run_notifier_delivers_gate_progress_to_configured_channel() {
-        use edda_conductor::runner::notify::Notifier;
-        use std::io::Read;
-        use std::time::Duration;
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".edda")).unwrap();
-        std::fs::write(
-            dir.path().join(".edda").join("config.json"),
-            format!(
-                r#"{{"notify_channels":[{{"type":"webhook","url":"http://127.0.0.1:{port}","events":["gate_progress"]}}]}}"#
-            ),
-        )
-        .unwrap();
-
-        let notifier = ChannelNotifier::for_repo(dir.path());
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            notifier
-                .notify_gate_progress(edda_notify::NotifyEvent::GateProgress {
-                    plan: "gh751".into(),
-                    phase: "review".into(),
-                    subject: "gh751/review".into(),
-                    gate_sha: "c".repeat(40),
-                    wait_label: "9m0s remaining".into(),
-                })
-                .await;
-        });
-
-        // Dispatch finished before notify_gate_progress returned; the local
-        // webhook must have received the event.
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut request = String::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => request.push_str(&String::from_utf8_lossy(&buf[..n])),
-            }
-            if request.contains("gate_progress") {
-                break;
-            }
-        }
-        assert!(
-            request.contains("gate_progress")
-                && request.contains("gh751/review")
-                && request.contains("9m0s remaining"),
-            "configured webhook channel must receive the gate_progress event, got: {request}"
-        );
-    }
-}
+mod tests;
