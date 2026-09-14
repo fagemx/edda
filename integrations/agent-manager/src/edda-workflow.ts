@@ -57,7 +57,7 @@ export class EddaWorkflowLedger implements WorkflowLedger {
   async returns(binding: WorkBinding): Promise<OwnerReturnView | null> {
     const ownerRef = binding.ownerRef;
     if (!ownerRef) return null;
-    const failed = (reason: string): OwnerReturnView => ({ owner: ownerRef, holder: null, pending: 0, total: null, matched: [], error: reason.slice(0, 300) });
+    const failed = (reason: string): OwnerReturnView => ({ owner: ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: reason.slice(0, 300) });
     try {
       const status = object(JSON.parse(await this.run(binding.workspace, ['return', 'status', '--owner', ownerRef, '--json'])) as unknown);
       const owner = text(status.owner, 200);
@@ -68,15 +68,23 @@ export class EddaWorkflowLedger implements WorkflowLedger {
       const list = object(JSON.parse(await this.run(binding.workspace, ['return', 'pending', '--owner', ownerRef, '--json'])) as unknown);
       const items = Array.isArray(list.pending) ? list.pending.slice(0, 20) : [];
       const matched: OwnerReturnFact[] = [];
+      let dropped = 0;
       for (const raw of items) {
+        let work: string | null = null;
         try {
-          const item = object(raw), work = text(item.work, 200);
+          const item = object(raw); work = text(item.work, 200);
           if (work !== String(binding.taskId) && work !== binding.id) continue;
-          if (item.status !== 'done' && item.status !== 'failed') continue;
+          // A matched item whose status is not the bounded vocabulary is a dropped
+          // fact, not an absent one: the card must not report a healthy count.
+          if (item.status !== 'done' && item.status !== 'failed') { dropped += 1; continue; }
           matched.push({ id: text(item.id, 200), work, status: item.status, result: item.result == null ? null : text(item.result, 2000), postedAt: text(item.posted_at, 100) });
-        } catch { /* one malformed return is dropped, not the whole read */ }
+        } catch {
+          // Unreadable only where it might be this work's: an unusable item whose
+          // id is unknown is conservatively counted as dropped.
+          if (work === null || work === String(binding.taskId) || work === binding.id) dropped += 1;
+        }
       }
-      return { owner, holder: typeof status.holder === 'string' ? status.holder.slice(0, 200) : null, pending: Number(pending), total, matched, error: null };
+      return { owner, holder: typeof status.holder === 'string' ? status.holder.slice(0, 200) : null, pending: Number(pending), total, matched, dropped, error: null };
     } catch { return failed('負責人回件狀態暫時無法讀取；未自動重試。'); }
   }
 }

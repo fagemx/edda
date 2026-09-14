@@ -31,7 +31,9 @@ export interface WorkRegistryRelation { relation: WorkRootRelation; message: str
 // CLI. `matched` is the bounded subset of pending returns whose `work` matches
 // this work's task id or work id.
 export interface OwnerReturnFact { id: string; work: string; status: 'done' | 'failed'; result: string | null; postedAt: string }
-export interface OwnerReturnView { owner: string; holder: string | null; pending: number; total: number | null; matched: OwnerReturnFact[]; error: string | null }
+// `dropped` counts bounded pending items that could not be used and may belong to
+// this work, so the card never reports a healthy count while hiding one.
+export interface OwnerReturnView { owner: string; holder: string | null; pending: number; total: number | null; matched: OwnerReturnFact[]; dropped: number; error: string | null }
 export interface WorkInstruction { id: string; message: string; operationId: string; acknowledgedAt: string | null; evidence: string | null }
 export interface WorkHistory { id: string; kind: string; at: string; summary: string }
 export interface WorkSessionBinding {

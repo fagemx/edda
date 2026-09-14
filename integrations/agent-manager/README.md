@@ -210,14 +210,22 @@ the recorded hand-off chain), the native phase from the task rail, delivery rece
 observed sessions and owner inbox, the typed wait target with the evidence that
 produced it, and process liveness (source, heartbeat, staleness) as separate
 fields. Run/session ids stay available but secondary. A bounded **來源關聯** line
-states whether the work's executor source is inside the registry roots this
-project already knows, names the project's other known roots by their selected
-agent names, and says plainly that an empty read does not mean no child is
-working. A session whose native record cannot be read shows `可恢復` with its
+states the relation between the work's executor source and the registry roots this
+project already knows (`in_root`, `not_in_root`, `root_not_registered` or
+`unknown`) and never serializes a registry path. When a registered executor has no
+matching observation here it names the project's other known roots by their
+selected agent names and says plainly that an empty read does not mean no child is
+working; when no executor session is bound yet it names the project's known roots
+and says no executor is bound; when the recorded source has left the selection,
+is not a Pi source, or falls outside the bounded set, it says that instead. A
+session whose native record cannot be read shows `可恢復` with its
 preserved identity, the unreadable record and the bounded recovery point instead
-of vanishing. When a work sets the optional `ownerRef`, the same card shows the
+of vanishing, and that reading stays `可恢復` rather than degrading into a generic
+interruption when the owner inbox reports the same session unavailable. When a
+work sets the optional `ownerRef`, the same card shows the
 owner-bound `edda return` status (owner, holder, pending count and each matched
-return). A fresher native fact — the task rail, a delivery receipt, a bound
+return; an unusable matched return is reported as dropped, never hidden). A
+fresher native fact — the task rail, a delivery receipt, a bound
 session, an owner-inbox event or a posted return — always wins over a stale
 manual stage.
 
@@ -252,7 +260,8 @@ API (same loopback bearer/Host/Origin boundaries as conversations):
   current selection revision and exact instance. See `workflow-contracts.ts`.
 
 Workspaces/executables cannot be supplied in an HTTP action. The adapter calls
-only fixed `task show`, `log`, and `note` argument vectors with no shell. Each
+only fixed `task show`, `log`, `note`, `return status` and `return pending`
+argument vectors with no shell (the last two only when a work sets `ownerRef`). Each
 selected work supports at most 256 coordination events; exceeding that limit
 reports an explicit error, preserving history for a successor task. Per-task
 cross-process locks contain no task state and are released by the OS after a crash.

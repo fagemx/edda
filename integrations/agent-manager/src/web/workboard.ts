@@ -138,6 +138,7 @@ export class WorkBoard {
       const ownerReturn = work.ownerReturn;
       this.details.append(el('p', `負責人回件：${ownerReturn.owner} · ${ownerReturn.holder ? `持有者 ${ownerReturn.holder}` : '尚無持有者'} · 待領取 ${ownerReturn.pending}${ownerReturn.total === null ? '' : ` / 共 ${ownerReturn.total}`}`, 'muted'));
       if (ownerReturn.error) this.details.append(el('p', `負責人回件狀態不可用：${ownerReturn.error}`, 'notice'));
+      if (ownerReturn.dropped > 0) this.details.append(el('p', `有 ${ownerReturn.dropped} 筆負責人回件無法讀取或狀態不在允許範圍；未列入上方清單。`, 'notice'));
       for (const fact of ownerReturn.matched) this.details.append(el('p', `回件 ${fact.work} · ${fact.status} · ${fact.postedAt}${fact.result ? ` · ${fact.result}` : ''} · ${fact.id.slice(0, 12)}`, 'public-text identity'));
     }
     const buttons = el('div', '', 'work-links');

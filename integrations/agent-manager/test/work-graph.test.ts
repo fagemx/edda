@@ -53,6 +53,11 @@ function open(config: ManagerConfig, ledger: WorkflowLedger, root: string, adapt
   const manager = new AgentManager(config, store, adapter, { ledger, locks: new WorkflowLocks(join(root, 'locks')) });
   return { manager, store };
 }
+/** A second projection over the same manager: it has its own per-work read cache,
+ *  so assertions about steady state are not served by a warm cached row. */
+function freshProjection(manager: AgentManager, ledger: WorkflowLedger, root: string): WorkManager {
+  return new WorkManager(manager, ledger, new WorkflowLocks(join(root, 'locks')));
+}
 function sendFor(config: ManagerConfig, agentId: string, instanceId: string): SendRequest {
   const agent = config.agents.find((a) => a.id === agentId)!;
   return { operationId: randomUUID(), selectionRevision: selectionRevision(agent), instanceId, basisCursor: null, mode: 'followUp', message: 'Execute the bounded next step.' };
@@ -282,13 +287,19 @@ test('a corrupt managed state.json degrades one row to recoverable through the r
     await act(manager, 'w', { kind: 'bind_session', agentId: 'degraded', role: 'worker', parentAgentId: 'owner', reviewedSha: null, expectedEvent: 'deliver', nextExpectedAt: null });
     await act(manager, 'w', { kind: 'assign', agentId: 'runner', nextStep: 'Return.', send: sendFor(config, 'runner', instanceId) });
     await manager.refresh();
-    const work = (await manager.works.list()).works[0]!;
+    // The OwnerInbox regenerates an `unavailable` row for this exact degraded
+    // binding, so the recoverable decision is asserted through a fresh projection
+    // (the per-work read cache is bypassed) to prove it holds in steady state.
+    assert.ok(manager.ownerInbox.list().events.some((event) => event.kind === 'unavailable' && event.agentId === 'degraded'));
+    const work = (await freshProjection(manager, ledger, base).list()).works[0]!;
     assert.equal(work.error, null);
     assert.equal(work.phase, 'recoverable');
     assert.equal(work.waitingFor, 'worker');
     assert.match(work.waitEvidence ?? '', /state\.json/);
     assert.match(work.waitEvidence ?? '', /保留身分：degraded\/worker-session/);
     assert.match(work.waitEvidence ?? '', /恢復點：/);
+    // The degraded pending record still outranks the inbox row it produced.
+    assert.doesNotMatch(work.waitEvidence ?? '', /inbox:unavailable/);
   } finally { await manager.stop(); store.close(); rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -318,7 +329,7 @@ test('owner-bound edda return status is projected in the work view and never fai
   ], works: [{ id: 'w1', projectId: 'p', taskId: 7, workspace: root, ownerAgentId: 'owner', ownerRef: 'assistant/owner' },
     { id: 'w2', projectId: 'p', taskId: 8, workspace: root, ownerAgentId: 'owner' }] });
   ledger.returnsImpl = async (binding) => binding.id === 'w1'
-    ? { owner: 'assistant/owner', holder: 'holder-session', pending: 1, total: 2, error: null,
+    ? { owner: 'assistant/owner', holder: 'holder-session', pending: 1, total: 2, dropped: 0, error: null,
         matched: [{ id: 'return-1', work: '7', status: 'done', result: '已回件', postedAt: at(400) }] }
     : null;
   const { manager, store } = open(config, ledger, root, adapterFor((binding) => live(`${binding.id}-session`), instanceId));
@@ -333,10 +344,10 @@ test('owner-bound edda return status is projected in the work view and never fai
     // The work row is not failed by a return read; a missing ownerRef is null.
     assert.equal(second.error, null);
     assert.equal(second.ownerReturn, null);
-    ledger.returnsImpl = async () => ({ owner: 'assistant/owner', holder: null, pending: 0, total: null, matched: [], error: '負責人回件狀態暫時無法讀取；未自動重試。' });
+    ledger.returnsImpl = async () => ({ owner: 'assistant/owner', holder: null, pending: 0, total: null, matched: [], dropped: 0, error: '負責人回件狀態暫時無法讀取；未自動重試。' });
     // A fresh projection avoids the per-work read cache and re-reads the return.
-    const projection = new WorkManager(manager, ledger, new WorkflowLocks(join(root, 'locks')));
-    const degraded = (await projection.list()).works.find((w) => w.id === 'w1')!;
+    const fresh = freshProjection(manager, ledger, root);
+    const degraded = (await fresh.list()).works.find((w) => w.id === 'w1')!;
     assert.equal(degraded.error, null);
     assert.match(degraded.ownerReturn?.error ?? '', /無法讀取/);
   } finally { await manager.stop(); store.close(); rmSync(root, { recursive: true, force: true }); }
@@ -355,7 +366,7 @@ test('the fixed-argument edda return read parses, filters and fails closed', asy
   });
   const binding: WorkBinding = { id: 'w', projectId: 'p', taskId: 7, workspace: '/ws', ownerAgentId: 'a', ownerRef: 'assistant/owner' };
   const view = await ledger.returns(binding);
-  assert.deepEqual(view, { owner: 'assistant/owner', holder: 'holder-session', pending: 2, total: 3, error: null,
+  assert.deepEqual(view, { owner: 'assistant/owner', holder: 'holder-session', pending: 2, total: 3, dropped: 1, error: null,
     matched: [{ id: 'm1', work: '7', status: 'done', result: 'ok', postedAt: at(2) }] });
   assert.deepEqual(calls[0], ['return', 'status', '--owner', 'assistant/owner', '--json']);
   assert.deepEqual(calls[1], ['return', 'pending', '--owner', 'assistant/owner', '--json']);
@@ -363,6 +374,7 @@ test('the fixed-argument edda return read parses, filters and fails closed', asy
   const degraded = await broken.returns(binding);
   assert.equal(degraded?.error === null, false);
   assert.deepEqual(degraded?.matched, []);
+  assert.equal(degraded?.dropped, 0);
   assert.equal(await broken.returns({ id: 'w', projectId: 'p', taskId: 7, workspace: '/ws', ownerAgentId: 'a' }), null);
 });
 

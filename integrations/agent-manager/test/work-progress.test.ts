@@ -342,8 +342,27 @@ test('only an interruption for the pending binding interrupts the hand-off (GH11
   assert.equal(pending.waitingFor, 'worker');
 });
 
+test('a degraded pending session stays recoverable even with the inbox row it produces (#1196 F1)', () => {
+  const degraded = observation('worker', { state: 'unavailable', source: 'unavailable', stale: true,
+    degraded: { code: 'record_unavailable', record: 'state.json', message: 'State record unreadable', recovery: 'Use the identity shown.' } });
+  // The OwnerInbox regenerates exactly this row for the same degraded binding.
+  const inbox = [inboxEvent('unavailable', LATER, 'Session 證據不可用或身分已改變；未自動重新派工。', 'binding-worker')];
+  const result = derive(view({ stage: 'executing', updatedAt: at(2) }), [degraded], inbox);
+  assert.equal(result.phase, 'recoverable');
+  assert.equal(result.waitingFor, 'worker');
+  assert.match(result.waitEvidence ?? '', /state\.json/);
+  assert.match(result.waitEvidence ?? '', /恢復點：/);
+  assert.doesNotMatch(result.waitEvidence ?? '', /inbox:unavailable/);
+
+  // A stopped (not degraded) or healthy pending session still reads through the
+  // pending-scoped inbox interruption it produced.
+  const stopped = observation('worker', { state: 'stopped', source: 'unavailable', stale: true, reason: '執行 session 已停止。' });
+  assert.equal(derive(view({ stage: 'executing', updatedAt: at(2) }), [stopped], inbox).phase, 'interrupted');
+  assert.equal(derive(view({ stage: 'executing', updatedAt: at(2) }), [observation('worker', { state: 'idle' })], inbox).phase, 'interrupted');
+});
+
 test('a fresher owner return outranks only the stale manual stage', () => {
-  const ownerReturn = { owner: 'owner-ref', holder: null, pending: 1, total: 2, error: null,
+  const ownerReturn = { owner: 'owner-ref', holder: null, pending: 1, total: 2, dropped: 0, error: null,
     matched: [{ id: 'return-1', work: '7', status: 'done' as const, result: '原生回件已完成。', postedAt: at(400) }] };
   const fresher = derive(view({ stage: 'executing', updatedAt: at(300), ownerReturn }), [observation('worker')]);
   assert.equal(fresher.phase, 'completed');

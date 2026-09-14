@@ -55,6 +55,9 @@ function empty(binding: WorkBinding): WorkView {
 const INTERRUPTING_INBOX: readonly OwnerInboxKind[] = ['interrupted', 'provider_error', 'unavailable', 'overdue'];
 const PROGRESS_STATES: readonly RuntimeState[] = ['running', 'executing_tool'];
 const MAX_WAIT_EVIDENCE = 300;
+// The owner-return read spawns fixed-argument `edda` processes, so it is cached
+// per work and never re-spawned from the mutation path that holds the task lock.
+const RETURN_CACHE_MS = 15000;
 export interface NativeWorkInputs { task: CanonicalTask; view: WorkView; agents: AgentView[]; inbox: OwnerInboxEvent[] }
 export interface NativeWorkProgress { phase: WorkPhase; waitingFor: WorkWaitingFor; waitEvidence: string | null }
 interface BoundSession { session: WorkSessionBinding; agent: AgentView | null }
@@ -141,7 +144,21 @@ export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress 
   // 9.
   const waitingUser = bound.find(b => observedAs(b.agent, 'waiting_user'));
   if (waitingUser) { note(`session:${waitingUser.session.agentId}/${waitingUser.session.role}:waiting_user`); return finish('waiting', 'user_decision'); }
-  // 10. A fresh owner-inbox interruption applies only to the hand-off this work
+  // 10. A corrupt native record for the pending session is `recoverable`, never
+  // an empty `waiting`: the binding identity is preserved, the unreadable record
+  // is named, and the bounded recovery point is shown. This is decided before the
+  // owner-inbox interruption because the inbox regenerates exactly one
+  // `unavailable` row for this same degraded binding — that row is a consequence
+  // of the unreadable record, not a separate, more specific fact, and letting it
+  // win would replace the record name and recovery point with `interrupted`.
+  if (pendingDegraded && pending.session) {
+    note(pending.evidence);
+    note(`record:${pendingDegraded.record} 無法讀取（${pendingDegraded.code}）：${pendingDegraded.message}`);
+    note(`保留身分：${pending.session.session.agentId}/${pending.session.session.sessionId}`);
+    note(pendingDegraded.recovery ? `恢復點：${pendingDegraded.recovery}` : '恢復點：無法取得；請先確認來源後再繼續。');
+    return finish('recoverable', pending.side);
+  }
+  // 11. A fresh owner-inbox interruption applies only to the hand-off this work
   // is actually waiting on. An event for another bound session is liveness, and
   // the pending wait target is preserved (GH1189 F3).
   const ledgerAt = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
@@ -154,22 +171,12 @@ export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress 
     note(pending.evidence);
     return finish('interrupted', pending.side);
   }
-  // 11. A stopped pending session interrupts only the role this work waits on.
+  // 12. A stopped pending session interrupts only the role this work waits on.
   if (pendingStopped && pending.session) {
     note(pending.evidence);
     note(`session:${pending.session.session.agentId}/${pending.session.session.role}:stopped`);
     note(pending.session.agent?.reason?.slice(0, 160));
     return finish('interrupted', pending.side);
-  }
-  // 12. A corrupt native record for the pending session is `recoverable`, never
-  // an empty `waiting`: the binding identity is preserved, the unreadable record
-  // is named, and the bounded recovery point is shown.
-  if (pendingDegraded && pending.session) {
-    note(pending.evidence);
-    note(`record:${pendingDegraded.record} 無法讀取（${pendingDegraded.code}）：${pendingDegraded.message}`);
-    note(`保留身分：${pending.session.session.agentId}/${pending.session.session.sessionId}`);
-    note(pendingDegraded.recovery ? `恢復點：${pendingDegraded.recovery}` : '恢復點：無法取得；請先確認來源後再繼續。');
-    return finish('recoverable', pending.side);
   }
   // 13. A delivery receipt accepted/queued/unconfirmed without an observed
   // start is `launched`, not yet `working`.
@@ -224,6 +231,10 @@ function apply(view: WorkView, action: WorkAction, at: string, target: AgentBind
 export class WorkManager {
   private transportStoreId: string;
   private cache = new Map<string, { at: number; view: WorkView }>();
+  // Owner-return facts are cached per work. A mutation read reuses the cache and
+  // never spawns the fixed `edda return` reads while it holds the per-task lock,
+  // so a slow CLI cannot extend a lock hold (#1196 review F5).
+  private returns = new Map<string, { at: number; value: OwnerReturnView | null }>();
   private reads = new Map<string, Promise<ReadWork>>();
   private queue = new Map<string, Promise<unknown>>();
   private refreshing: Promise<void> | null = null;
@@ -266,13 +277,12 @@ export class WorkManager {
     const pending = this.reads.get(binding.id); if (pending) return pending;
     const promise = this.doRead(binding, agents).finally(() => this.reads.delete(binding.id)); this.reads.set(binding.id, promise); return promise;
   }
-  private async doRead(binding: WorkBinding, agents?: AgentView[]): Promise<ReadWork> {
+  private async doRead(binding: WorkBinding, agents?: AgentView[], options: { returns?: boolean } = {}): Promise<ReadWork> {
     // A return read is fail-closed inside the ledger and never blocks the row; a
     // ledger that throws unexpectedly still degrades to an honest unavailable DTO.
-    const returnRead = (this.ledger.returns ? this.ledger.returns(binding) : Promise.resolve(null))
-      .catch((): OwnerReturnView | null => binding.ownerRef
-        ? { owner: binding.ownerRef, holder: null, pending: 0, total: null, matched: [], error: '負責人回件狀態暫時無法讀取；未自動重試。' } : null);
-    const [task, notes, ownerReturn] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding), returnRead]);
+    // A mutation read (`returns: false`) only reuses the cached snapshot.
+    const ownerReturn = await this.ownerReturns(binding, options.returns !== false);
+    const [task, notes] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding)]);
     const events: ReadWork['events'] = [];
     for (const note of notes) {
       if (!note.text.startsWith(PREFIX)) continue;
@@ -342,6 +352,18 @@ export class WorkManager {
     view.phase = native.phase; view.waitingFor = native.waitingFor; view.waitEvidence = native.waitEvidence;
     this.cache.set(binding.id, { at: Date.now(), view }); return { task, events: ordered, view };
   }
+  /** Cached, fail-closed owner-return read. `spawn: false` (the mutation path)
+   *  never starts a process and reuses the last snapshot, so a slow CLI cannot
+   *  extend a lock hold; a cold cache simply projects `null` until the next read. */
+  private async ownerReturns(binding: WorkBinding, spawn: boolean): Promise<OwnerReturnView | null> {
+    const cached = this.returns.get(binding.id);
+    if (!spawn || (cached && Date.now() - cached.at < RETURN_CACHE_MS)) return cached?.value ?? null;
+    const value = await (this.ledger.returns ? this.ledger.returns(binding) : Promise.resolve(null))
+      .catch((): OwnerReturnView | null => binding.ownerRef
+        ? { owner: binding.ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: '負責人回件狀態暫時無法讀取；未自動重試。' } : null);
+    this.returns.set(binding.id, { at: Date.now(), value });
+    return value;
+  }
   /** Bounded known-root relation (GH1181 case1). Cheap: it reuses the config,
    *  the pass's observation snapshot and opaque root labels — discovery is never
    *  polled here, and no registry path is serialized. */
@@ -401,7 +423,7 @@ export class WorkManager {
   private async perform(binding: WorkBinding, action: WorkAction): Promise<WorkView> {
     // Await and discard any pre-lock read before obtaining the mutation snapshot.
     await this.reads.get(binding.id)?.catch(() => {});
-    const current = await this.doRead(binding), fingerprint = hash(JSON.stringify(action));
+    const current = await this.doRead(binding, undefined, { returns: false }), fingerprint = hash(JSON.stringify(action));
     const duplicate = current.events.find((e) => e.action.actionId === action.actionId);
     if (duplicate) {
       if (duplicate.fingerprint !== fingerprint) throw new ManagerError('ACTION_CONFLICT', '這個交接編號已有不同內容。', 409);
@@ -416,7 +438,7 @@ export class WorkManager {
           await this.manager.send(selected.id, action.send);
         }
       }
-      return { ...(await this.doRead(binding)).view, confirmedActionId: action.actionId };
+      return { ...(await this.doRead(binding, undefined, { returns: false })).view, confirmedActionId: action.actionId };
     }
     if (current.view.revision !== action.revision) throw new ManagerError('STALE_WORK', '工作已被更新，請查看最新狀態後再操作。', 409);
     this.validate(current.view, action);
@@ -446,18 +468,18 @@ export class WorkManager {
     await this.ledger.append(binding, encoded);
     // Re-read the ledger before the effect: detect an external writer that
     // ignored the mutex. An uncertain append/send is never retried automatically.
-    const written = await this.doRead(binding);
+    const written = await this.doRead(binding, undefined, { returns: false });
     if (written.events.at(-1)?.action.actionId !== action.actionId) throw new ManagerError('LEDGER_CONFLICT', '交接紀錄已被其他管理者更新，尚未傳送訊息。', 409);
     if (target && (action.kind === 'assign' || action.kind === 'intervene')) {
       try { await this.manager.send(target.id, action.send); }
       catch (error) {
         // Durable ledger intent remains authoritative even if preflight changes
         // between recording and send. Absence of transport evidence is unknown.
-        const view = (await this.doRead(binding)).view;
+        const view = (await this.doRead(binding, undefined, { returns: false })).view;
         return { ...view, error: error instanceof ManagerError ? error.message : '傳送結果尚待確認；請查詢原交接編號。', confirmedActionId: action.actionId };
       }
     }
-    return { ...(await this.doRead(binding)).view, confirmedActionId: action.actionId };
+    return { ...(await this.doRead(binding, undefined, { returns: false })).view, confirmedActionId: action.actionId };
   }
   private validate(view: WorkView, action: WorkAction): void {
     const fail = (message: string): never => { throw new ManagerError('INVALID_TRANSITION', message, 409); };
