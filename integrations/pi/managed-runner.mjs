@@ -169,7 +169,19 @@ try {
     catch { /* intent remains unknown; never replay */ }
     save();
   }
-  heartbeat = setInterval(() => { if (!stopped) { queryState(); save(); } }, 2000);
+  // A transient Windows replace failure (EPERM/EBUSY while a reader or scanner
+  // holds the record) must not kill a live run from its heartbeat. The failure is
+  // kept as a typed field on the live state, so the runner endpoint and
+  // `run-status` report it, and the next heartbeat retries the write.
+  heartbeat = setInterval(() => {
+    if (stopped) return;
+    queryState();
+    try { delete state.writeError; save(); }
+    catch (error) {
+      state.writeError = { code: error.code || 'write_failed', record: error.record || 'state.json', at: new Date().toISOString() };
+      console.error(`managed runner ${runId}: state write failed (${state.writeError.code}); runner stays live and retries next heartbeat`);
+    }
+  }, 2000);
   while (!stopped && child.exitCode === null && child.signalCode === null && !rpcError) await delay(200);
   if (!stopped) { state.phase = rpcError ? 'failed' : 'exited'; state.error = rpcError?.message || 'Pi process exited'; save(); }
 } catch (error) {

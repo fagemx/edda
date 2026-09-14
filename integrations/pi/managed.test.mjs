@@ -14,6 +14,7 @@ import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConver
 import { requestSession } from './client.mjs';
 import { readJson, writeJson } from './store.mjs';
 import { listInbox } from './inbox-manager.mjs';
+import { listManagedRuns } from './activation.mjs';
 
 const exec = promisify(execFile);
 async function until(fn) {
@@ -230,4 +231,28 @@ test('managed runner strips an inherited owner identity and passes only the conf
   assert.equal(captured.owner, null);
   assert.equal(captured.returnOwner, 'assistant/real-return');
   assert.equal(captured.returnRoot, join(f.registry, 'owner-mailbox'));
+});
+
+test('a live managed run survives a reader walk over the registry while its heartbeat rewrites state (GH #1215)', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
+  await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
+  // The reader entry the incident named: `edda-pi runs` / `listManagedRuns` walks
+  // every managed `state.json` through readRecord, while the runner's 2 s
+  // heartbeat replaces the same record. Across several heartbeat windows the run
+  // must stay live and never record a failed write.
+  const deadline = Date.now() + 9000;
+  let passes = 0, degraded = 0;
+  while (Date.now() < deadline) {
+    const rows = listManagedRuns(f.registry).runs;
+    passes += 1;
+    assert.ok(rows.some((row) => row.runId === f.runId), 'the run stays visible to the reader walk');
+    const status = await managedStatus(f.registry, f.runId);
+    if (status.status !== 'ready' || status.live !== true) degraded += 1;
+    await delay(25);
+  }
+  assert.ok(passes >= 100, `the reader walked the registry ${passes} times`);
+  assert.equal(degraded, 0, 'the live run never degraded or died during the reader walk');
+  assert.equal(readJson(join(managedDir(f.registry, f.runId), 'state.json')).writeError, undefined, 'no write was reported failed');
+  await stopManaged(f.registry, f.runId);
 });
