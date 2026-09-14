@@ -130,3 +130,74 @@ fn recovery_verbs_see_a_worktree_launched_plan_from_the_main_repo() {
     .unwrap();
     assert_eq!(state["plan_status"], "aborted");
 }
+
+/// GH-557 review round 1 P2: the production registry writer in `run` must be
+/// exercised end to end. The agent is made unavailable via PATH so `run`
+/// stops right after recording the store, before any phase executes.
+#[test]
+fn conduct_run_records_the_store_before_launching_the_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("main");
+    let wt = tmp.path().join("wt");
+    std::fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-q"]);
+    git(&main, &["config", "user.email", "t@example.invalid"]);
+    git(&main, &["config", "user.name", "Test"]);
+    std::fs::write(main.join("README"), "seed\n").unwrap();
+    git(&main, &["add", "README"]);
+    git(&main, &["commit", "-qm", "seed"]);
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "wtbranch",
+        ],
+    );
+
+    let plan = tmp.path().join("plan.yaml");
+    std::fs::write(
+        &plan,
+        "name: recorded\nphases:\n  - id: p1\n    prompt: x\n",
+    )
+    .unwrap();
+
+    // An empty PATH makes the agent launcher unavailable, so `run` fails at
+    // `build_launcher` — after it has recorded the store and before any phase
+    // runs. No agent binary is required for this test.
+    let empty_bin = tmp.path().join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_edda"))
+        .current_dir(&main)
+        .env("PATH", &empty_bin)
+        .args(["conduct", "run"])
+        .arg(&plan)
+        .args(["--cwd", wt.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "run must fail when the agent is unavailable: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let registry = wt
+        .join(".edda")
+        .join("conductor")
+        .join(".store-registry.json");
+    assert!(
+        registry.is_file(),
+        "run must record the store registry before launching; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let map: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry).unwrap()).unwrap();
+    assert_eq!(
+        map["recorded"].as_str().unwrap(),
+        wt.to_string_lossy(),
+        "the registry must point at the launch store"
+    );
+}

@@ -200,7 +200,7 @@ pub fn run(
                     plan.phases.len()
                 );
             }
-            PlanState::from_plan(&plan, &plan_file.display().to_string())
+            PlanState::from_plan(&plan, &absolute_plan_path(plan_file))
         }
     };
 
@@ -470,18 +470,39 @@ pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Resul
 
     println!("Phase \"{phase_id}\" reset to Pending.");
     println!("  store: {}", store.display());
-    if plan_file.is_empty() {
-        println!(
-            "  resume: `edda conduct run <plan.yaml> --cwd {}`",
-            store.display()
-        );
-    } else {
-        println!(
-            "  resume: `edda conduct run {plan_file} --cwd {}`",
-            store.display()
-        );
-    }
+    println!("  resume: {}", resume_hint(&plan_file, &store));
     Ok(())
+}
+
+/// Absolute, cwd-independent spelling of the plan file for state memory.
+///
+/// The state's `plan_file` is displayed and re-used in recovery hints, so a
+/// path left relative to the launch cwd would suggest a command that fails
+/// from any other cwd (GH-557 review round 1 P1).
+fn absolute_plan_path(plan_file: &Path) -> String {
+    std::fs::canonicalize(plan_file)
+        .or_else(|_| {
+            if plan_file.is_absolute() {
+                Ok(plan_file.to_path_buf())
+            } else {
+                std::env::current_dir().map(|cwd| cwd.join(plan_file))
+            }
+        })
+        .unwrap_or_else(|_| plan_file.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// The resume command a recovery verb recommends. A relative plan path is
+/// resolved against a launch cwd the state does not record, so it is printed
+/// as a placeholder rather than as a command that would fail elsewhere.
+fn resume_hint(plan_file: &str, store: &Path) -> String {
+    let plan = if plan_file.is_empty() || !Path::new(plan_file).is_absolute() {
+        "<plan.yaml>".to_string()
+    } else {
+        plan_file.to_string()
+    };
+    format!("`edda conduct run {plan} --cwd {}`", store.display())
 }
 
 /// Execute `edda conduct skip <phase-id>`

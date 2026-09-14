@@ -433,3 +433,27 @@ fn missing_plan_error_names_the_searched_stores() {
         "error must name the searched worktree store, got: {err}"
     );
 }
+
+/// GH-557 review round 1 P1: the resume hint must never embed a plan path
+/// that is relative to a launch cwd the state does not record.
+#[test]
+fn resume_hint_does_not_embed_a_cwd_relative_plan_path() {
+    let store = Path::new("C:/work/wt");
+    assert_eq!(
+        resume_hint("plans/x.yaml", store),
+        "`edda conduct run <plan.yaml> --cwd C:/work/wt`"
+    );
+    let abs = if cfg!(windows) {
+        "C:/work/plans/x.yaml"
+    } else {
+        "/work/plans/x.yaml"
+    };
+    assert_eq!(
+        resume_hint(abs, store),
+        format!("`edda conduct run {abs} --cwd C:/work/wt`")
+    );
+    assert_eq!(
+        resume_hint("", store),
+        "`edda conduct run <plan.yaml> --cwd C:/work/wt`"
+    );
+}

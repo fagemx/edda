@@ -119,9 +119,8 @@ pub(super) fn read_registry(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
 /// about and skipped rather than destroyed.
 pub(super) fn record_registry(root: &Path, plan: &str, store: &Path) {
     let path = registry_path(root);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // `lock_file` and `write_atomic` each create the parent directory and
+    // report their own failure, so no separate create is needed here.
     let lock_path = PathBuf::from(format!("{}.lock", path.display()));
     let lock = match edda_store::lock_file(&lock_path) {
         Ok(l) => l,
