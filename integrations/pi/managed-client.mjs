@@ -34,7 +34,17 @@ export async function adoptOwner(root, runId, { owner, returnOwner, ownerRoot } 
   if (typeof owner !== 'string' || !/^[\p{L}\p{N}_.@ /:-]{1,200}$/u.test(owner)) throw new Error('Invalid owner reference');
   if (returnOwner !== undefined && returnOwner !== null && (typeof returnOwner !== 'string' || !/^[\p{L}\p{N}_.@ /:-]{1,200}$/u.test(returnOwner))) throw new Error('Invalid return-owner label');
   if (ownerRoot !== undefined && ownerRoot !== null && (typeof ownerRoot !== 'string' || !isAbsolute(ownerRoot))) throw new Error('owner-root must be an absolute path');
-  return runnerRequest(root, runId, 'owner', { body: { owner, returnOwner: returnOwner ?? null, ownerRoot: ownerRoot ?? null } });
+  try {
+    return await runnerRequest(root, runId, 'owner', { body: { owner, returnOwner: returnOwner ?? null, ownerRoot: ownerRoot ?? null } });
+  } catch (error) {
+    // A run pinned to a runtime older than the adoption endpoint cannot be
+    // adopted in place; name the pinned release and the supported re-pin path.
+    if (/Unknown managed operation/.test(error.message)) {
+      const { config } = runConfig(root, runId);
+      throw new Error(`Run '${runId}' is pinned to runtime ${config.release?.id ?? 'unknown'}, which has no owner-adopt endpoint. Stop it and run 'edda-pi run-resume ${runId} --runtime current' to re-pin the installed runtime, then adopt again.`);
+    }
+    throw error;
+  }
 }
 export async function managedStatus(root, id) {
   id = validateId(id);
@@ -199,9 +209,10 @@ export async function managedConversation(root, id, options = {}) {
     notice: 'Read-only persisted public history recovered from the owned session directory because the run state record is unreadable. Not live branch or process proof; no session was resumed.' };
 }
 
-export async function resumeManaged(root, id) {
+export async function resumeManaged(root, id, { runtime = 'pinned' } = {}) {
   id = validateId(id);
-  const { dir, config } = runConfig(root, id);
+  if (runtime !== 'pinned' && runtime !== 'current') throw new Error("--runtime must be 'pinned' or 'current'");
+  let { dir, config } = runConfig(root, id);
   const lock = join(dir, 'resume.lock');
   const fd = openSync(lock, 'wx', 0o600);
   try {
@@ -218,6 +229,16 @@ export async function resumeManaged(root, id) {
     const piOwner = readJson(join(sessionDir(root, state.sessionId), 'owner.json'));
     if (alive(state.childPid) || alive(piOwner?.pid)) throw new Error('Previous Pi may still be alive; recovery refused');
     if (piOwner) recover(root, state.sessionId, piOwner.instanceId);
+    // Explicit opt-in re-pin: keep the pinned runtime by default (existing runs
+    // are not upgraded in place), but allow adopting a run whose pinned release
+    // predates the current lifecycle by resuming it from the installed release.
+    if (runtime === 'current') {
+      const installed = installRuntime(root);
+      if (installed.id !== config.release?.id) {
+        config = { ...config, release: installed };
+        writeJson(join(dir, 'config.json'), config);
+      }
+    }
     verifyRelease(config.release);
     const serviceId = startRunner(root, dir, config, true);
     return await awaitLaunch(root, id, serviceId);

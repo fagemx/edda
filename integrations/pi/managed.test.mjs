@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile, copyFile, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat, copyFile, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -192,6 +192,39 @@ test('system-style ancestor aliases do not reject an owned session during resume
       if (status.live) await stopManaged(registry, launched.runId, { abort: true });
     }
   }
+});
+
+const packageRoot = fileURLToPath(new URL('.', import.meta.url));
+// A second, valid release whose cli differs from the installed package; pins a
+// run to a runtime that is not the current one.
+async function mutantRelease(registry, root) {
+  const source = join(root, 'mutant-pi');
+  await mkdir(source, { recursive: true });
+  for (const name of await readdir(packageRoot)) {
+    const src = join(packageRoot, name);
+    if ((await stat(src)).isFile()) await copyFile(src, join(source, name));
+  }
+  await writeFile(join(source, 'cli.mjs'), (await readFile(join(source, 'cli.mjs'), 'utf8')) + '\n// mutant release marker\n');
+  return installRuntime(registry, source);
+}
+
+test('run-resume --runtime current re-pins a run but the default keeps the pinned runtime', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
+  await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
+  await stopManaged(f.registry, f.runId);
+  const dir = managedDir(f.registry, f.runId);
+  const config = JSON.parse(await readFile(join(dir, 'config.json'), 'utf8'));
+  const mutant = await mutantRelease(f.registry, f.root);
+  assert.notEqual(mutant.id, config.release.id);
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ ...config, release: mutant }));
+  // Default resume keeps the pinned runtime (existing runs are not upgraded in place).
+  await resumeManaged(f.registry, f.runId);
+  assert.equal(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).release.id, mutant.id);
+  await stopManaged(f.registry, f.runId);
+  // Explicit re-pin moves the run to the installed runtime.
+  await resumeManaged(f.registry, f.runId, { runtime: 'current' });
+  assert.equal(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')).release.id, config.release.id);
 });
 
 test('managed launch records the stable owner reference and exposes it even when state is unreadable', async (t) => {

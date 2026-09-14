@@ -157,7 +157,9 @@ edda-pi owner adopt --run <runId> --owner assistant/<project> [--return-owner RE
 
 The runner persists the owner and the runtime claims pending returns on the next natural live turn — the same
 run and session are preserved (no restart, no replayed prompt). Until adoption, `edda-pi send` is the only
-continuity and it is session-addressed, not owner-bound.
+continuity and it is session-addressed, not owner-bound. If `owner adopt` reports the run is pinned to an older
+runtime without the adoption endpoint, stop it and re-pin the installed runtime with
+`edda-pi run-resume <runId> --runtime current` (same session, no prompt replay), then adopt again.
 
 ## Hand-opened sessions are not wired automatically
 
