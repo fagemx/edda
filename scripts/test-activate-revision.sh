@@ -83,7 +83,13 @@ else
   cat "$work/dry.txt" >&2
   fail "driver --dry-run exited non-zero"
 fi
-grep -q "^plan: cargo install" "$work/dry.txt" || fail "dry run did not plan the shipping binary"
+grep -q "^plan: cargo build --release -p edda" "$work/dry.txt" || fail "dry run did not plan the default build+copy shipping-binary step"
+if sh "$driver" --repo "$fixture" --manager-root "$work/manager" --offline --allow-stale --cargo-install --dry-run >"$work/dry-cargo.txt" 2>&1; then
+  grep -q "^plan: cargo install --path crates/edda-cli --force" "$work/dry-cargo.txt" || fail "--cargo-install did not plan cargo install"
+  pass "--cargo-install selects the cargo install path"
+else
+  fail "--cargo-install dry run exited non-zero"
+fi
 grep -q "^plan: npm pack" "$work/dry.txt" || fail "dry run did not plan the Pi package"
 grep -q "manager-release" "$work/dry.txt" || fail "dry run did not plan the agent-manager step"
 grep -q "dry run complete; nothing was changed" "$work/dry.txt" || fail "dry run did not report a no-op"
@@ -161,6 +167,42 @@ fi
 [ "$before_guarded" = "$(git -C "$guarded" status --porcelain)" ] || fail "forced dry run modified the guarded checkout"
 [ ! -e "$work/none" ] || fail "forced dry run created a manager root"
 pass "forced dry run mutates nothing"
+
+# The long build child must not outlive an interrupted route (GH #1209).
+stub_bin="$work/bin"
+mkdir -p "$stub_bin"
+cat > "$stub_bin/cargo" <<'STUB'
+#!/bin/sh
+echo $$ > "$STUB_PID_FILE"
+sleep 30 &
+echo $! > "$STUB_GRANDCHILD_FILE"
+wait
+STUB
+chmod +x "$stub_bin/cargo"
+STUB_PID_FILE="$work/stub.pid"; export STUB_PID_FILE
+STUB_GRANDCHILD_FILE="$work/stub-grandchild.pid"; export STUB_GRANDCHILD_FILE
+PATH="$stub_bin:$PATH" sh "$driver" --repo "$fixture" --offline --allow-stale --allow-downgrade \
+  --no-pi --no-manager --edda-bin edda >"$work/interrupt.txt" 2>&1 &
+driver_pid=$!
+i=0
+while [ ! -s "$work/stub-grandchild.pid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+stub_pid=$(cat "$work/stub.pid" 2>/dev/null || true)
+grandchild_pid=$(cat "$work/stub-grandchild.pid" 2>/dev/null || true)
+if [ -z "$stub_pid" ] || [ -z "$grandchild_pid" ]; then
+  kill -TERM "$driver_pid" 2>/dev/null || true
+  fail "stub cargo never started; cannot test interrupt safety"
+fi
+kill -TERM "$driver_pid" 2>/dev/null || true
+sleep 2
+alive=""
+if kill -0 "$stub_pid" 2>/dev/null; then alive="$alive $stub_pid"; fi
+if kill -0 "$grandchild_pid" 2>/dev/null; then alive="$alive $grandchild_pid"; fi
+if [ -n "$alive" ]; then
+  for p in $alive; do kill -KILL "$p" 2>/dev/null || true; done
+  fail "an interrupted route left build processes running:$alive"
+fi
+wait "$driver_pid" 2>/dev/null || true
+pass "interrupt terminates the route's build child and its grandchild"
 
 # An unobservable installed identity must not read as "safe to overwrite".
 mkdir -p "$work/empty-client"

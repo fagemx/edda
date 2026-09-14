@@ -74,8 +74,13 @@ sh scripts/activation/activate-revision.sh --repo C:/ai_agent/edda
 
 Steps, in order, each also valid to run alone:
 
-1. **shipping binary** — `cargo install --path crates/edda-cli --force` (or copy a
-   verified prebuilt artifact with `--edda-from`), then verify `edda --version`
+1. **shipping binary** — build + copy-install by default
+   (`cargo build --release -p edda`, then copy `target/release/edda` over the
+   resolved `edda`), or a verified prebuilt artifact with `--edda-from`; `--cargo-install`
+   selects `cargo install --path crates/edda-cli --force`. A long build is tracked and
+   terminated if the route is interrupted, and a copy either works or reports the
+   Windows lock instead of failing a move after a long link (GH #1209). Then verify
+   `edda --version`
    matches the target revision. A running process holding the old file installs by
    copy instead of rebuild (GH #1133).
 2. **Pi package** — `npm pack ./integrations/pi --ignore-scripts`,

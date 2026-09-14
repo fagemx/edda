@@ -176,17 +176,29 @@ function eddaLeg(binary, runVersion) {
 // when invoked as `node integrations/pi/activation-receipt.mjs`. Measuring the
 // source tree as "installed" would make the Pi leg compare a directory to
 // itself, so resolve the global install explicitly and report the source used.
-function resolveClientRoot(explicit) {
-  if (typeof explicit === 'string' && explicit) return { root: resolve(explicit), source: 'explicit' };
-  if (typeof process.env.EDDA_PI_PACKAGE_ROOT === 'string' && process.env.EDDA_PI_PACKAGE_ROOT) {
-    return { root: resolve(process.env.EDDA_PI_PACKAGE_ROOT), source: 'env' };
-  }
+// `env`/`execPath` are injectable so the candidate list is testable.
+export function clientRootCandidates(env = process.env, execPath = process.execPath) {
   const packagePath = '@edda/pi-session-channel';
-  const execDir = dirname(process.execPath);
-  for (const [candidate, source] of [
+  const execDir = dirname(execPath);
+  const candidates = [
     [join(execDir, 'node_modules', packagePath), 'global'],
     [join(execDir, '..', 'lib', 'node_modules', packagePath), 'global'],
-  ]) {
+  ];
+  // npm's global prefix without spawning npm: the configured prefix when present,
+  // then the platform defaults. A standard Windows install is %APPDATA%\npm, which
+  // is neither beside node.exe nor under ../lib (GH #1220).
+  if (env.npm_config_prefix) candidates.push([join(env.npm_config_prefix, 'node_modules', packagePath), 'global']);
+  if (env.APPDATA) candidates.push([join(env.APPDATA, 'npm', 'node_modules', packagePath), 'global']);
+  if (env.HOME) candidates.push([join(env.HOME, '.npm-global', 'lib', 'node_modules', packagePath), 'global']);
+  return candidates;
+}
+
+export function resolveClientRoot(explicit, env = process.env, execPath = process.execPath) {
+  if (typeof explicit === 'string' && explicit) return { root: resolve(explicit), source: 'explicit' };
+  if (typeof env.EDDA_PI_PACKAGE_ROOT === 'string' && env.EDDA_PI_PACKAGE_ROOT) {
+    return { root: resolve(env.EDDA_PI_PACKAGE_ROOT), source: 'env' };
+  }
+  for (const [candidate, source] of clientRootCandidates(env, execPath)) {
     try {
       const info = lstatSync(candidate);
       if (info.isDirectory() && !info.isSymbolicLink()) return { root: resolve(candidate), source };
@@ -316,16 +328,25 @@ async function managerLeg(managerRoot, timeoutMs, fetchImpl) {
       if (response.status === 200) {
         let body = null;
         try { body = await response.json(); } catch { body = null; }
-        if (body && typeof body === 'object') {
+        // A 200 with a partial body is not proof the service is healthy: the
+        // endpoint's contract is {version, startedAt, agents}.
+        const usableBody = body && typeof body === 'object' && typeof body.startedAt === 'string' &&
+          (typeof body.agents === 'number' || typeof body.agents === 'string') && body.version !== undefined;
+        if (usableBody) {
           leg.health = 'ok';
-          leg.service = { version: body.version ?? null, startedAt: body.startedAt ?? null, agents: body.agents ?? null };
-        } else { leg.health = 'invalid'; leg.error = leg.error || 'Unusable service response'; }
+          leg.service = { version: body.version, startedAt: body.startedAt, agents: body.agents };
+        } else { leg.health = 'invalid'; leg.error = leg.error || 'Incomplete service response'; }
       } else if (response.status === 401 || response.status === 403) leg.health = 'unauthenticated';
       else { leg.health = 'unreachable'; leg.error = leg.error || `Service status ${response.status}`; }
     } else if (response && typeof response === 'object') {
-      // Injectable stub that returns the service body directly.
-      leg.health = 'ok';
-      leg.service = { version: response.version ?? null, startedAt: response.startedAt ?? null, agents: response.agents ?? null };
+      // Injectable stub that returns the service body directly; it must still
+      // satisfy the endpoint contract to count as healthy.
+      const stubUsable = typeof response.startedAt === 'string' &&
+        (typeof response.agents === 'number' || typeof response.agents === 'string') && response.version !== undefined;
+      if (stubUsable) {
+        leg.health = 'ok';
+        leg.service = { version: response.version, startedAt: response.startedAt, agents: response.agents };
+      } else { leg.health = 'invalid'; leg.error = leg.error || 'Incomplete service response'; }
     } else { leg.health = 'invalid'; leg.error = leg.error || 'Unusable service response'; }
   } catch (error) { leg.health = 'unreachable'; leg.error = leg.error || shortError(error); }
   return leg;

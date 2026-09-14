@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { RECEIPT_VERSION, releaseIdentity, activationReceipt, evaluateCoherence } from './activation-receipt.mjs';
+import { RECEIPT_VERSION, releaseIdentity, activationReceipt, evaluateCoherence, resolveClientRoot, clientRootCandidates } from './activation-receipt.mjs';
 import { installRuntime } from './managed-store.mjs';
 
 const exec = promisify(execFile);
@@ -333,6 +333,52 @@ test('a manager without release metadata fails closed', async (t) => {
   assert.equal(receipt.manager.configured, null);
   assert.equal(receipt.coherence.status, 'drift');
   assert.ok(receipt.coherence.findings.some((finding) => finding.code === 'manager_configured_revision_unknown'));
+});
+
+test('installed-root resolution covers standard npm global prefixes (GH #1220)', async (t) => {
+  const dir = await fixture(t);
+  const env = { npm_config_prefix: join(dir, 'prefix'), APPDATA: join(dir, 'appdata'), HOME: join(dir, 'home') };
+  const fakeExec = join(dir, 'node', 'node.exe');
+  const candidates = clientRootCandidates(env, fakeExec).map(([path]) => path);
+  assert.ok(candidates.some((path) => path === join(dir, 'appdata', 'npm', 'node_modules', '@edda', 'pi-session-channel')),
+    'the standard Windows npm prefix is a candidate');
+  assert.ok(candidates.some((path) => path === join(dir, 'prefix', 'node_modules', '@edda', 'pi-session-channel')),
+    'npm_config_prefix is a candidate');
+
+  // A package that exists only at the Windows prefix is resolved, not left unobserved.
+  const winRoot = join(dir, 'appdata', 'npm', 'node_modules', '@edda', 'pi-session-channel');
+  await mkdir(winRoot, { recursive: true });
+  await writeFile(join(winRoot, 'package.json'), JSON.stringify({ name: '@edda/pi-session-channel', version: '0.8.0' }));
+  await writeFile(join(winRoot, 'managed-runner.mjs'), 'export const runner = true;\n');
+  await writeFile(join(winRoot, 'extension.mjs'), 'export const extension = true;\n');
+  const resolved = resolveClientRoot(undefined, env, fakeExec);
+  assert.equal(resolved.root, winRoot);
+  assert.equal(resolved.source, 'global');
+  assert.equal(releaseIdentity(winRoot).version, '0.8.0');
+});
+
+test('a partial /api/service body is not reported healthy', async (t) => {
+  const dir = await fixture(t);
+  const managerRoot = join(dir, 'manager');
+  await mkdir(managerRoot, { recursive: true });
+  await writeFile(join(managerRoot, 'owner.json'), JSON.stringify({ version: 1, pid: process.pid, instanceId: randomUUID(),
+    origin: 'http://127.0.0.1:1', token: 'd'.repeat(32), configDigest: 'e'.repeat(64), startedAt: '2026-09-13T00:00:00.000Z' }));
+  const receipt = await activationReceipt({ root: join(dir, 'registry'), repo: join(dir, 'no-repo'), clientRoot: packageDir,
+    managerRoot, runGit: () => { throw new Error('no git'); }, runVersion: () => { throw new Error('no edda'); },
+    fetch: async () => ({ status: 200, json: async () => ({ version: 1 }) }) });
+  assert.equal(receipt.manager.health, 'invalid');
+  assert.equal(receipt.coherence.status, 'drift');
+  assert.ok(receipt.coherence.findings.some((finding) => finding.code === 'manager_not_healthy'));
+});
+
+test('the per-verb help lists every accepted activation flag (GH #1210 item 2)', async (t) => {
+  const dir = await fixture(t);
+  const help = await exec(process.execPath, [channelCli, 'activation', '--help'], { cwd: dir });
+  for (const flag of ['--json', '--check', '--repo', '--registry-root', '--manager-root', '--edda-bin', '--client-root', '--timeout']) {
+    assert.ok(help.stdout.includes(flag), `per-verb help omits ${flag}`);
+  }
+  const topHelp = await exec(process.execPath, [channelCli, '--help'], { cwd: dir });
+  assert.ok(topHelp.stdout.includes('--manager-root') && topHelp.stdout.includes('--timeout'), 'top-level help omits an activation flag');
 });
 
 test('the receipt never leaks the agent-manager owner token', async (t) => {

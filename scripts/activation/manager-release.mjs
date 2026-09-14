@@ -15,7 +15,7 @@
 //   node scripts/activation/manager-release.mjs --repo <checkout> --root <serviceRoot>
 //        [--revision <40-hex>] [--npm <path>] [--dry-run] [--no-restart] [--json]
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -167,8 +167,14 @@ function main(argv) {
       serviceRoot: root, entrypoint: cli, at: new Date().toISOString() };
     if (previous && previous.taskId !== undefined) record.taskId = previous.taskId;
     const tmp = join(root, `.release.json.${randomUUID()}.tmp`);
-    writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-    renameSync(tmp, releaseFile); executed.push('write-release');
+    try {
+      writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+      renameSync(tmp, releaseFile);
+    } finally {
+      // Never leave a staging file behind if the rename fails.
+      if (existsSync(tmp)) { try { unlinkSync(tmp); } catch { /* best effort */ } }
+    }
+    executed.push('write-release');
 
     let started = null;
     if (!options.noRestart) { started = run(process.execPath, [cli, 'start', '--root', root]); executed.push('start'); }
