@@ -110,7 +110,9 @@ object with `entries`, `cursor`, `headCursor` and `hasMore`. Drain `hasMore` wit
 
 `<sessionId>` is the Pi **channel session id**, read from `edda-pi run-status <runId>`
 (the `sessionId` field) or the launch output — not the managed run id that a child sees
-as `EDDA_SESSION_ID`.
+as `EDDA_SESSION_ID`. When the target session lives in another registry, address it explicitly with
+`--registry <dir>` (or set `EDDA_PI_CHANNEL_DIR` for the call); a missing session names the registry used
+instead of a bare "no reachable registered owner".
 
 ```text
 edda-pi send <sessionId> --message-file <absolute-next-step-file> --sender controller

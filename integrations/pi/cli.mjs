@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { defaultRoot, recover, validateId } from './store.mjs';
 import { listSessions, requestSession, getReceipt, inspectSession, prepareHandoff } from './client.mjs';
@@ -23,9 +24,9 @@ const help = `Edda Pi session channel (same-user, same-machine)
   edda-pi runs [--limit 50] [--after RUN_ID]   recorded managed runs, including stopped ones
   node integrations/pi/cli.mjs list
   node integrations/pi/cli.mjs status SESSION_ID
-  node integrations/pi/cli.mjs send SESSION_ID --message TEXT [--id UUID] [--sender codex] [--mode followUp|steer]
-  node integrations/pi/cli.mjs send SESSION_ID --message-file PATH [--id UUID]
-  node integrations/pi/cli.mjs receipt SESSION_ID --id UUID
+  node integrations/pi/cli.mjs send SESSION_ID --message TEXT [--id UUID] [--sender codex] [--mode followUp|steer] [--registry DIR]
+  node integrations/pi/cli.mjs send SESSION_ID --message-file PATH [--id UUID] [--registry DIR]
+  node integrations/pi/cli.mjs receipt SESSION_ID --id UUID [--registry DIR]
   node integrations/pi/cli.mjs recover SESSION_ID --instance UUID
   node integrations/pi/cli.mjs conversation SESSION_ID [--after ENTRY_ID] [--limit 20]
   node integrations/pi/cli.mjs enroll SESSION_ID --scope TEXT
@@ -64,6 +65,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs supervisor-stop SUPERVISOR_ID
 
 JSON stdout; diagnostics stderr. EDDA_PI_CHANNEL_DIR overrides the private root.
+--registry DIR addresses a session in another registry root (send/receipt/list/status/conversation).
 Supervision commands are tools for an authorized controller, not a decision engine.
 No automatic process restart or message retry. Opt-in dependency alerts may start a model turn.
 The listener is local only. Keep the message ID.
@@ -82,6 +84,20 @@ for (const line of help.split('\n')) {
   usageByVerb.set(match[1], lines);
 }
 
+function registryRoot(value) {
+  const dir = resolve(value);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`--registry must be an existing directory: ${dir}`);
+  return dir;
+}
+// A bare "no reachable registered owner" hides that the registry, not the
+// session, is wrong. Name the registry used and the option to change it.
+function registryContext(error, sessionId, root) {
+  if (error instanceof Error && /no reachable registered owner/.test(error.message)) {
+    return new Error(`No session '${sessionId}' in registry '${root}'. If it is in another registry, pass --registry <dir> (or set EDDA_PI_CHANNEL_DIR) and retry.`);
+  }
+  return error;
+}
+
 async function main(args) {
   const [command, ...rest] = args;
   if (!command || command === '--help') { process.stdout.write(help); return; }
@@ -94,7 +110,6 @@ async function main(args) {
     process.stderr.write(`Unknown command '${command}'; run 'edda-pi --help' for the supported commands and options.\n`);
     process.exitCode = 1; return;
   }
-  const root = defaultRoot();
   const positional = [];
   const options = {};
   for (let i = 0; i < rest.length; i++) {
@@ -108,9 +123,9 @@ async function main(args) {
     'runtime-info': [],
     activation: ['--json', '--check', '--repo', '--registry-root', '--manager-root', '--edda-bin', '--client-root', '--timeout'],
     runs: ['--limit', '--after'],
-    list: [], status: [], send: ['--message', '--message-file', '--id', '--sender', '--mode'],
-    receipt: ['--id'], recover: ['--instance'],
-    conversation: ['--after', '--limit'], enroll: ['--scope'], watch: ['--conversation'],
+    list: ['--registry'], status: ['--registry'], send: ['--message', '--message-file', '--id', '--sender', '--mode', '--registry'],
+    receipt: ['--id', '--registry'], recover: ['--instance'],
+    conversation: ['--after', '--limit', '--registry'], enroll: ['--scope'], watch: ['--conversation'],
     prepare: ['--manifest', '--expected'], brief: ['--budget-bytes'],
     compose: ['--project', '--task', '--context', '--capsule', '--output', '--edda-bin'],
     doctor: [], follow: ['--project', '--tasks', '--scope', '--notify', '--max-notifications'],
@@ -126,6 +141,7 @@ async function main(args) {
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
+  const root = options['--registry'] !== undefined ? registryRoot(options['--registry']) : defaultRoot();
   const counts = ['doctor', 'owner'].includes(command) ? [0, 1] : [['runtime-info', 'activation', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
   if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
@@ -194,10 +210,10 @@ async function main(args) {
     contextFile: options['--context'], capsuleId: options['--capsule'], output: options['--output'], root,
     eddaCommand: options['--edda-bin'] ? { file: options['--edda-bin'], args: [] } : undefined });
   if (command === 'list') result = await listSessions(root);
-  if (command === 'status') result = await requestSession(root, sessionId, '/status');
-  if (command === 'receipt') result = await getReceipt(root, sessionId, validateId(options['--id']));
+  if (command === 'status') { try { result = await requestSession(root, sessionId, '/status'); } catch (error) { throw registryContext(error, sessionId, root); } }
+  if (command === 'receipt') { try { result = await getReceipt(root, sessionId, validateId(options['--id'])); } catch (error) { throw registryContext(error, sessionId, root); } }
   if (command === 'recover') result = recover(root, sessionId, options['--instance']);
-  if (command === 'conversation') result = await inspectSession(root, sessionId, { after: options['--after'], limit: options['--limit'] });
+  if (command === 'conversation') { try { result = await inspectSession(root, sessionId, { after: options['--after'], limit: options['--limit'] }); } catch (error) { throw registryContext(error, sessionId, root); } }
   if (command === 'enroll') result = await enroll(root, sessionId, options['--scope']);
   if (command === 'watch') result = await watch(root, { withConversation: options['--conversation'] === true });
   if (command === 'brief') result = await managementBrief(root, sessionId, options['--budget-bytes'] || 16384);
@@ -216,8 +232,10 @@ async function main(args) {
     const message = options['--message'] || readFileSync(options['--message-file'], 'utf8');
     // Print the ID BEFORE sending so a transport failure never loses retry identity.
     process.stderr.write(`Message ID: ${id}\n`);
-    result = await requestSession(root, sessionId, '/messages', { id, message,
-      sender: options['--sender'] || 'codex', mode: options['--mode'] || 'followUp' });
+    try {
+      result = await requestSession(root, sessionId, '/messages', { id, message,
+        sender: options['--sender'] || 'codex', mode: options['--mode'] || 'followUp' });
+    } catch (error) { throw registryContext(error, sessionId, root); }
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   if (['unknown', 'failed', 'needs_context', 'not_prepared', 'stale_binding', 'unavailable', 'needs_reload', 'needs_enrollment', 'not_registered',
