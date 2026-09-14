@@ -1,13 +1,20 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { ManagerError, type AgentBinding, type AgentView, type RuntimeState } from './contracts.js';
 import { hash, object, parseConfig, parseSend, selectionRevision, slug, text, uuid } from './config.js';
 import { EddaWorkflowLedger, WorkflowLocks, type CanonicalTask, type WorkflowLedger } from './edda-workflow.js';
 import type { AgentManager } from './manager.js';
 import type { OwnerInboxEvent, OwnerInboxKind } from './owner-inbox-contracts.js';
-import type { OwnerReturnFact, OwnerReturnView, WorkAction, WorkBinding, WorkPhase, WorkRegistryRelation, WorkSessionBinding, WorkView, WorkWaitingFor, WorksView } from './workflow-contracts.js';
+import type { OwnerMailboxKind, OwnerReturnFact, OwnerReturnRead, OwnerReturnView, WorkAction, WorkBinding, WorkPhase, WorkRegistryRelation, WorkSessionBinding, WorkView, WorkWaitingFor, WorksView } from './workflow-contracts.js';
 import { rootLabel } from './discovery.js';
 
 const PREFIX = 'edda.manager-work.v1 ';
+// Human source names for the mailbox a return read resolved to. The label shown
+// beside them is the opaque root hash, never a path.
+const MAILBOX_SOURCE: Record<OwnerMailboxKind, string> = { binding: '工作設定指定的 owner mailbox',
+  env: '管理服務環境指定的 owner mailbox', managed: '受管理啟動的 owner mailbox', workspace: '工作目錄預設 mailbox' };
+interface ResolvedOwnerMailbox { kind: OwnerMailboxKind; root: string; label: string; present: boolean; notice: string | null }
 interface WorkEvent { version: 1; taskKey: string; previous: string | null; action: WorkAction; fingerprint: string; target: AgentBinding | null; transportStoreId: string; priorFailedOperation: string | null }
 interface ReadWork { task: CanonicalTask; events: Array<WorkEvent & { id: string; at: string }>; view: WorkView }
 export function parseWorkAction(input: unknown): WorkAction {
@@ -281,7 +288,8 @@ export class WorkManager {
     // A return read is fail-closed inside the ledger and never blocks the row; a
     // ledger that throws unexpectedly still degrades to an honest unavailable DTO.
     // A mutation read (`returns: false`) only reuses the cached snapshot.
-    const ownerReturn = await this.ownerReturns(binding, options.returns !== false);
+    const agentViews = agents ?? this.manager.overview().agents;
+    const ownerReturn = await this.ownerReturns(binding, agentViews, options.returns !== false);
     const [task, notes] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding)]);
     const events: ReadWork['events'] = [];
     for (const note of notes) {
@@ -344,7 +352,6 @@ export class WorkManager {
     // Derive the operator-facing phase last: it reads the native task rail,
     // delivery receipt, observed sessions, owner-inbox events and owner returns,
     // so a fresher native signal overrides a stale manual stage/waiting reason.
-    const agentViews = agents ?? this.manager.overview().agents;
     view.ownerReturn = ownerReturn ?? null;
     view.registry = this.registryRelation(binding, view, agentViews);
     const native = deriveWorkProgress({ task, view, agents: agentViews,
@@ -354,15 +361,72 @@ export class WorkManager {
   }
   /** Cached, fail-closed owner-return read. `spawn: false` (the mutation path)
    *  never starts a process and reuses the last snapshot, so a slow CLI cannot
-   *  extend a lock hold; a cold cache simply projects `null` until the next read. */
-  private async ownerReturns(binding: WorkBinding, spawn: boolean): Promise<OwnerReturnView | null> {
+   *  extend a lock hold; a cold cache simply projects `null` until the next read.
+   *  The mailbox root is resolved here from the pass's observations and passed to
+   *  the fixed vectors as the child env `EDDA_RETURN_ROOT`; the argument vector is
+   *  unchanged. */
+  private async ownerReturns(binding: WorkBinding, agents: AgentView[], spawn: boolean): Promise<OwnerReturnView | null> {
     const cached = this.returns.get(binding.id);
     if (!spawn || (cached && Date.now() - cached.at < RETURN_CACHE_MS)) return cached?.value ?? null;
-    const value = await (this.ledger.returns ? this.ledger.returns(binding) : Promise.resolve(null))
-      .catch((): OwnerReturnView | null => binding.ownerRef
-        ? { owner: binding.ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: '負責人回件狀態暫時無法讀取；未自動重試。' } : null);
-    this.returns.set(binding.id, { at: Date.now(), value });
-    return value;
+    const mailbox = binding.ownerRef ? this.resolveOwnerMailbox(binding, agents) : null;
+    const env = mailbox && isAbsolute(mailbox.root) ? { EDDA_RETURN_ROOT: mailbox.root } : undefined;
+    let value: OwnerReturnRead | null;
+    try { value = this.ledger.returns ? await this.ledger.returns(binding, env) : null; }
+    catch {
+      value = binding.ownerRef
+        ? { owner: binding.ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: '負責人回件狀態暫時無法讀取；未自動重試。' }
+        : null;
+    }
+    const resolved = value && mailbox ? this.projectOwnerMailbox(value, mailbox) : null;
+    this.returns.set(binding.id, { at: Date.now(), value: resolved });
+    return resolved;
+  }
+  /** The mailbox a return read should use, in precedence order: the binding's own
+   *  pinned root, the managed-service environment, the owner run's own pinned
+   *  mailbox, then the CLI's workspace default. The first candidate whose mailbox
+   *  layout exists wins; if none does, the highest-precedence candidate is kept
+   *  with `present: false` so the card reports honest unavailability instead of a
+   *  healthy zero. Known roots are only probed, never scanned, and the label is
+   *  opaque. */
+  private resolveOwnerMailbox(binding: WorkBinding, agents: AgentView[]): ResolvedOwnerMailbox {
+    const candidates: Array<{ kind: OwnerMailboxKind; root: string }> = [];
+    if (binding.ownerRoot) candidates.push({ kind: 'binding', root: binding.ownerRoot });
+    const envRoot = process.env.EDDA_RETURN_ROOT;
+    if (envRoot && isAbsolute(envRoot)) candidates.push({ kind: 'env', root: envRoot });
+    const managed = this.managedMailbox(binding, agents);
+    if (managed) candidates.push({ kind: 'managed', root: managed });
+    candidates.push({ kind: 'workspace', root: binding.workspace });
+    const found = candidates.findIndex((candidate) => existsSync(join(candidate.root, '.edda', 'returns')));
+    const index = found < 0 ? 0 : found, selected = candidates[index]!;
+    const present = found >= 0, label = rootLabel(selected.root), source = MAILBOX_SOURCE[selected.kind];
+    let notice: string | null;
+    if (!present) notice = `找不到任何 owner mailbox（${label}）；無法確認是否有回件。`;
+    else if (index > 0) {
+      const higher = rootLabel(candidates[0]!.root);
+      notice = selected.kind === 'workspace'
+        ? `指定的 owner mailbox（${higher}）沒有信箱紀錄；改讀工作目錄預設信箱。`
+        : `較高順位的 owner mailbox（${higher}）沒有信箱紀錄；已改用${source}（${label}）。`;
+    }
+    else notice = selected.kind === 'workspace' ? null : `已使用${source}（${label}）。`;
+    return { kind: selected.kind, root: selected.root, label, present, notice };
+  }
+  /** The first project Pi agent — the work's owner agent first — whose observed
+   *  owner mailbox names this work's owner reference. Never invents a root. */
+  private managedMailbox(binding: WorkBinding, agents: AgentView[]): string | null {
+    const candidates = agents.filter((agent) => agent.projectId === binding.projectId && agent.transport === 'pi');
+    candidates.sort((a, b) => Number(b.id === binding.ownerAgentId) - Number(a.id === binding.ownerAgentId));
+    for (const agent of candidates) {
+      const observed = agent.ownerMailbox, root = observed?.root;
+      if (observed?.ref === binding.ownerRef && typeof root === 'string' && isAbsolute(root)) return root;
+    }
+    return null;
+  }
+  /** Attach the resolved mailbox and its notice. A read from an absent layout is
+   *  never allowed to look healthy: `present: false` forces a non-null error. */
+  private projectOwnerMailbox(view: OwnerReturnRead, mailbox: ResolvedOwnerMailbox): OwnerReturnView {
+    const projected: OwnerReturnView = { ...view, mailbox: { kind: mailbox.kind, label: mailbox.label, present: mailbox.present }, notice: mailbox.notice };
+    if (!mailbox.present && !projected.error) projected.error = '未在解析到的 owner mailbox 找到信箱紀錄；無法確認是否有回件。';
+    return projected;
   }
   /** Bounded known-root relation (GH1181 case1). Cheap: it reuses the config,
    *  the pass's observation snapshot and opaque root labels — discovery is never

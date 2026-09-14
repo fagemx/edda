@@ -16,7 +16,7 @@ test('two simultaneous sends create one effect; unknown survives restart and use
     { id: 'a', name: 'Agent', projectId: 'p', role: 'worker', registryRoot: root, workspace: root, sessionId: 'original' }] });
   const binding = config.agents[0]!;
   const observation: AgentObservation = { state: 'running', instanceId, observedAt: new Date().toISOString(), heartbeatAt: null, lastProgressAt: null, lastEvent: null,
-    source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null };
+    source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null, ownerMailbox: null };
   const adapter: PiAdapter = { observe: async () => observation,
     conversation: async () => ({ entries: [], instanceId, cursor: null, headCursor: null, hasMore: false, observedAt: new Date().toISOString(), source: 'live' }),
     send: async () => { effects++; throw new Error('Simulate a timeout after delivery'); },
@@ -43,7 +43,7 @@ test('stale identity is definitive before intent and a failed source does not hi
   const adapter: PiAdapter = { observe: async (b) => {
     if (b.id === 'b') throw new Error('poisoned registry');
     return { state: 'idle', instanceId, observedAt: new Date().toISOString(), heartbeatAt: null, lastProgressAt: null, lastEvent: null, source: 'live', stale: false,
-      reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null };
+      reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null, ownerMailbox: null };
   }, conversation: async () => { throw new Error('unused'); }, send: async () => { effects++; throw new Error('unused'); }, receipt: async () => null };
   const store = new ManagerStore(root), manager = new AgentManager(config, store, adapter);
   try {

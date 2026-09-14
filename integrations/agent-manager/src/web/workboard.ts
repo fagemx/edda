@@ -15,6 +15,9 @@ const phases: Record<WorkPhase, string> = { uninitialized: '尚未初始化', re
 // there is deliberately no `tool` wait target.
 export const waitTargets: Record<Exclude<WorkWaitingFor, null>, string> = { worker: '等待 worker（執行者）', verifier: '等待 verifier（審查者）', dependency: '等待相依條件', user_decision: '等待使用者決策', none: '無等待對象' };
 const rootRelations: Record<WorkRootRelation, string> = { in_root: '來源在專案已知範圍內', not_in_root: '不在目前觀測的來源', root_not_registered: '原登記來源已不在專案清單', unknown: '來源關聯尚未判定' };
+// The mailbox a return read resolved to. The label is the opaque root hash.
+const mailboxSources: Record<'binding' | 'env' | 'managed' | 'workspace', string> = { binding: '工作設定指定的 owner mailbox',
+  env: '管理服務環境指定的 owner mailbox', managed: '受管理啟動的 owner mailbox', workspace: '工作目錄預設 mailbox' };
 const roleNames: Record<'manager' | 'worker' | 'reviewer', string> = { manager: '管理者', worker: '工作者', reviewer: '審查者' };
 // A manual stage that claims a child is executing is stale whenever the native
 // sources cannot confirm a working session — the incident GH1181 fixes. The
@@ -137,6 +140,8 @@ export class WorkBoard {
     if (work.ownerReturn) {
       const ownerReturn = work.ownerReturn;
       this.details.append(el('p', `負責人回件：${ownerReturn.owner} · ${ownerReturn.holder ? `持有者 ${ownerReturn.holder}` : '尚無持有者'} · 待領取 ${ownerReturn.pending}${ownerReturn.total === null ? '' : ` / 共 ${ownerReturn.total}`}`, 'muted'));
+      this.details.append(el('p', `回件信箱：${mailboxSources[ownerReturn.mailbox.kind]}（${ownerReturn.mailbox.label}）${ownerReturn.mailbox.present ? '' : ' · 尚無信箱紀錄'}`, 'muted'));
+      if (ownerReturn.notice) this.details.append(el('p', ownerReturn.notice, 'notice'));
       if (ownerReturn.error) this.details.append(el('p', `負責人回件狀態不可用：${ownerReturn.error}`, 'notice'));
       if (ownerReturn.dropped > 0) this.details.append(el('p', `有 ${ownerReturn.dropped} 筆負責人回件無法讀取或狀態不在允許範圍；未列入上方清單。`, 'notice'));
       for (const fact of ownerReturn.matched) this.details.append(el('p', `回件 ${fact.work} · ${fact.status} · ${fact.postedAt}${fact.result ? ` · ${fact.result}` : ''} · ${fact.id.slice(0, 12)}`, 'public-text identity'));

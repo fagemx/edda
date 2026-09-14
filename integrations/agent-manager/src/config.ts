@@ -74,7 +74,10 @@ export function parseConfig(input: unknown): ManagerConfig {
       ownerRef = text(w.ownerRef, 200);
       if (!/^[A-Za-z0-9][A-Za-z0-9/_.:-]{0,199}$/.test(ownerRef)) throw new ManagerError('INVALID_CONFIG', '工作的負責人參照格式不正確。');
     }
-    return { id: slug(w.id), projectId, taskId: Number(w.taskId), workspace: path(w.workspace), ownerAgentId, ownerRef };
+    // Optional pinned owner mailbox for the `edda return` read. Absent/null stays
+    // backwards compatible; present must be an absolute path.
+    const ownerRoot = w.ownerRoot == null ? null : path(w.ownerRoot);
+    return { id: slug(w.id), projectId, taskId: Number(w.taskId), workspace: path(w.workspace), ownerAgentId, ownerRef, ownerRoot };
   });
   unique(works.map((w) => w.id)); unique(works.map((w) => `${w.workspace}\0${w.taskId}`));
   const refreshMs = c.refreshMs ?? 3000;

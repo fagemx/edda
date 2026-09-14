@@ -1,7 +1,7 @@
 import type { OperationStatus, SendRequest } from './contracts.js';
 import type { ContinuityReference } from './continuation-contracts.js';
 
-export interface WorkBinding { id: string; projectId: string; taskId: number; workspace: string; ownerAgentId: string; ownerRef?: string | null }
+export interface WorkBinding { id: string; projectId: string; taskId: number; workspace: string; ownerAgentId: string; ownerRef?: string | null; ownerRoot?: string | null }
 export type WorkStage = 'uninitialized' | 'ready' | 'assigned' | 'executing' | 'awaiting_delivery' | 'delivered' | 'accepted' | 'blocked';
 // Native, operator-facing phase (GH1181). Derived from the task rail, delivery
 // receipts, observed sessions and owner-inbox events. It is shown before the
@@ -33,7 +33,15 @@ export interface WorkRegistryRelation { relation: WorkRootRelation; message: str
 export interface OwnerReturnFact { id: string; work: string; status: 'done' | 'failed'; result: string | null; postedAt: string }
 // `dropped` counts bounded pending items that could not be used and may belong to
 // this work, so the card never reports a healthy count while hiding one.
-export interface OwnerReturnView { owner: string; holder: string | null; pending: number; total: number | null; matched: OwnerReturnFact[]; dropped: number; error: string | null }
+export interface OwnerReturnRead { owner: string; holder: string | null; pending: number; total: number | null; matched: OwnerReturnFact[]; dropped: number; error: string | null }
+// Which mailbox root the read resolved to and whether that root actually held a
+// mailbox layout. `label` is an opaque hash, never a path.
+export type OwnerMailboxKind = 'binding' | 'env' | 'managed' | 'workspace';
+export interface OwnerReturnMailbox { kind: OwnerMailboxKind; label: string; present: boolean }
+// The projected read plus the mailbox it came from and a bounded human notice.
+// A missing layout at the highest-precedence root is honest unavailability, never
+// a healthy zero: `present: false` pairs with a non-null `error`.
+export interface OwnerReturnView extends OwnerReturnRead { mailbox: OwnerReturnMailbox; notice: string | null }
 export interface WorkInstruction { id: string; message: string; operationId: string; acknowledgedAt: string | null; evidence: string | null }
 export interface WorkHistory { id: string; kind: string; at: string; summary: string }
 export interface WorkSessionBinding {

@@ -37,7 +37,7 @@ function observation(id: string, overrides: Partial<AgentView> = {}): AgentView 
   return { id, name: id, role: 'worker', projectId: 'p', workspace: '/workspace', transport: 'pi', selectionRevision: 'revision',
     summary: null, summaryUpdatedAt: null, summaryError: null, state: 'idle', instanceId: 'instance', observedAt: at(200),
     heartbeatAt: at(200), lastProgressAt: null, lastEvent: null, source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null,
-    capabilities: { conversation: true, send: true }, latestMessage: null,
+    capabilities: { conversation: true, send: true }, latestMessage: null, ownerMailbox: null,
     sessionEvidence: { sessionId: `${id}-session`, evidenceSource: 'live', historyComplete: false, events: [] }, ...overrides };
 }
 function inboxEvent(kind: OwnerInboxKind, when: string, summary = '原生事件', bindingId = 'binding-worker'): OwnerInboxEvent {
@@ -230,7 +230,7 @@ test('the manager wires native task/session/inbox evidence into the projected ph
   const observations = new Map<string, AgentObservation>();
   const fresh = (id: string, events: NativeSessionEvent[]): AgentObservation => ({
     state: 'idle', instanceId, observedAt: at(200), heartbeatAt: at(200), lastProgressAt: null, lastEvent: null, source: 'live', stale: false,
-    reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null,
+    reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null, ownerMailbox: null,
     sessionEvidence: { sessionId: `${id}-session`, evidenceSource: 'live', historyComplete: false, events } });
   observations.set('owner', fresh('owner', [])); observations.set('worker', fresh('worker', []));
   const adapter: PiAdapter = { observe: async (target) => observations.get(target.id)!,
@@ -363,6 +363,7 @@ test('a degraded pending session stays recoverable even with the inbox row it pr
 
 test('a fresher owner return outranks only the stale manual stage', () => {
   const ownerReturn = { owner: 'owner-ref', holder: null, pending: 1, total: 2, dropped: 0, error: null,
+    mailbox: { kind: 'workspace' as const, label: 'a1b2c3d4e5f6', present: true }, notice: null,
     matched: [{ id: 'return-1', work: '7', status: 'done' as const, result: '原生回件已完成。', postedAt: at(400) }] };
   const fresher = derive(view({ stage: 'executing', updatedAt: at(300), ownerReturn }), [observation('worker')]);
   assert.equal(fresher.phase, 'completed');

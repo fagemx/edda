@@ -14,7 +14,7 @@ import { WorkManager } from '../src/workflow.js';
 import { rootLabel, projectCandidates } from '../src/discovery.js';
 import { waitTargets } from '../src/web/workboard.js';
 import type { AgentBinding, AgentObservation, ManagerConfig, PiAdapter, SendRequest } from '../src/contracts.js';
-import type { OwnerReturnView, WorkAction, WorkBinding, WorkView, WorkWaitingFor } from '../src/workflow-contracts.js';
+import type { OwnerReturnRead, WorkAction, WorkBinding, WorkView, WorkWaitingFor } from '../src/workflow-contracts.js';
 
 const at = (seconds: number): string => new Date(Date.UTC(2026, 8, 13, 0, 0, seconds)).toISOString();
 const LATER = at(300);
@@ -24,7 +24,7 @@ class MemoryLedger implements WorkflowLedger {
   private entries = new Map<number, LedgerNote[]>();
   private clock = 0;
   status = 'running';
-  returnsImpl: ((binding: WorkBinding) => Promise<OwnerReturnView | null>) | null = null;
+  returnsImpl: ((binding: WorkBinding) => Promise<OwnerReturnRead | null>) | null = null;
   async task(binding: WorkBinding): Promise<CanonicalTask> {
     return { id: binding.taskId, key: `task-${binding.taskId}`, title: `Task ${binding.taskId}`, status: this.status, receipt: null, updatedAt: at(0) };
   }
@@ -33,13 +33,13 @@ class MemoryLedger implements WorkflowLedger {
     const list = this.entries.get(binding.taskId) ?? [];
     this.clock += 1; list.push({ id: `evt-${this.clock}`, at: at(this.clock), text }); this.entries.set(binding.taskId, list);
   }
-  async returns(binding: WorkBinding): Promise<OwnerReturnView | null> { return this.returnsImpl ? this.returnsImpl(binding) : null; }
+  async returns(binding: WorkBinding): Promise<OwnerReturnRead | null> { return this.returnsImpl ? this.returnsImpl(binding) : null; }
 }
 
 function live(sessionId: string, overrides: Partial<AgentObservation> = {}): AgentObservation {
   return { state: 'idle', instanceId: 'instance', observedAt: at(200), heartbeatAt: at(200), lastProgressAt: null, lastEvent: null,
     source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null,
-    capabilities: { conversation: true, send: true }, latestMessage: null,
+    capabilities: { conversation: true, send: true }, latestMessage: null, ownerMailbox: null,
     sessionEvidence: { sessionId, evidenceSource: 'live', historyComplete: false, events: [] }, ...overrides };
 }
 function adapterFor(observe: (binding: AgentBinding) => AgentObservation, instanceId: string): PiAdapter {

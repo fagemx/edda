@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ManagerError, type AdapterReceipt, type AgentBinding, type AgentObservation, type ConversationView, type DiscoveredRun, type DiscoveryReport, type OperationStatus, type OperationView, type PiAdapter, type PublicEntry, type RecordDegradation, type RuntimeState, type SendRequest } from './contracts.js';
 import type { NativeSessionEvent } from './session-contracts.js';
@@ -58,7 +58,7 @@ function receipt(value: unknown, binding: AgentBinding, id: string, instance: st
 }
 export const unavailable = (): AgentObservation => ({ state: 'unavailable', instanceId: null, observedAt: new Date().toISOString(),
   heartbeatAt: null, lastProgressAt: null, lastEvent: null, source: 'unavailable', stale: true, reason: '目前無法讀取代理；不代表工作已完成。',
-  degraded: null, model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null });
+  degraded: null, model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null, ownerMailbox: null });
 /** Project a per-record degradation without ever copying the record itself.
  *  `str()` returns null for an object, so the `{code,record,message}` error is
  *  projected explicitly here instead of being silently dropped. */
@@ -66,6 +66,15 @@ function degradation(error: unknown, recovery: string | null): RecordDegradation
   const e = record(error), code = str(e.code, 100);
   if (!code) return null;
   return { code, record: str(e.record, 100) ?? '未知原生紀錄', message: str(e.message, 300) ?? '原生紀錄無法讀取；未自動修復。', recovery };
+}
+/** The owner mailbox a run's own runtime pins: an explicit absolute `ownerRoot`
+ *  from the managed record wins; otherwise the registry default applies only when
+ *  the run declares an owner. Null when it declares none. Never a guessed path. */
+function ownerMailbox(binding: AgentBinding, managed: Record<string, unknown>): AgentObservation['ownerMailbox'] {
+  const ref = str(managed.owner, 200) ?? str(managed.returnOwner, 200);
+  const pinned = str(managed.ownerRoot, 4096);
+  const root = pinned && isAbsolute(pinned) ? pinned : ref ? join(binding.registryRoot, 'owner-mailbox') : null;
+  return ref === null && root === null ? null : { ref, root };
 }
 
 export class ChannelAdapter implements PiAdapter {
@@ -196,6 +205,7 @@ export class ChannelAdapter implements PiAdapter {
         model: typeof model.provider === 'string' && typeof model.id === 'string' ? { provider: model.provider, id: model.id } : null,
         usage: managed.usage ? { tokens: number(usage.tokens), reportedCost: number(usage.reportedCost) } : null,
         capabilities: { conversation: capabilities.includes('conversation'), send: capabilities.includes('send') }, latestMessage: latest,
+        ownerMailbox: ownerMailbox(binding, managed),
         sessionEvidence: { sessionId: binding.sessionId, evidenceSource: 'live', historyComplete: false, events: [...events.values()] } };
     } catch {
       const model = record(managed.model), usage = record(managed.usage), stopped = managed.lastRecordedPhase === 'stopped';
@@ -210,6 +220,7 @@ export class ChannelAdapter implements PiAdapter {
         lastProgressAt: date(managed.lastProgressAt),
         model: typeof model.provider === 'string' && typeof model.id === 'string' ? { provider: model.provider, id: model.id } : null,
         usage: managed.usage ? { tokens: number(usage.tokens), reportedCost: number(usage.reportedCost) } : null,
+        ownerMailbox: ownerMailbox(binding, managed),
         sessionEvidence: { sessionId: binding.sessionId, evidenceSource: stopped ? 'recorded' : 'unavailable', historyComplete: false, events: [...events.values()] } };
     }
   }

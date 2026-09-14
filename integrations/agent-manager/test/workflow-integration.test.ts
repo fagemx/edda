@@ -26,7 +26,7 @@ function fixture() {
       if (loseAppend) { loseAppend = false; throw new Error('append result lost'); } },
   };
   const adapter: PiAdapter = { observe: async () => ({ state: 'idle', instanceId, observedAt: 'now', heartbeatAt: null, lastProgressAt: null, lastEvent: null,
-    source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null }),
+    source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null, ownerMailbox: null }),
     conversation: async () => { throw new Error('unused'); }, send: async (b, r) => { effects++; return { id: r.operationId, instanceId, sessionId: b.sessionId, status: 'settled' }; }, receipt: async () => null };
   let store = new ManagerStore(root), manager = new AgentManager(config, store, adapter, { ledger, locks: new WorkflowLocks(join(root, 'locks')) });
   const send = (operationId = randomUUID()): SendRequest => ({ operationId, selectionRevision: selectionRevision(config.agents[0]!), instanceId, basisCursor: null, mode: 'followUp', message: 'Review exact SHA' });
