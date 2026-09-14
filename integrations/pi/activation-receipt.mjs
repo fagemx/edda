@@ -77,28 +77,41 @@ export function releaseIdentity(source) {
 
 // Pure fail-closed evaluation over already-collected legs. Exported so the
 // decision logic is provable without a live environment.
+//
+// `observed` alone is not enough to call a leg consistent: a leg that was read
+// but is missing the input its comparison needs (a checkout without
+// `integrations/pi`, a manager root without `release.json`) cannot be verified,
+// and must never let the verdict reach `coherent`.
 export function evaluateCoherence(legs = {}) {
   const repository = legs.repository || {}, edda = legs.edda || {}, pi = legs.pi || {}, manager = legs.manager || {};
   const findings = [];
   const requiredLegs = 4;
-  if (repository.observed && repository.headRevision && edda.observed && edda.revision &&
-    !repository.headRevision.startsWith(edda.revision)) {
+  const repositoryObserved = Boolean(repository.observed && repository.headRevision);
+  const eddaObserved = Boolean(edda.observed && edda.revision);
+  const piObserved = Boolean(pi.observed && pi.installedReleaseId && pi.repoReleaseId);
+  const managerObserved = Boolean(manager.observed);
+  if (repositoryObserved && eddaObserved && !repository.headRevision.startsWith(edda.revision)) {
     findings.push({ leg: 'edda', code: 'edda_revision_mismatch',
       detail: `installed edda ${edda.revision} does not match repository ${repository.headRevision}` });
   }
-  if (pi.observed && pi.installedReleaseId && pi.repoReleaseId && pi.installedReleaseId !== pi.repoReleaseId) {
+  if (piObserved && pi.installedReleaseId !== pi.repoReleaseId) {
     findings.push({ leg: 'pi', code: 'pi_content_drift',
       detail: `installed ${pi.installedReleaseId} does not match repository ${pi.repoReleaseId}` });
   }
-  if (manager.observed) {
-    if (manager.configured && repository.headRevision && manager.configured.headSha !== repository.headRevision) {
+  if (managerObserved) {
+    // A running manager with no release metadata is the exact gap this receipt
+    // exists to expose: its configured revision cannot be verified.
+    if (!manager.configured) {
+      findings.push({ leg: 'manager', code: 'manager_configured_revision_unknown',
+        detail: 'agent-manager root has no release.json; the configured revision cannot be verified' });
+    } else if (repository.headRevision && manager.configured.headSha !== repository.headRevision) {
       findings.push({ leg: 'manager', code: 'manager_configured_revision_mismatch',
         detail: `manager configured ${manager.configured.headSha ?? 'unknown'} does not match repository ${repository.headRevision}` });
     }
     if (manager.health !== 'ok') findings.push({ leg: 'manager', code: 'manager_not_healthy', detail: manager.health || 'unknown' });
     if (!manager.running) findings.push({ leg: 'manager', code: 'manager_absent_owner', detail: 'no running agent-manager owner record' });
   }
-  const observedLegs = [repository, edda, pi, manager].filter((leg) => leg && leg.observed).length;
+  const observedLegs = [repositoryObserved, eddaObserved, piObserved, managerObserved].filter(Boolean).length;
   const status = observedLegs === 0 ? 'unknown'
     : findings.length > 0 ? 'drift'
       : observedLegs < requiredLegs ? 'partial'

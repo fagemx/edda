@@ -98,7 +98,9 @@ test('activationReceipt is strictly read-only over an absent and a seeded regist
     runVersion: () => { throw new Error('no edda'); }, fetch: async () => ({ version: 1, startedAt: 'x', agents: 0 }) });
   assert.deepEqual(await snapshot(empty), beforeEmpty);
   assert.equal(existsSync(join(empty, 'releases')), false);
-  assert.equal(emptyReceipt.coherence.status, 'partial');
+  assert.ok(['partial', 'unknown'].includes(emptyReceipt.coherence.status));
+  assert.equal(emptyReceipt.pi.observed, true);
+  assert.equal(emptyReceipt.pi.repoReleaseId, null);
   assert.equal(emptyReceipt.repository.observed, false);
   assert.equal(emptyReceipt.edda.observed, false);
 
@@ -160,6 +162,17 @@ test('evaluateCoherence is coherent, drift and fail-closed across unit cases', (
   assert.equal(partial.status, 'partial');
   assert.deepEqual(partial.findings, []);
   assert.equal(partial.observedLegs, 3);
+
+  // A leg that was read but lacks the input its comparison needs cannot verify
+  // anything, so it must not count toward coherence.
+  const piRepoUnavailable = evaluateCoherence(legs((value) => { value.pi.repoReleaseId = null; }));
+  assert.equal(piRepoUnavailable.status, 'partial');
+  assert.deepEqual(piRepoUnavailable.findings, []);
+  assert.equal(piRepoUnavailable.observedLegs, 3);
+
+  const managerNoMetadata = evaluateCoherence(legs((value) => { value.manager.configured = null; }));
+  assert.equal(managerNoMetadata.status, 'drift');
+  assert.deepEqual(managerNoMetadata.findings.map((finding) => finding.code), ['manager_configured_revision_unknown']);
 
   const unknown = evaluateCoherence(legs((value) => { for (const leg of Object.values(value)) leg.observed = false; }));
   assert.equal(unknown.status, 'unknown');
@@ -306,6 +319,20 @@ test('the installed entry exposes the receipt through cli.mjs', async (t) => {
   const drifted = await exec(process.execPath, [...args, '--check'], { env: { ...process.env, EDDA_PI_CHANNEL_DIR: registryRoot }, timeout: 30000 }).catch((error) => error);
   assert.equal(drifted.code, 2);
   assert.equal(JSON.parse(drifted.stdout).coherence.status, 'drift');
+});
+
+test('a manager without release metadata fails closed', async (t) => {
+  const dir = await fixture(t);
+  const managerRoot = join(dir, 'manager');
+  await mkdir(managerRoot, { recursive: true });
+  await writeFile(join(managerRoot, 'owner.json'), JSON.stringify({ version: 1, pid: process.pid, instanceId: randomUUID(),
+    origin: 'http://127.0.0.1:1', token: 'c'.repeat(32), configDigest: 'e'.repeat(64), startedAt: '2026-09-13T00:00:00.000Z' }));
+  const receipt = await activationReceipt({ root: join(dir, 'registry'), repo: join(dir, 'no-repo'), clientRoot: packageDir, managerRoot,
+    runGit: () => { throw new Error('no git'); }, runVersion: () => { throw new Error('no edda'); },
+    fetch: async () => ({ version: 1, startedAt: 'x', agents: 0 }) });
+  assert.equal(receipt.manager.configured, null);
+  assert.equal(receipt.coherence.status, 'drift');
+  assert.ok(receipt.coherence.findings.some((finding) => finding.code === 'manager_configured_revision_unknown'));
 });
 
 test('the receipt never leaks the agent-manager owner token', async (t) => {

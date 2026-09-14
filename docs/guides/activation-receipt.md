@@ -42,9 +42,10 @@ The receipt distinguishes exactly the four revisions and reports a fail-closed
 
 - `coherent` — all four legs observed and consistent;
 - `drift` — at least one observed inconsistency (`edda_revision_mismatch`,
-  `pi_content_drift`, `manager_configured_revision_mismatch`, `manager_not_healthy`,
-  `manager_absent_owner`);
-- `partial` — no inconsistency found, but at least one leg could not be observed;
+  `pi_content_drift`, `manager_configured_revision_mismatch`,
+  `manager_configured_revision_unknown`, `manager_not_healthy`, `manager_absent_owner`);
+- `partial` — no inconsistency found, but at least one leg could not be observed or
+  lacks the input its comparison needs (a checkout without `integrations/pi`);
 - `unknown` — no leg could be observed at all.
 
 The Pi leg is the part that semver cannot answer: `installedReleaseId` is the
