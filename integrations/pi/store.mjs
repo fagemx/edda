@@ -93,7 +93,13 @@ export function readRecord(path) {
 // The replace is retried a bounded number of times on the Windows replace errnos,
 // so a transient reader cannot end a run; a failure that outlives the window is a
 // typed `RecordWriteError`, never a silent success and never a weakened barrier.
-const TOLERATED_DIR_FSYNC = new Set(['EINVAL', 'ENOTSUP']);
+const TOLERATED_DIR_FSYNC = new Set(['EINVAL', 'ENOTSUP', 'EBADF']);
+// `EINVAL`/`ENOTSUP` mean "directory fsync not supported here" and are tolerated
+// because the file data is already durable. `EBADF` is tolerated deliberately and
+// separately: the synchronous open -> fsync -> close in `flushDir` cannot produce
+// it today, so this changes no current behaviour, but it keeps a spurious
+// platform errno from becoming a reported write failure. Every other failure
+// propagates.
 const RETRYABLE_RENAME = new Set(['EPERM', 'EBUSY']);
 // The pause before retry `i + 1`; cumulative wall time ~0.5 s — long enough to
 // outlast a reader's pass over the record, short enough not to stall a writer.

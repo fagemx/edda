@@ -29,7 +29,26 @@ let state = { ...prior, runId, serviceId, runnerPid: process.pid, phase: 'starti
   release: config.release, owner: config.owner || null, returnOwner: config.returnOwner || null, ownerRoot,
   piVersion: null, expectedPiVersion: config.pi.version, updatedAt: new Date().toISOString() };
 let child, stopped = false, server, heartbeat, rpcError, observed, stateSequence = 0;
-const save = () => { state.updatedAt = new Date().toISOString(); writeJson(join(dir, 'state.json'), state); };
+const save = () => {
+  state.updatedAt = new Date().toISOString();
+  // A recovered write must not leave a stale `writeError` behind for the next
+  // save site to persist and re-report: any successful write clears it, and a
+  // failed write restores it so the live state keeps naming the degradation.
+  const prior = state.writeError;
+  delete state.writeError;
+  try { writeJson(join(dir, 'state.json'), state); }
+  catch (error) { if (prior) state.writeError = prior; throw error; }
+};
+// The terminal writes run while the runner is ending: a failure there must be
+// reported and logged, never rethrown as an unhandled error that buries the
+// typed reason.
+const finalSave = () => {
+  try { save(); }
+  catch (error) {
+    state.writeError = { code: error.code || 'write_failed', record: error.record || 'state.json', at: new Date().toISOString() };
+    console.error(`managed runner ${runId}: final state write failed (${state.writeError.code})`);
+  }
+};
 const initialId = messageId(digest(`${runId}:initial`));
 save();
 
@@ -176,14 +195,14 @@ try {
   heartbeat = setInterval(() => {
     if (stopped) return;
     queryState();
-    try { delete state.writeError; save(); }
+    try { save(); }
     catch (error) {
       state.writeError = { code: error.code || 'write_failed', record: error.record || 'state.json', at: new Date().toISOString() };
       console.error(`managed runner ${runId}: state write failed (${state.writeError.code}); runner stays live and retries next heartbeat`);
     }
   }, 2000);
   while (!stopped && child.exitCode === null && child.signalCode === null && !rpcError) await delay(200);
-  if (!stopped) { state.phase = rpcError ? 'failed' : 'exited'; state.error = rpcError?.message || 'Pi process exited'; save(); }
+  if (!stopped) { state.phase = rpcError ? 'failed' : 'exited'; state.error = rpcError?.message || 'Pi process exited'; finalSave(); }
 } catch (error) {
-  state.phase = 'failed'; state.error = error.message; save();
+  state.phase = 'failed'; state.error = error.message; finalSave();
 } finally { await cleanup(); }
