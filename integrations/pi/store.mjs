@@ -76,14 +76,60 @@ export function readRecord(path) {
 // Every record is written to a fresh tmp file and renamed into place, so a
 // reader never sees a half-written *renamed* document; the exclusive path creates
 // the destination directly (`wx`) and relies on the same file flush. The write is
-// only durable once the data is on disk: on NTFS a hard interruption between the
-// tmp write and the rename can leave the target with its recorded length but
-// zero-filled data, which reads back as an all-NUL document (GH-715 saw the same
+// only durable once the data is on disk: on NTFS a hard interruption can leave
+// the target with its recorded length but zero-filled data, which reads back as
+// an all-NUL document. The rename moves whatever is durable, so the NUL is
+// observed once the rename of unflushed bytes has landed; a crash strictly before
+// the rename leaves the previous complete record intact (GH-715 saw the same
 // shape; the 2026-09-13 managed registry left four run and eight service
 // `state.json` files all-NUL with normal lengths). Flushing the data before the
 // rename makes a crash leave either the old complete record or the new complete
 // record — never NUL.
+//
+// On Windows the replace itself can also fail transiently: a reader walking the
+// registry (`edda-pi runs`; the agent-manager poll) or a scanner can hold the
+// destination without delete-sharing, and `renameSync` then throws `EPERM`. That
+// killed a live managed runner on 2026-09-14 from the `managed-runner` heartbeat.
+// The replace is retried a bounded number of times on the Windows replace errnos,
+// so a transient reader cannot end a run; a failure that outlives the window is a
+// typed `RecordWriteError`, never a silent success and never a weakened barrier.
 const TOLERATED_DIR_FSYNC = new Set(['EINVAL', 'ENOTSUP', 'EBADF']);
+// `EINVAL`/`ENOTSUP` mean "directory fsync not supported here" and are tolerated
+// because the file data is already durable. `EBADF` is tolerated deliberately and
+// separately: the synchronous open -> fsync -> close in `flushDir` cannot produce
+// it today, so this changes no current behaviour, but it keeps a spurious
+// platform errno from becoming a reported write failure. Every other failure
+// propagates.
+const RETRYABLE_RENAME = new Set(['EPERM', 'EBUSY']);
+// The pause before retry `i + 1`; cumulative wall time ~0.5 s — long enough to
+// outlast a reader's pass over the record, short enough not to stall a writer.
+const RENAME_RETRY_MS = [0, 15, 35, 75, 150, 200];
+const sleepSync = (ms) => { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+// A write that exhausted its bounded retries. Typed so a caller (the managed
+// runner's heartbeat) can degrade visibly rather than treat it as success or die
+// on an opaque `EPERM`.
+export class RecordWriteError extends Error {
+  constructor(path, attempts, cause) {
+    super(`State record write failed after ${attempts} attempts: ${basename(path)} (${cause.code || 'unknown'})`);
+    this.name = 'RecordWriteError';
+    this.code = 'record_write_failed';
+    this.record = basename(path);
+    this.errno = cause.code || null;
+    this.cause = cause;
+  }
+}
+
+function renameBounded(io, from, to) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { io.rename(from, to); return attempt + 1; }
+    catch (error) {
+      if (!RETRYABLE_RENAME.has(error.code)) throw error;
+      if (attempt >= RENAME_RETRY_MS.length - 1) throw new RecordWriteError(to, attempt + 1, error);
+      (io.sleep ?? sleepSync)(RENAME_RETRY_MS[attempt + 1]);
+    }
+  }
+}
 const fileIo = {
   open: (path) => openSync(path, 'wx', 0o600),
   write: (fd, text) => writeFileSync(fd, text),
@@ -119,7 +165,7 @@ export function writeJson(path, data, exclusive = false, io = fileIo) {
   try {
     const fd = io.open(tmp);
     try { io.write(fd, text); io.flush(fd); } finally { io.close(fd); }
-    io.rename(tmp, path);
+    renameBounded(io, tmp, path);
     io.flushDir(dirname(resolve(path)));
   } finally {
     try { io.unlink(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }

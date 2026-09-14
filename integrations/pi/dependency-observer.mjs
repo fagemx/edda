@@ -1,5 +1,5 @@
 import { realpath, stat } from 'node:fs/promises';
-import { mkdirSync, lstatSync } from 'node:fs';
+import { mkdirSync, lstatSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { digest, readJson, writeJson, validateId, privateRoot } from './store.mjs';
@@ -64,6 +64,27 @@ export function ownerSubscriptionDir(root, ownerRef) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error('Owner subscription directory must not be a symlink');
   return dir;
+}
+
+/// Locate an owner-scoped subscription for a session without a second store: the
+/// owner record itself names its current holder, so scanning
+/// `<root>/owner-lifecycle/*/dependencies.json` finds the subscription that a
+/// session owns. Returns `{ dir, ownerRef }` or null.
+export function findOwnerSubscription(root, sessionId) {
+  const base = join(privateRoot(root), 'owner-lifecycle');
+  let names;
+  try { names = readdirSync(base); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  for (const name of names) {
+    if (!/^[0-9a-f]{64}$/.test(name)) continue;
+    const dir = join(base, name);
+    let info; try { info = lstatSync(dir); } catch { continue; }
+    if (!info.isDirectory() || info.isSymbolicLink()) continue;
+    let record; try { record = readJson(join(dir, 'dependencies.json')); } catch { continue; }
+    if (!record || record.version !== 1 || typeof record.ownerRef !== 'string') continue;
+    if (record.holderSession === sessionId || record.sessionId === sessionId) return { dir, ownerRef: record.ownerRef };
+  }
+  return null;
 }
 
 export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef = null, sessionId, instanceId, policy, runtime, manifestRevision,
@@ -141,6 +162,7 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
       pending: Boolean(data?.notify && data.sequence > data.handledSequence), checkedAt: data?.checkedAt,
       facts: data?.facts || [], lastAlert: delivery, sourceError: data?.sourceError || null,
       deliveryWaits: data?.deliveryWaits || 0, abandonedAttempts: data?.abandonedAttempts || 0,
+      scope: ownerRef ? 'owner' : 'session', ownerRef: ownerRef || null,
       checking: Boolean(operation), pollingIntervalSeconds: pollMs / 1000, coverage: 'selected_tasks_only',
       notice: 'Task status and receipt changes are evidence to inspect, not acceptance or new authority.' };
   }
@@ -169,7 +191,7 @@ export function createDependencyObserver({ dir, subscriptionDir = dir, ownerRef 
       phase: 'observing', sourceError: null });
     if (!data.notify || data.sequence === data.handledSequence) return status();
     const priorStatus = data.lastAlert ? receipt(data.lastAlert.id)?.status : null;
-    if (data.lastAlert && !['started', 'settled', 'failed'].includes(priorStatus)) {
+    if (data.lastAlert && !data.lastAlert.abandoned && !['started', 'settled', 'failed'].includes(priorStatus)) {
       const waits = (data.deliveryWaits ?? 0) + 1;
       if (waits < DELIVERY_WAIT_LIMIT) {
         persist({ ...data, deliveryWaits: waits, phase: 'awaiting_delivery' });

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { requestSession, listSessions } from './client.mjs';
 import { enroll, readEnrollment } from './supervision.mjs';
 import { readJson, registry, writeJson, sessionDir } from './store.mjs';
-import { dependencyConfiguration } from './dependency-observer.mjs';
+import { dependencyConfiguration, findOwnerSubscription } from './dependency-observer.mjs';
 
 export async function followDependencies(root, id, { project, taskIds, notify = false, maxNotifications = 10, scope }) {
   let state;
@@ -26,19 +26,37 @@ export async function followDependencies(root, id, { project, taskIds, notify = 
 }
 
 export async function dependencyStatus(root, id, check = false) {
-  const state = await requestSession(root, id, '/status');
+  let state;
+  try { state = await requestSession(root, id, '/status'); }
+  catch (error) {
+    // Offline: project the persisted subscription (owner-scoped when one owns the
+    // session), so status still resolves without a second subscription store.
+    const owner = findOwnerSubscription(root, id);
+    const record = readJson(join(owner ? owner.dir : sessionDir(root, id), 'dependencies.json'));
+    if (!record) throw error;
+    return { sessionId: id, status: 'offline', scope: owner ? 'owner' : 'session', phase: record.phase,
+      project: record.project, taskIds: record.taskIds, notify: record.notify,
+      changeSequence: record.sequence || 0, handledSequence: record.handledSequence || 0,
+      notifications: record.notifications || 0, checkedAt: record.checkedAt,
+      notice: 'Read-only persisted subscription projection; the live session was unreachable.' };
+  }
   if (!state.capabilities?.includes('dependencies')) return { sessionId: id, status: 'needs_reload' };
   return requestSession(root, id, check ? '/dependencies/check' : '/dependencies', check ? {} : undefined, 2500, state.instanceId);
 }
 
 export async function unfollowDependencies(root, id) {
-  const dir = sessionDir(root, id);
+  const owner = findOwnerSubscription(root, id);
+  const dir = owner ? owner.dir : sessionDir(root, id);
   if (!readJson(join(dir, 'dependencies.json'))) return { sessionId: id, status: 'not_following' };
   // The durable cancellation marker works even when the endpoint is unreachable.
-  writeJson(join(dir, 'dependencies.pause.json'), { sessionId: id, nonce: randomUUID(), pausedAt: new Date().toISOString() });
+  // It carries the same identity the observer's pauseToken() validates.
+  writeJson(join(dir, 'dependencies.pause.json'), owner
+    ? { ownerRef: owner.ownerRef, nonce: randomUUID(), pausedAt: new Date().toISOString() }
+    : { sessionId: id, nonce: randomUUID(), pausedAt: new Date().toISOString() });
+  const scope = owner ? 'owner' : 'session';
   try { await requestSession(root, id, '/dependencies/pause', {}); }
-  catch { return { sessionId: id, status: 'paused', endpointConfirmed: false }; }
-  return { sessionId: id, status: 'paused', endpointConfirmed: true };
+  catch { return { sessionId: id, status: 'paused', endpointConfirmed: false, scope }; }
+  return { sessionId: id, status: 'paused', endpointConfirmed: true, scope };
 }
 
 export async function doctor(root, selectedId) {
