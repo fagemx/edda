@@ -30,10 +30,11 @@ export const sessionDir = (root, id) => join(resolve(root), digest(validateSessi
 // first attempt, and an exhausted window is a typed failure — never a skipped
 // check.
 //
-// The per-attempt spawn timeout shrinks on retry, so the whole bounded sequence
-// costs ~24 s of PowerShell time — not three full 15 s attempts — while still
-// giving a loaded runner a fresh chance after a cold-start overrun.
-const ACL_ATTEMPT_TIMEOUT_MS = [12000, 6000, 6000];
+// The first attempt keeps the base revision's 15000 ms budget; only the retries
+// are shorter (5000 ms each), so the whole bounded sequence costs ~25 s of
+// PowerShell time — not three full 15 s attempts — and a call that needs 12–15 s
+// is not newly cut off on its first try.
+const ACL_ATTEMPT_TIMEOUT_MS = [15000, 5000, 5000];
 // The pause before retry `i + 1`.
 const ACL_RETRY_MS = [0, 500, 1500];
 const aclIo = {
