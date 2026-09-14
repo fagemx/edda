@@ -501,11 +501,15 @@ fn claim(dir: &Path, args: ClaimArgs) -> Result<()> {
     Ok(())
 }
 
-/// Ids are sha256 hex; rejecting anything else keeps caller input out of the
-/// filesystem path so `show --id` cannot traverse out of the mailbox.
+/// Ids are lowercase sha256 hex; rejecting anything else keeps caller input out
+/// of the filesystem path so `show --id` cannot traverse out of the mailbox.
+/// Uppercase hex is rejected too: it passes a case-insensitive shape check but
+/// can never name a stored id, which would surface as `unknown return id`
+/// instead of the invalid-id error this guard exists to give.
 fn validate_message_id(id: &str) -> Result<()> {
-    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("invalid return id '{id}': expected 64 hex characters");
+    let lowercase_hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+    if id.len() != 64 || !id.bytes().all(lowercase_hex) {
+        bail!("invalid return id '{id}': expected 64 lowercase hex characters");
     }
     Ok(())
 }
@@ -773,6 +777,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(short.to_string().contains("invalid return id"));
+        // Uppercase hex has the right shape but can never name a stored sha256.
+        let uppercase = show(
+            &dir,
+            ShowArgs {
+                id: "A".repeat(64),
+                json: false,
+            },
+        )
+        .unwrap_err();
+        assert!(uppercase.to_string().contains("invalid return id"));
         // A well-formed 64-hex id that does not exist is a clean miss.
         let missing = show(
             &dir,
