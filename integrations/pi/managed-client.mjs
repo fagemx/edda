@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, closeSync, unlinkSync, realpathSync, lstatSync, readSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { managedDir, installRuntime, verifyRelease, findPiEntry, alive, inside } from './managed-store.mjs';
@@ -34,6 +34,7 @@ export async function managedStatus(root, id) {
     // run identity. Whitelist fields; never spread config (it holds the prompt).
     if (stateError) return { runId: id, project: config.project, release: config.release,
       provider: config.provider ?? null, model: config.model ?? null, thinking: config.thinking ?? null,
+      owner: config.owner ?? null, returnOwner: config.returnOwner ?? null, ownerRoot: config.ownerRoot ?? null,
       status: 'record_unavailable', state: 'record_unavailable', live: false, lastRecordedPhase: null,
       initialReceipt: { status: 'unknown', live: false }, error: stateError,
       nextAction: 'The run state record is unreadable and was not repaired. Use the identity shown; inspect the owned session directory before any resume.' };
@@ -83,13 +84,19 @@ async function awaitLaunch(root, id, serviceId) {
 }
 
 export async function launchManaged(root, { runId = randomUUID(), project, piEntry, provider, model, prompt,
-  extensions = [], agentDir, noTools = false, noSkills = false, tools, thinking } = {}) {
+  extensions = [], agentDir, noTools = false, noSkills = false, tools, thinking, owner, returnOwner, ownerRoot } = {}) {
   runId = validateId(runId); root = resolve(root);
   if (!project) throw new Error('launch requires --project');
   project = realpathSync(resolve(project));
   if (!lstatSync(project).isDirectory()) throw new Error('Project must be a directory');
   if (prompt !== undefined && (typeof prompt !== 'string' || !prompt.trim() || Buffer.byteLength(prompt) > 16384)) throw new Error('Initial prompt must contain 1..16384 UTF-8 bytes');
   for (const value of [provider, model]) if (value !== undefined && (typeof value !== 'string' || !value.trim() || value.length > 300)) throw new Error('Invalid provider/model');
+  // An unset shell variable expands to the empty string; treat it as absent so a
+  // non-managed assistant can still launch a controller without an owner flag.
+  if (owner === '') owner = undefined;
+  if (returnOwner === '') returnOwner = undefined;
+  for (const value of [owner, returnOwner]) if (value !== undefined && (typeof value !== 'string' || !/^[\p{L}\p{N}_.@ /:-]{1,200}$/u.test(value))) throw new Error('Invalid owner/return-owner label');
+  if (ownerRoot !== undefined && (typeof ownerRoot !== 'string' || !isAbsolute(ownerRoot))) throw new Error('owner-root must be an absolute path');
   if (thinking !== undefined && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(thinking)) throw new Error('Invalid thinking level');
   if (tools !== undefined && (noTools || !Array.isArray(tools) || !tools.length || tools.length > 16 || tools.some((name) => typeof name !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(name)))) throw new Error('Select explicit tool names or noTools, not both');
   if (!Array.isArray(extensions) || extensions.length > 8) throw new Error('Select at most eight trusted extra extensions');
@@ -101,7 +108,8 @@ export async function launchManaged(root, { runId = randomUUID(), project, piEnt
   if (agentDir) agentDir = realpathSync(resolve(agentDir));
   const pi = findPiEntry(piEntry);
   const inputs = { project, pi, provider: provider || null, model: model || null, prompt: prompt ?? null,
-    extensions, agentDir: agentDir || null, noTools: Boolean(noTools), thinking: thinking || null, ...(noSkills ? { noSkills: true } : {}), ...(tools ? { tools } : {}) };
+    extensions, agentDir: agentDir || null, noTools: Boolean(noTools), thinking: thinking || null,
+    owner: owner || null, returnOwner: returnOwner || null, ownerRoot: ownerRoot || null, ...(noSkills ? { noSkills: true } : {}), ...(tools ? { tools } : {}) };
   const dir = managedDir(root, runId, true), previous = readJson(join(dir, 'config.json'));
   if (previous) {
     if (previous.inputsDigest !== digest(JSON.stringify(inputs))) throw new Error('Run ID already has different launch inputs');

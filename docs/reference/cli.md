@@ -1084,6 +1084,11 @@ claims each one exactly once.
 This verb is added by issue #1192 (PR #1193) and is present only in a build that includes it; an older
 installed `edda` does not know `edda return` and exits non-zero.
 
+The mailbox is rooted at the Edda workspace containing the caller's cwd. A managed launcher pins one
+shared root for an assistant and its delegated controllers through the absolute path in
+`EDDA_RETURN_ROOT`, so sibling project directories that do not share an `.edda`/`.git` workspace still
+meet in one mailbox; when the variable is unset the resolved workspace root is used unchanged.
+
 ```bash
 edda return bind --owner assistant/<project> --session "$EDDA_SESSION_ID" [--replaces-session OLD] [--json]
 edda return post --owner assistant/<project> --work <job> --status done|failed [--result T] [--deliverable P] [--message-file F] --session C [--json]

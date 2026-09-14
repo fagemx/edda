@@ -8,10 +8,13 @@ import { randomUUID } from 'node:crypto';
 import { startChannel } from './channel.mjs';
 import { followDependencies, unfollowDependencies, doctor } from './dependency-client.mjs';
 import { enroll } from './supervision.mjs';
-import { digest, writeJson } from './store.mjs';
+import { digest, writeJson, readJson } from './store.mjs';
+import { ownerSubscriptionDir } from './dependency-observer.mjs';
 
 const baseTask = () => ({ task_id: 17, title: 'Upstream review', created_event_id: 'evt-17',
   status: 'running', after: [], scope_paths: [], attempts: 1, receipt: null, evidence_paths: [], failure_reason: null });
+const returnFixture = () => ({ file: process.execPath,
+  args: [fileURLToPath(new URL('./fixtures/edda-return.mjs', import.meta.url))] });
 async function fixture(t, deliver) {
   const project = await mkdtemp(join(tmpdir(), 'edda-dependency-test-'));
   const root = join(project, 'private');
@@ -147,6 +150,72 @@ test('replacement instance stays quiet until explicit refollow', async (t) => {
     assert.equal(next.dependencies.status().phase, 'needs_refollow');
     assert.equal(messages.length, 0);
   } finally { await next.close(); }
+});
+
+test('owner-bound subscription survives assistant replacement and supersedes the old holder', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-dependency-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/owner-subscription';
+  let current = baseTask();
+  const change = async (patch) => { current = { ...current, ...patch }; await writeFile(join(project, 'task.json'), JSON.stringify(current)); };
+  await change({});
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const messagesA = [], messagesB = [];
+  let a, b;
+  t.after(async () => { await b?.close(); await a?.close(); await rm(project, { recursive: true, force: true }); });
+  a = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand,
+    deliver: (text) => { messagesA.push(text); a.messageStarted(text); a.settled(); } });
+  await enroll(root, a.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await a.dependencies.configure({ project, taskIds: ['17'], notify: true, maxNotifications: 10 });
+  await a.dependencies.check();
+  assert.equal(messagesA.length, 1);
+  const dir = ownerSubscriptionDir(root, ownerRef);
+  const persisted = readJson(join(dir, 'dependencies.json'));
+  assert.equal(persisted.ownerRef, ownerRef);
+  assert.equal(persisted.holderSession, a.sessionId);
+  assert.equal(persisted.enabled, true);
+  assert.equal(typeof persisted.scope, 'string');
+
+  // A replacement session with the same stable owner reference adopts the
+  // subscription and observes without any follow/refollow.
+  b = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand,
+    deliver: (text) => { messagesB.push(text); b.messageStarted(text); b.settled(); } });
+  assert.equal(b.dependencies.status().configured, true);
+  assert.notEqual(b.dependencies.status().phase, 'needs_refollow');
+  const adopted = readJson(join(dir, 'dependencies.json'));
+  assert.equal(adopted.ownerRef, ownerRef);
+  assert.equal(adopted.sessionId, b.sessionId);
+  assert.equal(adopted.holderSession, b.sessionId);
+  await change({ status: 'done', receipt: 'B observed this' });
+  await b.dependencies.check();
+  assert.equal(messagesB.length, 1);
+  assert.ok(messagesB[0].includes('B observed this'));
+
+  // The replaced holder is explicitly superseded and stops notifying.
+  await a.dependencies.check();
+  assert.equal(a.dependencies.status().phase, 'superseded');
+  const before = messagesA.length;
+  await change({ receipt: 'A must not send' });
+  await a.dependencies.check();
+  assert.equal(messagesA.length, before);
+});
+
+test('a never-configured replaced holder cannot pause the current subscription', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-pause-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/pause-guard';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  let a, b;
+  t.after(async () => { await b?.close(); await a?.close(); await rm(project, { recursive: true, force: true }); });
+  a = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  b = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerRef, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  await enroll(root, b.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await b.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  assert.notEqual(b.dependencies.status().phase, 'paused');
+  // A never configured, but it must not be able to pause B's subscription.
+  await a.dependencies.pause();
+  assert.notEqual(b.dependencies.status().phase, 'paused');
 });
 
 test('pause during configuration wins and malformed enrollment cannot crash polling', async (t) => {

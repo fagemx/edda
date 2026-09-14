@@ -11,6 +11,10 @@
 //! It is a durable local mailbox, not a scheduler, second task system, role lock
 //! or wake adapter: nothing runs on its own. A responsible session consumes
 //! pending returns when it next takes a turn.
+//!
+//! The mailbox root is the workspace containing the caller's cwd, or the
+//! absolute path in `EDDA_RETURN_ROOT` when a managed launcher pins one shared
+//! root for an assistant and its controllers across sibling project directories.
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
@@ -144,6 +148,25 @@ fn returns_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".edda").join("returns")
 }
 
+/// The mailbox is rooted at the Edda workspace containing the caller's cwd by
+/// default. `EDDA_RETURN_ROOT` lets a managed launcher pin one explicit mailbox
+/// root shared by an assistant and its delegated controllers, whose project
+/// directories need not share an `.edda`/`.git` workspace root. The override is
+/// additive: with it unset the resolved workspace root is used unchanged, so
+/// existing per-project callers keep their mailbox.
+fn mailbox_root(repo_root: &Path, override_value: Option<std::ffi::OsString>) -> Result<PathBuf> {
+    match override_value {
+        Some(value) if !value.is_empty() => {
+            let path = PathBuf::from(&value);
+            if !path.is_absolute() {
+                bail!("EDDA_RETURN_ROOT must be an absolute path");
+            }
+            Ok(path)
+        }
+        _ => Ok(repo_root.to_path_buf()),
+    }
+}
+
 fn owner_file(dir: &Path, owner: &str) -> PathBuf {
     dir.join("owners")
         .join(format!("{}.json", sha256_hex(owner.as_bytes())))
@@ -266,7 +289,8 @@ fn pending_messages(dir: &Path, owner: &str) -> Result<Vec<MessageRecord>> {
 }
 
 pub fn execute(cmd: ReturnCmd, repo_root: &Path) -> Result<()> {
-    let dir = returns_dir(repo_root);
+    let root = mailbox_root(repo_root, std::env::var_os("EDDA_RETURN_ROOT"))?;
+    let dir = returns_dir(&root);
     match cmd {
         ReturnCmd::Bind(args) => bind(&dir, args),
         ReturnCmd::Post(args) => post(&dir, args),
@@ -759,5 +783,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(missing.to_string().contains("unknown return id"));
+    }
+
+    #[test]
+    fn mailbox_root_prefers_an_explicit_absolute_override() {
+        let repo = std::env::temp_dir();
+        assert_eq!(mailbox_root(&repo, None).unwrap(), repo);
+        assert_eq!(
+            mailbox_root(&repo, Some(std::ffi::OsString::new())).unwrap(),
+            repo
+        );
+        let shared = repo.join("shared-owners");
+        assert_eq!(
+            mailbox_root(&repo, Some(shared.clone().into_os_string())).unwrap(),
+            shared
+        );
+        assert!(mailbox_root(&repo, Some(std::ffi::OsString::from("relative/path"))).is_err());
     }
 }

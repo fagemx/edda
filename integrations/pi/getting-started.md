@@ -44,6 +44,23 @@ Replace the project and task paths; the client can run from **any** directory.
 edda-pi launch --project <absolute-project-path> --provider openrouter --model deepseek/deepseek-v4.1-flash --thinking high --prompt-file <absolute-task-file>
 ```
 
+A managed project assistant is launched with a stable owner reference:
+
+```text
+edda-pi launch --project <absolute-project-path> --provider <provider> --model <model> --owner assistant/<project> --prompt-file <absolute-task-file>
+```
+
+The runtime records that owner reference and its current holder automatically; no
+session id is shown to the user. `--owner-root <absolute-dir>` optionally pins
+one shared owner mailbox root; it defaults to `<registry>/owner-mailbox`. The
+assistant and every controller it launches under the same registry share that
+mailbox, so the delegated `assistant/` and `controllers/<job>/` directories do
+not need a common `.edda`/`.git` workspace root. A controller launch passes
+`--return-owner assistant/<project>` (the owner its done/failed return is posted
+against) and receives it as `EDDA_RETURN_OWNER`; if the assistant used a custom
+`--owner-root`, the controller launch repeats it (or passes
+`--owner-root "$EDDA_RETURN_ROOT"`) so both use the same mailbox.
+
 Launch may incur model usage. It creates one owned background runner, a Pi
 session, an immutable integration release and an initial-message intent. It
 prints a run ID before the launch effect; keep that ID if launch times out.
@@ -105,7 +122,27 @@ another ID and blindly repeat the instruction.
 Neither is independent review, acceptance, or a merge grant. `failed`, `unknown`
 and `unconfirmed` need inspection, not optimistic completion labels.
 
-## 5. Stop and resume without replay
+## 5. Owner-bound results across assistant replacement
+
+A delegated job's completion is posted against the stable owner reference, not a
+session id:
+
+```text
+edda return post --owner assistant/<project> --work <job> --status done|failed --result "<one line>" --message-file <report.md> --session <controller-session>
+```
+
+The managed runtime binds the owner reference at launch. When the assistant is
+replaced, the replacement launch rebinds explicitly from the persisted owner
+record, and pending returns are claimed on the **next natural live turn**, exactly
+once. There is no offline wake, timer or scheduler: a claimed return is presented
+once and a superseded holder cannot claim it again. The launcher pins one mailbox
+root through `EDDA_RETURN_ROOT` (default `<registry>/owner-mailbox`), inherited
+by every controller it launches, so the post and the claim meet even though the
+assistant and controller are different project directories. An older installed
+`edda` without the `return` verb exits non-zero, where the session-addressed path
+above still works for the unchanged same-session case.
+
+## 6. Stop and resume without replay
 
 After confirming the run is idle:
 
@@ -185,9 +222,14 @@ Cross-machine process migration is not supported by this client.
 `edda-pi inbox` / `inbox-read <eventId>` read durable Pi stopping evidence.
 `follow <sessionId> --project <path> --tasks <ids> --scope <existing-scope> --notify`
 can notify a **running** Pi about explicitly selected Edda task changes. It is
-opt-in, may use model turns, and needs explicit refollow after Pi replacement.
-It is not arbitrary child discovery, lossless owner wake or automatic restart.
-No supervisor is required for launch, read, send or resume.
+opt-in, may use model turns, and an owner-bound subscription survives session
+replacement without a manual refollow: the subscription is stored under the
+stable owner/work identity, a replacement holder adopts it and resumes
+observation. Producer revision/done signals are read through the supported
+`edda task show` API, never by reading a sibling `.edda/returns` mailbox file.
+No scheduler or polling was added; observation still checks on its existing
+polling interval and before delivery. It is not arbitrary child discovery or
+automatic restart. No supervisor is required for launch, read, send or resume.
 
 Managed fork, automatic owner wake, automatic process recovery and automatic
 workbench registration remain unsupported by this entry. They are not steps the
