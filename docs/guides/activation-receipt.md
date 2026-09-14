@@ -80,7 +80,11 @@ Steps, in order, each also valid to run alone:
    copy instead of rebuild (GH #1133).
 2. **Pi package** — `npm pack ./integrations/pi --ignore-scripts`,
    `npm install --global --ignore-scripts <tarball>`, `edda-pi runtime-install`,
-   then verify the installed release id equals the checkout's.
+   then verify the installed release id equals the checkout's. This is a byte
+   content identity, so `integrations/pi/**` is pinned to LF in `.gitattributes`:
+   npm normalizes a shebang line to LF when it packs, and on a
+   `core.autocrlf=true` checkout a CRLF tree would hash differently from the
+   installed package and fail this step.
 3. **agent-manager** — `scripts/activation/manager-release.mjs` builds the console,
    stops only the proven-current owned instance through the console's own `stop`
    (never a PID kill), writes `release.json` with a timestamped backup, starts it

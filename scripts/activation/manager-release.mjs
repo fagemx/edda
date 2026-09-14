@@ -17,7 +17,7 @@
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -53,6 +53,19 @@ function parse(argv) {
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...options }).trim();
+}
+
+// `npm.cmd` cannot be spawned directly from Node on Windows after the CVE-2024-27980
+// fix (EINVAL); run npm's own CLI through the current Node instead, and fall back
+// to a shell only if that entry point is not beside the running Node.
+function npmCommand(npm) {
+  if (process.platform !== 'win32') return { command: npm, prefix: [], shell: false };
+  const execDir = dirname(process.execPath);
+  for (const candidate of [join(execDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(execDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')]) {
+    if (existsSync(candidate)) return { command: process.execPath, prefix: [candidate], shell: false };
+  }
+  return { command: npm, prefix: [], shell: true };
 }
 
 function readJsonBounded(path) {
@@ -91,6 +104,9 @@ function main(argv) {
   if (!HEX40.test(revision)) { console.error('manager-release: --revision must be a full 40-hex SHA'); process.exit(2); }
   const root = resolve(options.root || join(homedir(), '.edda-agent-manager'));
   const npm = options.npm || (process.platform === 'win32' ? 'npm.cmd' : 'npm');
+  const npmInvocation = npmCommand(npm);
+  const npmRun = (args, cwd) => run(npmInvocation.command, [...npmInvocation.prefix, ...args],
+    { cwd, shell: npmInvocation.shell });
   const packageDir = join(repo, 'integrations', 'agent-manager');
   const cli = join(packageDir, 'dist', 'src', 'cli.js');
   const releaseFile = join(root, 'release.json');
@@ -113,7 +129,8 @@ function main(argv) {
   steps.push({ step: 'write-release', file: releaseFile, previous: readJsonBounded(releaseFile).present });
   if (!options.noRestart) steps.push({ step: 'start', commands: [[process.execPath, [cli, 'start', '--root', root]]] });
 
-  const plan = { repo, root, revision, npm, entrypoint: cli, liveOwnerPid: live ? owner.owner.pid : null,
+  const plan = { repo, root, revision, npm, resolvedNpm: { command: npmInvocation.command, prefix: npmInvocation.prefix, shell: npmInvocation.shell },
+    entrypoint: cli, liveOwnerPid: live ? owner.owner.pid : null,
     noRestart: options.noRestart, steps: steps.map((s) => s.step) };
   if (options.dryRun) {
     if (options.json) console.log(JSON.stringify({ status: 'dry_run', ...plan }, null, 2));
@@ -132,8 +149,8 @@ function main(argv) {
   const executed = [];
   try {
     const packageJson = packageDir;
-    if (!existsSync(join(packageJson, 'node_modules'))) { run(npm, ['ci', '--ignore-scripts'], { cwd: packageJson }); executed.push('npm-ci'); }
-    run(npm, ['run', 'build'], { cwd: packageJson }); executed.push('npm-build');
+    if (!existsSync(join(packageJson, 'node_modules'))) { npmRun(['ci', '--ignore-scripts'], packageJson); executed.push('npm-ci'); }
+    npmRun(['run', 'build'], packageJson); executed.push('npm-build');
     if (!existsSync(cli)) throw new Error(`build did not produce ${cli}`);
 
     if (!options.noRestart) {

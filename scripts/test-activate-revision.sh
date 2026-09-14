@@ -141,4 +141,21 @@ else
   pass "manager-release refuses a non-40-hex revision"
 fi
 
+# ── Pi content identity depends on stable line endings ────────────────
+# A CRLF checkout hashes differently from npm's shebang-normalized install, so
+# the route cannot verify its own Pi step. `integrations/pi/**` is pinned to LF.
+for f in integrations/pi/cli.mjs integrations/pi/package.json integrations/pi/private-directory.ps1; do
+  attr=$(git check-attr eol -- "$f" | sed 's/.*: //')
+  [ "$attr" = "lf" ] || fail "$f is not pinned to LF (git check-attr eol -> $attr)"
+done
+pass "integrations/pi files are pinned to LF"
+
+# ── manager-release resolves npm to a spawnable command ───────────────
+# `npm.cmd` cannot be spawned directly from Node on Windows (EINVAL).
+node "$writer" --repo "$fixture" --root "$work/manager" --revision "$fixture_rev" --dry-run --json >"$work/writer-npm.json" 2>&1 \
+  || fail "manager-release dry run failed while resolving npm"
+node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));const n=r.resolvedNpm;if(!n)process.exit(1);if(n.command==='npm.cmd'&&n.shell!==true)process.exit(2);if(process.platform==='win32'&&!/npm-cli\.js$/.test((n.prefix||[]).join(''))&&n.shell!==true)process.exit(3)" "$work/writer-npm.json" \
+  || fail "manager-release would spawn an unspawnable npm command"
+pass "manager-release resolves a spawnable npm command"
+
 echo "PASS test-activate-revision"
