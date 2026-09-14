@@ -8,7 +8,7 @@
 // or agent process. Its only external reads are bounded one-shot `git` /
 // `edda --version` probes and the authenticated `GET /api/service` health
 // check. It never prints or returns the agent-manager owner token.
-import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -43,6 +43,16 @@ function pidAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; }
   catch (error) { return error.code !== 'ESRCH'; }
+}
+
+// Same directory, allowing for Windows case and for junctions/symlinks.
+function samePath(left, right) {
+  const normalize = (value) => {
+    let resolved = resolve(value);
+    try { resolved = realpathSync.native(resolved); } catch { /* keep the resolved path */ }
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
 }
 
 // Read-only content identity of a runtime source directory. File selection and
@@ -181,17 +191,23 @@ function piLeg(registryRoot, repo, clientRoot) {
     installedReleaseId: null, installedReleaseVersion: null, repoReleaseId: null, repoReleaseVersion: null,
     registryRoot: root, pinnedReleaseIds: [], relevantReleaseIds: [], error: null };
   const errors = [];
+  const repoDir = join(resolve(repo), 'integrations', 'pi');
+  // When the resolved "installed" root is the checkout itself, the Pi leg would
+  // compare a directory with itself and could report false coherence. Refuse
+  // that instead: the leg is unobserved and the receipt fails closed as partial.
+  const selfComparison = samePath(client.root, repoDir);
   try {
     const meta = readRecord(join(client.root, 'package.json'));
     if (meta.value && typeof meta.value.version === 'string') leg.clientVersion = meta.value.version;
   } catch (error) { errors.push(shortError(error)); }
   try {
     const identity = releaseIdentity(client.root);
-    leg.installedReleaseId = identity.id;
-    leg.installedReleaseVersion = identity.version;
-    leg.observed = true;
+    if (!selfComparison) {
+      leg.installedReleaseId = identity.id;
+      leg.installedReleaseVersion = identity.version;
+      leg.observed = true;
+    }
   } catch (error) { errors.push(shortError(error)); }
-  const repoDir = join(resolve(repo), 'integrations', 'pi');
   try {
     const info = lstatSync(repoDir);
     if (info.isDirectory() && !info.isSymbolicLink()) {
@@ -243,7 +259,8 @@ function piLeg(registryRoot, repo, clientRoot) {
     }
   } catch (error) { if (error.code !== 'ENOENT') errors.push(shortError(error)); }
   leg.relevantReleaseIds = relevant;
-  if (errors.length) leg.error = errors[0];
+  if (selfComparison) leg.error = 'installed client package was not resolved independently of the checkout; pass --client-root or set EDDA_PI_PACKAGE_ROOT';
+  else if (errors.length) leg.error = errors[0];
   return leg;
 }
 

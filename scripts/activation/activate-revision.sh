@@ -82,7 +82,7 @@ receipt="$repo/integrations/pi/activation-receipt.mjs"
 [ -f "$receipt" ] || die "missing $receipt (the read-only receipt module)"
 
 receipt_json() {
-  set -- --json --repo "$repo"
+  set -- --json --repo "$repo" --edda-bin "$edda_bin"
   if [ -n "$registry_root" ]; then set -- "$@" --registry-root "$registry_root"; fi
   if [ -n "$manager_root" ]; then set -- "$@" --manager-root "$manager_root"; fi
   node "$receipt" "$@"

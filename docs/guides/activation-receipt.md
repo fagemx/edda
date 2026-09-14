@@ -49,11 +49,12 @@ computed for the checkout's `integrations/pi`, both derived exactly as
 `installRuntime()` derives the digest-addressed release. The installed directory is
 resolved independently of where the command runs — the sibling global
 `node_modules/@edda/pi-session-channel` of the Node executable (or `EDDA_PI_PACKAGE_ROOT`
-/ `--client-root` / a source checkout as a last resort, reported as `clientSource`)
-— so running the receipt from a source tree does not compare a directory with
-itself. Old releases are listed in `pinnedReleaseIds` and are never hidden or
-deleted. The receipt never claims a running session was upgraded in place; per-run
-pinned releases stay visible through `edda-pi run-status`.
+/ `--client-root` / a source checkout as a last resort, reported as `clientSource`).
+If that resolution lands on the checkout itself, the leg is refused as unobserved
+instead of comparing a directory with itself: the receipt reports `partial` and
+`--check` exits `2`. Old releases are listed in `pinnedReleaseIds` and are never
+hidden or deleted. The receipt never claims a running session was upgraded in
+place; per-run pinned releases stay visible through `edda-pi run-status`.
 
 ## The activation route
 

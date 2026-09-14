@@ -103,8 +103,13 @@ function main(argv) {
   const live = owner.owner ? pidAlive(owner.owner.pid) : false;
   const steps = [];
   steps.push({ step: 'build', commands: [[npm, ['ci', '--ignore-scripts'], packageDir], [npm, ['run', 'build'], packageDir]] });
-  if (live) steps.push({ step: 'stop', commands: [[process.execPath, [cli, 'stop', '--root', root]]], owner: { pid: owner.owner.pid, instanceId: owner.owner.instanceId } });
-  else if (owner.present) steps.push({ step: 'recover', commands: [[process.execPath, [cli, 'recover', '--root', root]]], owner: { pid: owner.owner?.pid ?? null, instanceId: owner.owner?.instanceId ?? null } });
+  // --no-restart means "do not touch the running service at all": the metadata is
+  // still rebuilt and rewritten, but the live console is neither stopped nor
+  // started. Stopping it here and never starting it back was the bug.
+  if (!options.noRestart) {
+    if (live) steps.push({ step: 'stop', commands: [[process.execPath, [cli, 'stop', '--root', root]]], owner: { pid: owner.owner.pid, instanceId: owner.owner.instanceId } });
+    else if (owner.present) steps.push({ step: 'recover', commands: [[process.execPath, [cli, 'recover', '--root', root]]], owner: { pid: owner.owner?.pid ?? null, instanceId: owner.owner?.instanceId ?? null } });
+  }
   steps.push({ step: 'write-release', file: releaseFile, previous: readJsonBounded(releaseFile).present });
   if (!options.noRestart) steps.push({ step: 'start', commands: [[process.execPath, [cli, 'start', '--root', root]]] });
 
@@ -131,8 +136,10 @@ function main(argv) {
     run(npm, ['run', 'build'], { cwd: packageJson }); executed.push('npm-build');
     if (!existsSync(cli)) throw new Error(`build did not produce ${cli}`);
 
-    if (live) { run(process.execPath, [cli, 'stop', '--root', root]); executed.push('stop'); }
-    else if (owner.present) { run(process.execPath, [cli, 'recover', '--root', root]); executed.push('recover'); }
+    if (!options.noRestart) {
+      if (live) { run(process.execPath, [cli, 'stop', '--root', root]); executed.push('stop'); }
+      else if (owner.present) { run(process.execPath, [cli, 'recover', '--root', root]); executed.push('recover'); }
+    }
 
     const previous = readJsonBounded(releaseFile).value;
     if (existsSync(releaseFile)) {

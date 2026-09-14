@@ -110,6 +110,21 @@ node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));
 [ "$release_before" = "$(cat "$manager/release.json")" ] || fail "manager-release dry run changed release.json"
 pass "manager-release dry run plans and mutates nothing"
 
+# A live owner must not be stopped when --no-restart is requested. On Git Bash the
+# shell's Windows PID lives in /proc/<pid>/winpid; on Linux $$ is the real PID.
+live_pid=$(cat "/proc/$$/winpid" 2>/dev/null || printf '%s' "$$")
+printf '%s\n' '{"version":1,"pid":'"$live_pid"',"instanceId":"fixture","origin":"http://127.0.0.1:4390","token":"fixture-token","startedAt":"2026-09-13T00:00:00.000Z"}' >"$manager/owner.json"
+node "$writer" --repo "$fixture" --root "$manager" --revision "$fixture_rev" --dry-run --json >"$work/writer-restart.json" 2>&1 \
+  || fail "manager-release --dry-run with a live owner exited non-zero"
+node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));if(!r.steps.includes('stop')||!r.steps.includes('start'))process.exit(1)" "$work/writer-restart.json" \
+  || fail "manager-release default plan did not stop/start a live owner"
+node "$writer" --repo "$fixture" --root "$manager" --revision "$fixture_rev" --dry-run --no-restart --json >"$work/writer-norestart.json" 2>&1 \
+  || fail "manager-release --dry-run --no-restart exited non-zero"
+node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));if(r.steps.includes('stop')||r.steps.includes('recover')||r.steps.includes('start'))process.exit(1);if(!r.steps.includes('write-release'))process.exit(2)" "$work/writer-norestart.json" \
+  || fail "manager-release --no-restart still planned to stop or start the service"
+rm -f "$manager/owner.json"
+pass "manager-release --no-restart never stops a live owner"
+
 printf '%s\n' '{"version":1,"pid":"not-an-int"}' >"$manager/owner.json"
 if node "$writer" --repo "$fixture" --root "$manager" --revision "$fixture_rev" >"$work/writer-invalid.txt" 2>&1; then
   fail "manager-release accepted an unusable owner.json"

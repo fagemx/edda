@@ -187,6 +187,10 @@ async function activationFixture(t) {
   const repo = join(dir, 'repo');
   await mkdir(join(repo, 'integrations'), { recursive: true });
   await cp(packageDir, join(repo, 'integrations', 'pi'), { recursive: true });
+  // A distinct installed root with identical content: the receipt must compare
+  // two directories, never a directory with itself.
+  const clientRoot = join(dir, 'installed-client');
+  await cp(packageDir, clientRoot, { recursive: true });
   await git(repo, ['init']);
   await git(repo, ['add', '-A']);
   await git(repo, ['-c', 'user.email=worker@example.invalid', '-c', 'user.name=worker', 'commit', '-m', 'fixture']);
@@ -204,8 +208,7 @@ async function activationFixture(t) {
 
   const fakeEdda = join(dir, 'fake-edda.mjs');
   await writeFile(fakeEdda, `process.stdout.write(${JSON.stringify(`edda 0.6.1 (${head.slice(0, 12)} 2026-09-13)`)} + '\\n');\n`);
-  return { dir, repo, head, managerRoot, registryRoot: join(dir, 'registry'), token, release, fakeEdda, origin,
-    clientRoot: join(repo, 'integrations', 'pi') };
+  return { dir, repo, head, managerRoot, registryRoot: join(dir, 'registry'), token, release, fakeEdda, origin, clientRoot };
 }
 
 test('end-to-end fixture observes all four legs coherent, and --check exits 0', async (t) => {
@@ -268,6 +271,24 @@ test('Pi content drift between the installed client and the checkout fails close
     '--manager-root', managerRoot, '--client-root', otherClient, '--edda-bin', fakeEdda], { timeout: 30000 }).catch((error) => error);
   assert.equal(outcome.code, 2);
   assert.ok(JSON.parse(outcome.stdout).coherence.findings.some((finding) => finding.code === 'pi_content_drift'));
+});
+
+test('a checkout used as its own installed root fails closed instead of comparing itself', async (t) => {
+  const { repo, head, managerRoot, registryRoot, fakeEdda } = await activationFixture(t);
+  const sameDir = join(repo, 'integrations', 'pi');
+  const receipt = await activationReceipt({ root: registryRoot, repo, clientRoot: sameDir, managerRoot,
+    runVersion: () => `edda 0.6.1 (${head.slice(0, 12)} 2026-09-13)`,
+    fetch: async () => ({ version: 1, startedAt: '2026-09-13T00:00:00.000Z', agents: 2 }) });
+  assert.equal(receipt.pi.observed, false);
+  assert.match(receipt.pi.error, /not resolved independently/);
+  assert.equal(receipt.coherence.status, 'partial');
+  assert.equal(receipt.coherence.observedLegs, 3);
+  assert.deepEqual(receipt.coherence.findings, []);
+
+  const outcome = await exec(process.execPath, [cli, '--check', '--json', '--repo', repo, '--registry-root', registryRoot,
+    '--manager-root', managerRoot, '--client-root', sameDir, '--edda-bin', fakeEdda], { timeout: 30000 }).catch((error) => error);
+  assert.equal(outcome.code, 2);
+  assert.equal(JSON.parse(outcome.stdout).coherence.status, 'partial');
 });
 
 test('the receipt never leaks the agent-manager owner token', async (t) => {
