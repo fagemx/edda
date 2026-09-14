@@ -457,3 +457,18 @@ fn resume_hint_does_not_embed_a_cwd_relative_plan_path() {
         "`edda conduct run <plan.yaml> --cwd C:/work/wt`"
     );
 }
+
+/// GH-557 verifier report gap 3: a lone corrupt state must not be reported
+/// as "No plans found" by auto-detection.
+#[test]
+fn corrupt_only_state_is_not_reported_as_no_plans() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("main");
+    let dir = main.join(".edda").join("conductor").join("wave-b");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("state.json"), "{ not json").unwrap();
+
+    let err = retry(&main, "p1", None).unwrap_err().to_string();
+    assert!(err.contains("unreadable"), "got: {err}");
+    assert!(!err.contains("No plans found"), "got: {err}");
+}

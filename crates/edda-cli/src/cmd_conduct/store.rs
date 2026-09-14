@@ -305,11 +305,21 @@ fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
         .map(|(_, store)| store)
         .collect();
     if holding.is_empty() {
-        if let Some((_, store, e)) = corrupt.iter().find(|(name, _, _)| name == plan) {
-            return Err(anyhow::anyhow!(
-                "plan \"{plan}\" state in {} is unreadable: {e:#}",
-                store.display()
-            ));
+        if let Some((_, _, e)) = corrupt.iter().find(|(name, _, _)| name == plan) {
+            return Err(anyhow::anyhow!("{e:#}"));
+        }
+    } else {
+        // A healthy store outranks a corrupt same-name duplicate, but the
+        // duplicate must not vanish silently: a destructive verb acting on
+        // one store while another is unreadable is exactly the ambiguity
+        // worth surfacing (GH-557 verifier report, gap 1).
+        for (name, store, e) in &corrupt {
+            if name == plan {
+                eprintln!(
+                    "⚠ plan \"{plan}\" state in {} is unreadable and shadowed: {e:#}",
+                    store.display()
+                );
+            }
         }
     }
     Ok(holding)
@@ -393,6 +403,16 @@ pub(super) fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Res
     }
 
     if contributing.is_empty() {
+        if !corrupt.is_empty() {
+            let shown = corrupt
+                .iter()
+                .map(|(name, store, _)| format!("{name} ({})", store.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "plan state unreadable for: {shown}. Specify --plan <name>, or repair the state."
+            );
+        }
         bail!("No plans found. Specify --plan <name>.");
     }
     if contributing.len() > 1 {
