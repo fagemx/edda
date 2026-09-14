@@ -30,6 +30,9 @@ node integrations/pi/activation-receipt.mjs --json
 node integrations/pi/activation-receipt.mjs --check     # exit 2 unless coherent
 ```
 
+`--client-root PATH` (or `EDDA_PI_PACKAGE_ROOT`) selects the installed package
+directory when it is not the Node executable's sibling `node_modules`.
+
 The receipt distinguishes exactly the four revisions and reports a fail-closed
 `coherence`:
 
@@ -43,10 +46,14 @@ The receipt distinguishes exactly the four revisions and reports a fail-closed
 The Pi leg is the part that semver cannot answer: `installedReleaseId` is the
 content id of the installed package directory and `repoReleaseId` is the same id
 computed for the checkout's `integrations/pi`, both derived exactly as
-`installRuntime()` derives the digest-addressed release. Old releases are listed in
-`pinnedReleaseIds` and are never hidden or deleted. The receipt never claims a
-running session was upgraded in place; per-run pinned releases stay visible through
-`edda-pi run-status`.
+`installRuntime()` derives the digest-addressed release. The installed directory is
+resolved independently of where the command runs — the sibling global
+`node_modules/@edda/pi-session-channel` of the Node executable (or `EDDA_PI_PACKAGE_ROOT`
+/ `--client-root` / a source checkout as a last resort, reported as `clientSource`)
+— so running the receipt from a source tree does not compare a directory with
+itself. Old releases are listed in `pinnedReleaseIds` and are never hidden or
+deleted. The receipt never claims a running session was upgraded in place; per-run
+pinned releases stay visible through `edda-pi run-status`.
 
 ## The activation route
 

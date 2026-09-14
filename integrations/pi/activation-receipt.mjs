@@ -148,19 +148,45 @@ function eddaLeg(binary, runVersion) {
   return leg;
 }
 
-function piLeg(registryRoot, repo) {
+// Where the *installed* client lives. The running module is the installed
+// package when the receipt is invoked as `edda-pi`, but it is the source tree
+// when invoked as `node integrations/pi/activation-receipt.mjs`. Measuring the
+// source tree as "installed" would make the Pi leg compare a directory to
+// itself, so resolve the global install explicitly and report the source used.
+function resolveClientRoot(explicit) {
+  if (typeof explicit === 'string' && explicit) return { root: resolve(explicit), source: 'explicit' };
+  if (typeof process.env.EDDA_PI_PACKAGE_ROOT === 'string' && process.env.EDDA_PI_PACKAGE_ROOT) {
+    return { root: resolve(process.env.EDDA_PI_PACKAGE_ROOT), source: 'env' };
+  }
+  const packagePath = '@edda/pi-session-channel';
+  const execDir = dirname(process.execPath);
+  for (const [candidate, source] of [
+    [join(execDir, 'node_modules', packagePath), 'global'],
+    [join(execDir, '..', 'lib', 'node_modules', packagePath), 'global'],
+  ]) {
+    try {
+      const info = lstatSync(candidate);
+      if (info.isDirectory() && !info.isSymbolicLink()) return { root: resolve(candidate), source };
+    } catch { /* absent candidate is not an error */ }
+  }
+  return { root: dirname(fileURLToPath(import.meta.url)), source: 'module' };
+}
+
+function piLeg(registryRoot, repo, clientRoot) {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const client = resolveClientRoot(clientRoot);
   const root = resolve(registryRoot);
-  const leg = { observed: false, clientPath: join(moduleDir, 'cli.mjs'), clientVersion: null,
+  const leg = { observed: false, clientPath: join(client.root, 'cli.mjs'), clientSource: client.source,
+    modulePath: join(moduleDir, 'activation-receipt.mjs'), clientVersion: null,
     installedReleaseId: null, installedReleaseVersion: null, repoReleaseId: null, repoReleaseVersion: null,
     registryRoot: root, pinnedReleaseIds: [], relevantReleaseIds: [], error: null };
   const errors = [];
   try {
-    const meta = readRecord(join(moduleDir, 'package.json'));
+    const meta = readRecord(join(client.root, 'package.json'));
     if (meta.value && typeof meta.value.version === 'string') leg.clientVersion = meta.value.version;
   } catch (error) { errors.push(shortError(error)); }
   try {
-    const identity = releaseIdentity(moduleDir);
+    const identity = releaseIdentity(client.root);
     leg.installedReleaseId = identity.id;
     leg.installedReleaseVersion = identity.version;
     leg.observed = true;
@@ -187,8 +213,14 @@ function piLeg(registryRoot, repo) {
         try { stat = lstatSync(dir); } catch { continue; }
         if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
         const record = readRecord(join(dir, 'release.json'));
-        const version = record.value && (typeof record.value.version === 'string' || typeof record.value.version === 'number')
+        const manifestVersion = record.value && (typeof record.value.version === 'string' || typeof record.value.version === 'number')
           ? String(record.value.version) : null;
+        // The runtime release manifest stores its own format version, not the
+        // package semver; prefer the snapshotted package.json so the version
+        // reported here means the same thing as `installedReleaseVersion`.
+        let version = manifestVersion;
+        const snapshot = readRecord(join(dir, 'package.json'));
+        if (snapshot.value && typeof snapshot.value.version === 'string' && snapshot.value.version) version = snapshot.value.version;
         pinned.push({ id: name, version, path: dir, mtimeMs: stat.mtimeMs });
       }
       pinned.sort((left, right) => (right.mtimeMs - left.mtimeMs) || left.id.localeCompare(right.id));
@@ -283,13 +315,13 @@ export async function activationReceipt(options = {}) {
 
   const repository = repositoryLeg(repo, runGit);
   const edda = eddaLeg(eddaBin, runVersion);
-  const pi = piLeg(root, repo);
+  const pi = piLeg(root, repo, options.clientRoot);
   const manager = await managerLeg(managerRoot, timeoutMs, fetchImpl);
   const legs = { repository, edda, pi, manager };
   return { receiptVersion: RECEIPT_VERSION, observedAt: new Date().toISOString(), ...legs, coherence: evaluateCoherence(legs) };
 }
 
-const VALUE_FLAGS = new Set(['--repo', '--registry-root', '--manager-root', '--edda-bin', '--timeout']);
+const VALUE_FLAGS = new Set(['--repo', '--registry-root', '--manager-root', '--edda-bin', '--client-root', '--timeout']);
 function parseArgs(argv) {
   const options = { json: false, check: false };
   for (let index = 0; index < argv.length; index += 1) {
@@ -304,6 +336,7 @@ function parseArgs(argv) {
       else if (flag === '--registry-root') options.registryRoot = value;
       else if (flag === '--manager-root') options.managerRoot = value;
       else if (flag === '--edda-bin') options.eddaBin = value;
+      else if (flag === '--client-root') options.clientRoot = value;
       else {
         const timeout = Number(value);
         if (!Number.isFinite(timeout) || timeout <= 0) throw new Error(`Invalid --timeout value: ${value}`);
@@ -328,7 +361,7 @@ function formatReceipt(receipt) {
     `edda        ${edda.binary}`,
     `  version   ${edda.observed ? `${or(edda.version, 'unknown')} (${or(edda.revision, 'unknown')}${edda.dirtyBuild ? '-dirty' : ''} ${or(edda.builtAt, 'unknown')})` : `unobserved${edda.error ? ` (${edda.error})` : ''}`}`,
     `pi          ${pi.clientPath}`,
-    `  client    ${or(pi.clientVersion, 'unknown')}`,
+    `  client    ${or(pi.clientVersion, 'unknown')} (${or(pi.clientSource, 'unknown')})`,
     `  installed ${or(pi.installedReleaseId, 'unobserved')}${pi.installedReleaseVersion ? ` (${pi.installedReleaseVersion})` : ''}`,
     `  repo      ${or(pi.repoReleaseId, 'unobserved')}${pi.repoReleaseVersion ? ` (${pi.repoReleaseVersion})` : ''}`,
     `  registry  ${pi.registryRoot}`,
@@ -350,7 +383,7 @@ async function main(argv) {
   try { options = parseArgs(argv); }
   catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 2; return; }
   const receipt = await activationReceipt({ repo: options.repo, root: options.registryRoot,
-    managerRoot: options.managerRoot, eddaBin: options.eddaBin, timeoutMs: options.timeout });
+    managerRoot: options.managerRoot, eddaBin: options.eddaBin, clientRoot: options.clientRoot, timeoutMs: options.timeout });
   process.stdout.write(options.json ? `${JSON.stringify(receipt, null, 2)}\n` : `${formatReceipt(receipt)}\n`);
   if (options.check) process.exitCode = receipt.coherence.status === 'coherent' ? 0 : 2;
 }

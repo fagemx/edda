@@ -92,7 +92,7 @@ test('activationReceipt is strictly read-only over an absent and a seeded regist
   const empty = join(dir, 'empty-registry');
   await mkdir(empty);
   const beforeEmpty = await snapshot(empty);
-  const emptyReceipt = await activationReceipt({ root: empty, repo: join(dir, 'not-a-repo'),
+  const emptyReceipt = await activationReceipt({ root: empty, repo: join(dir, 'not-a-repo'), clientRoot: packageDir,
     managerRoot: join(dir, 'no-manager'), runGit: () => { throw new Error('no git'); },
     runVersion: () => { throw new Error('no edda'); }, fetch: async () => ({ version: 1, startedAt: 'x', agents: 0 }) });
   assert.deepEqual(await snapshot(empty), beforeEmpty);
@@ -102,19 +102,26 @@ test('activationReceipt is strictly read-only over an absent and a seeded regist
   assert.equal(emptyReceipt.edda.observed, false);
 
   const seeded = join(dir, 'seeded-registry');
-  const releaseId = 'd'.repeat(64), runId = randomUUID();
+  const releaseId = 'd'.repeat(64), runId = randomUUID(), releaseId2 = 'e'.repeat(64);
   await mkdir(join(seeded, 'releases', releaseId), { recursive: true });
   await writeFile(join(seeded, 'releases', releaseId, 'release.json'), JSON.stringify({ version: 1, id: releaseId, files: {} }));
+  // A release snapshot carries package.json; its semver must win over the
+  // manifest's own format version so `version` means one thing everywhere.
+  await mkdir(join(seeded, 'releases', releaseId2), { recursive: true });
+  await writeFile(join(seeded, 'releases', releaseId2, 'release.json'), JSON.stringify({ version: 1, id: releaseId2, files: {} }));
+  await writeFile(join(seeded, 'releases', releaseId2, 'package.json'), JSON.stringify({ version: '0.9.9' }));
   await mkdir(join(seeded, 'managed', runId), { recursive: true });
   await writeFile(join(seeded, 'managed', runId, 'config.json'), JSON.stringify({ version: 1, runId,
     root: resolve(seeded), project: dir, release: { id: releaseId, path: join(seeded, 'releases', releaseId) } }));
   const beforeSeeded = await snapshot(seeded);
-  const seededReceipt = await activationReceipt({ root: seeded, repo: join(dir, 'not-a-repo'),
+  const seededReceipt = await activationReceipt({ root: seeded, repo: join(dir, 'not-a-repo'), clientRoot: packageDir,
     managerRoot: join(dir, 'no-manager'), runGit: () => { throw new Error('no git'); },
     runVersion: () => { throw new Error('no edda'); }, fetch: async () => ({ version: 1, startedAt: 'x', agents: 0 }) });
   assert.deepEqual(await snapshot(seeded), beforeSeeded);
-  assert.deepEqual(seededReceipt.pi.pinnedReleaseIds.map((entry) => entry.id), [releaseId]);
-  assert.equal(seededReceipt.pi.pinnedReleaseIds[0].version, '1');
+  assert.deepEqual(seededReceipt.pi.pinnedReleaseIds.map((entry) => entry.id).sort(), [releaseId, releaseId2]);
+  const byId = Object.fromEntries(seededReceipt.pi.pinnedReleaseIds.map((entry) => [entry.id, entry]));
+  assert.equal(byId[releaseId].version, '1', 'manifest-only release falls back to the manifest version');
+  assert.equal(byId[releaseId2].version, '0.9.9', 'snapshot package.json semver wins over the manifest version');
   assert.deepEqual(seededReceipt.pi.relevantReleaseIds, [releaseId]);
 });
 
@@ -197,12 +204,13 @@ async function activationFixture(t) {
 
   const fakeEdda = join(dir, 'fake-edda.mjs');
   await writeFile(fakeEdda, `process.stdout.write(${JSON.stringify(`edda 0.6.1 (${head.slice(0, 12)} 2026-09-13)`)} + '\\n');\n`);
-  return { dir, repo, head, managerRoot, registryRoot: join(dir, 'registry'), token, release, fakeEdda, origin };
+  return { dir, repo, head, managerRoot, registryRoot: join(dir, 'registry'), token, release, fakeEdda, origin,
+    clientRoot: join(repo, 'integrations', 'pi') };
 }
 
 test('end-to-end fixture observes all four legs coherent, and --check exits 0', async (t) => {
-  const { repo, head, managerRoot, registryRoot, token, fakeEdda } = await activationFixture(t);
-  const receipt = await activationReceipt({ root: registryRoot, repo, managerRoot,
+  const { repo, head, managerRoot, registryRoot, token, fakeEdda, clientRoot } = await activationFixture(t);
+  const receipt = await activationReceipt({ root: registryRoot, repo, clientRoot, managerRoot,
     runVersion: () => `edda 0.6.1 (${head.slice(0, 12)} 2026-09-13)`,
     fetch: async (url, options) => {
       assert.equal(options.headers.Authorization, `Bearer ${token}`);
@@ -218,27 +226,48 @@ test('end-to-end fixture observes all four legs coherent, and --check exits 0', 
   assert.deepEqual(receipt.coherence.findings, []);
 
   const ok = await exec(process.execPath, [cli, '--check', '--json', '--repo', repo, '--registry-root', registryRoot,
-    '--manager-root', managerRoot, '--edda-bin', fakeEdda], { timeout: 30000 });
+    '--manager-root', managerRoot, '--client-root', clientRoot, '--edda-bin', fakeEdda], { timeout: 30000 });
   const parsed = JSON.parse(ok.stdout);
   assert.equal(parsed.coherence.status, 'coherent');
   assert.equal(parsed.receiptVersion, 1);
 });
 
 test('drift fixture fails closed: --check exits 2 and the finding is visible', async (t) => {
-  const { repo, head, managerRoot, registryRoot, release, fakeEdda } = await activationFixture(t);
+  const { repo, head, managerRoot, registryRoot, release, fakeEdda, clientRoot } = await activationFixture(t);
   await writeFile(join(managerRoot, 'release.json'), JSON.stringify({ ...release, headSha: '0'.repeat(40) }));
-  const receipt = await activationReceipt({ root: registryRoot, repo, managerRoot,
+  const receipt = await activationReceipt({ root: registryRoot, repo, clientRoot, managerRoot,
     runVersion: () => `edda 0.6.1 (${head.slice(0, 12)} 2026-09-13)`,
     fetch: async () => ({ version: 1, startedAt: '2026-09-13T00:00:00.000Z', agents: 2 }) });
   assert.equal(receipt.coherence.status, 'drift');
   assert.deepEqual(receipt.coherence.findings.map((finding) => finding.code), ['manager_configured_revision_mismatch']);
 
   const outcome = await exec(process.execPath, [cli, '--check', '--json', '--repo', repo, '--registry-root', registryRoot,
-    '--manager-root', managerRoot, '--edda-bin', fakeEdda], { timeout: 30000 }).catch((error) => error);
+    '--manager-root', managerRoot, '--client-root', clientRoot, '--edda-bin', fakeEdda], { timeout: 30000 }).catch((error) => error);
   assert.equal(outcome.code, 2);
   const parsed = JSON.parse(outcome.stdout);
   assert.equal(parsed.coherence.status, 'drift');
   assert.ok(parsed.coherence.findings.some((finding) => finding.code === 'manager_configured_revision_mismatch'));
+});
+
+test('Pi content drift between the installed client and the checkout fails closed', async (t) => {
+  const { dir, repo, head, managerRoot, registryRoot, fakeEdda } = await activationFixture(t);
+  const otherClient = join(dir, 'other-client');
+  await mkdir(otherClient, { recursive: true });
+  await writeFile(join(otherClient, 'package.json'), JSON.stringify({ name: '@edda/pi-session-channel', version: '9.9.9' }));
+  await writeFile(join(otherClient, 'managed-runner.mjs'), 'export const runner = true;\n');
+  await writeFile(join(otherClient, 'extension.mjs'), 'export const extension = true;\n');
+  const receipt = await activationReceipt({ root: registryRoot, repo, clientRoot: otherClient, managerRoot,
+    runVersion: () => `edda 0.6.1 (${head.slice(0, 12)} 2026-09-13)`,
+    fetch: async () => ({ version: 1, startedAt: '2026-09-13T00:00:00.000Z', agents: 2 }) });
+  assert.equal(receipt.pi.clientSource, 'explicit');
+  assert.equal(receipt.pi.installedReleaseVersion, '9.9.9');
+  assert.equal(receipt.coherence.status, 'drift');
+  assert.deepEqual(receipt.coherence.findings.map((finding) => finding.code), ['pi_content_drift']);
+
+  const outcome = await exec(process.execPath, [cli, '--check', '--json', '--repo', repo, '--registry-root', registryRoot,
+    '--manager-root', managerRoot, '--client-root', otherClient, '--edda-bin', fakeEdda], { timeout: 30000 }).catch((error) => error);
+  assert.equal(outcome.code, 2);
+  assert.ok(JSON.parse(outcome.stdout).coherence.findings.some((finding) => finding.code === 'pi_content_drift'));
 });
 
 test('the receipt never leaks the agent-manager owner token', async (t) => {
@@ -250,7 +279,7 @@ test('the receipt never leaks the agent-manager owner token', async (t) => {
   await writeFile(join(managerRoot, 'owner.json'), JSON.stringify({ version: 1, pid: process.pid, instanceId: randomUUID(),
     origin: 'http://127.0.0.1:1', token, configDigest: 'e'.repeat(64), startedAt: '2026-09-13T00:00:00.000Z' }));
   let seen = null;
-  const receipt = await activationReceipt({ root: join(dir, 'registry'), repo: join(dir, 'no-repo'), managerRoot,
+  const receipt = await activationReceipt({ root: join(dir, 'registry'), repo: join(dir, 'no-repo'), clientRoot: packageDir, managerRoot,
     runGit: () => { throw new Error('no git'); }, runVersion: () => { throw new Error('no edda'); },
     fetch: async (url, options) => { seen = options.headers.Authorization; return { version: 1, startedAt: 'x', agents: 0 }; } });
   assert.equal(seen, `Bearer ${token}`);
@@ -262,7 +291,7 @@ test('the receipt never leaks the agent-manager owner token', async (t) => {
 test('an absent environment stays partial or unknown and creates no path', async (t) => {
   const dir = await fixture(t);
   const before = await snapshot(dir);
-  const receipt = await activationReceipt({ root: join(dir, 'registry'), repo: join(dir, 'no-repo'),
+  const receipt = await activationReceipt({ root: join(dir, 'registry'), repo: join(dir, 'no-repo'), clientRoot: packageDir,
     managerRoot: join(dir, 'no-manager'), eddaBin: 'edda-does-not-exist',
     runGit: () => { throw new Error('no git'); }, runVersion: () => { throw new Error('no edda'); },
     fetch: async () => { throw new Error('unreachable'); } });
