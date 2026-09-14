@@ -1,7 +1,25 @@
 import { startChannel } from './channel.mjs';
-import { defaultRoot, digest } from './store.mjs';
+import { defaultRoot, digest, readJson } from './store.mjs';
+import { managedDir } from './managed-store.mjs';
 import { pageConversation, projectEntry } from './conversation.mjs';
 import { reportSchema } from './handoff-schema.mjs';
+import { join } from 'node:path';
+
+// A managed run's effective owner is persisted in its state.json by the runner,
+// so a run adopted after launch (`edda-pi owner adopt`) is picked up on the next
+// turn without a relaunch. A hand-opened session simply has no managed state.
+export function managedOwnerRefs(root = defaultRoot(), runId = process.env.EDDA_SESSION_ID) {
+  if (typeof runId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) return null;
+  try {
+    const state = readJson(join(managedDir(root, runId), 'state.json'));
+    if (state && state.runId === runId && typeof state.owner === 'string' && state.owner) {
+      return { owner: state.owner,
+        returnOwner: typeof state.returnOwner === 'string' ? state.returnOwner : null,
+        ownerRoot: typeof state.ownerRoot === 'string' ? state.ownerRoot : null };
+    }
+  } catch { /* not a managed run, or the record is unavailable */ }
+  return null;
+}
 
 // Bounded presentation of claimed owner returns. Fields come from the mailbox's
 // normalised records; session ids are never included.
@@ -48,6 +66,7 @@ export default function eddaSessionChannel(pi) {
         label: pi.getFlag('edda-session-label') || '',
         ownerRef: process.env.EDDA_OWNER_REF || undefined,
         returnOwner: process.env.EDDA_RETURN_OWNER || undefined,
+        ownerRoot: process.env.EDDA_RETURN_ROOT || undefined,
         deliver: (text, options) => pi.sendUserMessage(text, options),
         getConversation: (options) => pageConversation(ctx.sessionManager.getBranch().map(projectEntry), options),
       });
@@ -76,6 +95,8 @@ export default function eddaSessionChannel(pi) {
   pi.on('before_agent_start', async (_event, ctx) => {
     if (!channel || failed) return undefined;
     try {
+      const owner = managedOwnerRefs();
+      if (owner && typeof channel.adoptOwner === 'function') await channel.adoptOwner(owner);
       const claimed = await channel.claimOwnerReturns();
       if (claimed?.status !== 'ok' || !claimed.returns?.length) return undefined;
       return { message: { customType: 'edda-owner-return', display: false, content: ownerReturnText(claimed.returns) } };

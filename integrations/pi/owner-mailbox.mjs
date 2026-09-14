@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { isAbsolute } from 'node:path';
 
 // A thin wrapper over the existing Rust `edda return` owner mailbox. It never
 // writes mailbox files itself and never throws into the session: a session must
@@ -69,17 +70,21 @@ function cliError(error) {
   return [error?.stderr, error?.stdout, error?.message].filter((part) => typeof part === 'string').join('\n');
 }
 
-export function createOwnerMailbox({ owner, sessionId, cwd, command, timeoutMs = 15000 }) {
+export function createOwnerMailbox({ owner, sessionId, cwd, command, ownerRoot, timeoutMs = 15000 }) {
   validateOwner(owner);
   if (typeof sessionId !== 'string' || !sessionId) throw new Error('Owner mailbox requires a session id');
   if (typeof cwd !== 'string' || !cwd) throw new Error('Owner mailbox requires a working directory');
+  if (ownerRoot !== undefined && ownerRoot !== null && (typeof ownerRoot !== 'string' || !isAbsolute(ownerRoot))) throw new Error('Owner mailbox root must be an absolute path');
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Owner mailbox timeout must be positive');
   const cli = normalizeCommand(command ?? { file: process.env.EDDA_BIN || 'edda', args: [] });
+  // An explicit owner root pins the mailbox for the CLI; otherwise the CLI keeps
+  // its own workspace-root resolution (a launched run inherits EDDA_RETURN_ROOT).
+  const env = ownerRoot ? { ...process.env, EDDA_RETURN_ROOT: ownerRoot } : process.env;
   let state = { owner, status: 'unbound', replaced: false };
   let closed = false;
 
   const invoke = (args) => exec(cli.file, [...cli.args, ...args], {
-    cwd, windowsHide: true, timeout: timeoutMs, maxBuffer: maxBytes, encoding: 'utf8',
+    cwd, env, windowsHide: true, timeout: timeoutMs, maxBuffer: maxBytes, encoding: 'utf8',
   });
   const unavailable = () => {
     state = { owner, status: 'unavailable', replaced: false };

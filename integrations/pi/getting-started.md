@@ -146,10 +146,16 @@ assistant and controller are different project directories. An older installed
 `edda` without the `return` verb exits non-zero, where the session-addressed path
 above still works for the unchanged same-session case.
 
-A managed run launched **without** `--owner` is **session-addressed** only: `edda-pi run-status` reports
-`owner: null` and `continuity: 'session-addressed'`. `edda-pi send` still reaches it, but its runtime
-cannot claim owner returns, and there is no supported way to bind an owner to an already-launched run —
-launch it with `--owner` instead.
+A managed run launched **without** `--owner` starts **session-addressed** only: `edda-pi run-status` reports
+`owner: null` and `continuity: 'session-addressed'`. Adopt it into the owner lifecycle without relaunching:
+
+```text
+edda-pi owner adopt --run <runId> --owner assistant/<project> [--return-owner REF] [--owner-root DIR]
+```
+
+The runner persists the owner and the runtime claims pending returns on the next natural live turn — the same
+run and session are preserved (no restart, no replayed prompt). Until adoption, `edda-pi send` is the only
+continuity and it is session-addressed, not owner-bound.
 
 ## Hand-opened sessions are not wired automatically
 

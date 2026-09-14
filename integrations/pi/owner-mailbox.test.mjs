@@ -15,10 +15,10 @@ const cli = (name) => ({ file: process.execPath, args: [fileURLToPath(new URL(`.
 const fixture = () => cli('edda-return.mjs');
 const owner = 'assistant/project';
 
-async function postReturn(cwd, { work, session = 'controller-1', status = 'done', result = 'ok', deliverable = 'out.md' }) {
+async function postReturn(cwd, { work, session = 'controller-1', status = 'done', result = 'ok', deliverable = 'out.md', root }) {
   await exec(process.execPath, [fixture().args[0], 'return', 'post', '--owner', owner, '--work', work,
     '--status', status, '--result', result, '--deliverable', deliverable, '--session', session],
-  { cwd, windowsHide: true, encoding: 'utf8' });
+  { cwd, windowsHide: true, encoding: 'utf8', env: root ? { ...process.env, EDDA_RETURN_ROOT: root } : process.env });
 }
 async function project(t) {
   const cwd = await mkdtemp(join(tmpdir(), 'edda-owner-mailbox-'));
@@ -107,6 +107,23 @@ test('a channel with an owner binds on start and claims exactly once', async (t)
   assert.equal(first.returns.length, 1);
   assert.equal(first.returns[0].work, 'job-channel');
   assert.deepEqual(await channel.claimOwnerReturns(), { status: 'empty', returns: [] });
+});
+
+test('a channel can adopt an owner reference after start', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'edda-owner-adopt-'));
+  const root = join(cwd, 'private');
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd, ownerCommand: fixture(), deliver() {} });
+  t.after(async () => { await channel.close(); await rm(cwd, { recursive: true, force: true }); });
+  assert.equal(channel.snapshot().owner, null);
+  const mailboxRoot = join(cwd, 'owner-mailbox');
+  const adopted = await channel.adoptOwner({ owner, returnOwner: 'assistant/adopted-return', ownerRoot: mailboxRoot });
+  assert.equal(adopted.status, 'bound');
+  assert.equal(channel.snapshot().returnOwner, 'assistant/adopted-return');
+  assert.deepEqual(channel.snapshot().owner, { owner, status: 'bound', replaced: false, dependencyScope: 'session' });
+  await postReturn(cwd, { work: 'job-adopted', root: mailboxRoot });
+  const claimed = await channel.claimOwnerReturns();
+  assert.equal(claimed.status, 'ok');
+  assert.equal(claimed.returns[0].work, 'job-adopted');
 });
 
 test('a channel without an owner reports disabled owner returns', async (t) => {

@@ -13,16 +13,28 @@ function runConfig(root, id) {
   if (!config || config.runId !== id || config.root !== resolve(root)) throw new Error('Managed run configuration not found or identity mismatch');
   return { dir, config };
 }
-async function runnerRequest(root, id, operation, abort = false) {
+async function runnerRequest(root, id, operation, { abort = false, body } = {}) {
   const { dir } = runConfig(root, id), owner = readJson(join(dir, 'owner.json'));
   if (!owner || owner.runId !== id || !/^[0-9a-f]{64}$/.test(owner.token) || !Number.isInteger(owner.port) || owner.port < 1 || owner.port > 65535) throw new Error('Managed runner unavailable');
   validateId(owner.serviceId);
-  const response = await fetch(`http://127.0.0.1:${owner.port}/${operation}`, { method: operation === 'stop' ? 'POST' : 'GET',
-    headers: { authorization: `Bearer ${owner.token}`, 'x-edda-instance': owner.serviceId, ...(abort ? { 'x-edda-abort': 'true' } : {}) }, redirect: 'error', signal: AbortSignal.timeout(operation === 'stop' ? 10000 : 3000) });
+  const response = await fetch(`http://127.0.0.1:${owner.port}/${operation}`, { method: operation === 'status' ? 'GET' : 'POST',
+    headers: { authorization: `Bearer ${owner.token}`, 'x-edda-instance': owner.serviceId,
+      ...(abort ? { 'x-edda-abort': 'true' } : {}), ...(body ? { 'content-type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined, redirect: 'error', signal: AbortSignal.timeout(operation === 'stop' ? 10000 : 3000) });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || 'Managed request failed');
   if (result.runId !== id || result.serviceId !== owner.serviceId) throw new Error('Managed runner response identity mismatch');
   return result;
+}
+/// Adopt an already-launched managed run into the owner lifecycle. The runner
+/// persists the effective owner and the extension claims it on the next turn;
+/// the same run and session are preserved (no relaunch).
+export async function adoptOwner(root, runId, { owner, returnOwner, ownerRoot } = {}) {
+  runId = validateId(runId);
+  if (typeof owner !== 'string' || !/^[\p{L}\p{N}_.@ /:-]{1,200}$/u.test(owner)) throw new Error('Invalid owner reference');
+  if (returnOwner !== undefined && returnOwner !== null && (typeof returnOwner !== 'string' || !/^[\p{L}\p{N}_.@ /:-]{1,200}$/u.test(returnOwner))) throw new Error('Invalid return-owner label');
+  if (ownerRoot !== undefined && ownerRoot !== null && (typeof ownerRoot !== 'string' || !isAbsolute(ownerRoot))) throw new Error('owner-root must be an absolute path');
+  return runnerRequest(root, runId, 'owner', { body: { owner, returnOwner: returnOwner ?? null, ownerRoot: ownerRoot ?? null } });
 }
 export async function managedStatus(root, id) {
   id = validateId(id);
@@ -55,7 +67,7 @@ export async function managedStatus(root, id) {
 export async function stopManaged(root, id, { abort = false } = {}) {
   id = validateId(id);
   const { dir } = runConfig(root, id), owner = readJson(join(dir, 'owner.json'));
-  const result = await runnerRequest(root, id, 'stop', abort);
+  const result = await runnerRequest(root, id, 'stop', { abort });
   const deadline = Date.now() + 5000;
   while (alive(owner?.pid) && Date.now() < deadline) await delay(50);
   return alive(owner?.pid) ? { ...result, status: 'stop_pending', nextAction: 'Query run-status before resume; the runner is still exiting.' } : result;

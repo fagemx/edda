@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, unlinkSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, isAbsolute } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { managedDir, verifyRelease, rpcFrames, inside, findPiEntry } from './managed-store.mjs';
 import { readJson, writeJson, validateId, digest } from './store.mjs';
@@ -25,8 +25,11 @@ const token = randomBytes(32).toString('hex');
 // through `EDDA_RETURN_ROOT` (config.ownerRoot overrides the registry default).
 const ownerRoot = (config.owner || config.returnOwner)
   ? (config.ownerRoot || join(root, 'owner-mailbox')) : null;
+// Prefer an owner adopted after launch over the immutable launch config, so the
+// effective owner survives a resume (startRunner re-spawns the child from state).
 let state = { ...prior, runId, serviceId, runnerPid: process.pid, phase: 'starting',
-  release: config.release, owner: config.owner || null, returnOwner: config.returnOwner || null, ownerRoot,
+  release: config.release, owner: prior.owner ?? config.owner ?? null, returnOwner: prior.returnOwner ?? config.returnOwner ?? null,
+  ownerRoot: prior.ownerRoot ?? ownerRoot,
   piVersion: null, expectedPiVersion: config.pi.version, updatedAt: new Date().toISOString() };
 let child, stopped = false, server, heartbeat, rpcError, observed, stateSequence = 0;
 const save = () => {
@@ -163,11 +166,31 @@ try {
   state.instanceId = piState.instanceId; state.integration = piState.integration; state.phase = 'ready'; save();
   server = createServer(async (req, res) => {
     const reply = (code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
+    const readBody = async (limit = 4096) => {
+      let size = 0; const chunks = [];
+      for await (const chunk of req) { size += chunk.length; if (size > limit) throw new Error('Request too large'); chunks.push(chunk); }
+      if (!chunks.length) return {};
+      const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('Expected a JSON object');
+      return value;
+    };
     try {
       const supplied = req.headers.authorization || '', expected = `Bearer ${token}`;
       if (req.headers.origin || Buffer.byteLength(supplied) !== Buffer.byteLength(expected) ||
         !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected)) || req.headers['x-edda-instance'] !== serviceId) throw new Error('Unauthorized managed request');
       if (req.method === 'GET' && req.url === '/status') return reply(200, await snapshot());
+      if (req.method === 'POST' && req.url === '/owner') {
+        if (stopped) throw new Error('Run is stopping');
+        const body = await readBody();
+        const owner = typeof body.owner === 'string' ? body.owner : '';
+        if (!/^[\p{L}\p{N}_.@ /:-]{1,200}$/u.test(owner)) throw new Error('Invalid owner reference');
+        if (body.returnOwner !== undefined && body.returnOwner !== null && !/^[\p{L}\p{N}_.@ /:-]{1,200}$/u.test(body.returnOwner)) throw new Error('Invalid return-owner label');
+        if (body.ownerRoot !== undefined && body.ownerRoot !== null && !(typeof body.ownerRoot === 'string' && isAbsolute(body.ownerRoot))) throw new Error('owner-root must be an absolute path');
+        state.owner = owner; state.returnOwner = body.returnOwner ?? null;
+        state.ownerRoot = body.ownerRoot ?? join(root, 'owner-mailbox'); state.ownerAdoptedAt = new Date().toISOString();
+        save();
+        return reply(200, { runId, serviceId, status: 'owner-bound', owner: state.owner, returnOwner: state.returnOwner, ownerRoot: state.ownerRoot });
+      }
       if (req.method !== 'POST' || req.url !== '/stop') return reply(404, { error: 'Unknown managed operation' });
       if (stopped) throw new Error('Stop already in progress');
       const current = await requestSession(root, state.sessionId, '/status', undefined, 2000, state.instanceId);
