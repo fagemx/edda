@@ -11,10 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Installable Pi activation and managed recovery** — activation ships as one normal route with a read-only revision receipt, managed sessions recover through a documented entry, and Windows activation spawns npm via its CLI with LF-pinned integrations (#1175, GH-1200, #1201, #1205)
+- **Installable Pi activation and managed recovery** — activation ships as one normal route with a read-only revision receipt, owner returns and dependency subscriptions wire into the managed lifecycle, managed sessions recover through a documented entry, and Windows activation spawns npm via its CLI with LF-pinned integrations (#1175, #1198, GH-1200, #1201, #1205)
 - **Managed Pi lifecycle and supervision** — owned Pi sessions launch and recover, adopted sessions carry task dependencies, dependency changes notify their owners, a non-blocking manager inbox accepts replies, and assigned task pairs run supervised (#1149, #1151, #1153, #1155, #1158, #1160)
 - **Native operator-visible work graph** — the agent manager derives work phase and wait reason from native task/run/events, discovers managed Pi runs in the running workbench, tracks task handoffs and operator interventions, binds sessions with a durable owner event inbox, completes native context handoff with crash recovery, and adds a local progress console with direct Pi chat (#1166, #1169, #1172, #1174, GH-1176, GH-1181)
-- **Portable continuity** — a portable local continuity slice ships, owner-bound return continuity survives project-assistant replacement, and native continuity capsules adopt through public `edda restore` (#1156, GH-1177, GH-1192)
+- **Portable continuity** — a portable local continuity slice ships, owner-bound return continuity survives project-assistant replacement, and native continuity capsules adopt through public `edda continuity restore` (#1156, GH-1177, GH-1192)
 - **coord-delegate skill** — a host-selected assistant-to-controller delegation entry (GH-1185), joined by the coord-run runtime skill and coord-orchestrate prepare mode (S7.1, #1171)
 - **Merge-gate receipts** — dirty receipts are path-aware and declared gates map to exact CI jobs (#1140, #1142)
 
