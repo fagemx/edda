@@ -6,7 +6,17 @@ import { readJson, registry, writeJson, sessionDir } from './store.mjs';
 import { dependencyConfiguration } from './dependency-observer.mjs';
 
 export async function followDependencies(root, id, { project, taskIds, notify = false, maxNotifications = 10, scope }) {
-  const state = await requestSession(root, id, '/status');
+  let state;
+  try {
+    state = await requestSession(root, id, '/status');
+  } catch (error) {
+    // The common mistake is passing the managed run id (a child's EDDA_SESSION_ID)
+    // instead of the Pi channel session id. Name the identity it expected.
+    if (/no reachable registered owner/.test(error.message)) {
+      throw new Error(`No registered session '${id}'. follow takes the Pi channel session id — read it from 'edda-pi run-status <runId>' (the sessionId field) or the launch output — not the managed run id (EDDA_SESSION_ID).`);
+    }
+    throw error;
+  }
   if (!state.capabilities?.includes('dependencies')) return { sessionId: id, status: 'needs_reload', nextAction: 'Reload Pi at idle, then repeat follow.' };
   const config = await dependencyConfiguration({ project, taskIds, notify, maxNotifications });
   if (scope !== undefined) await enroll(root, id, scope);

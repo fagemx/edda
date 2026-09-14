@@ -36,6 +36,16 @@ async function fixture(t, deliver) {
   return { root, project, channel, messages, change, follow };
 }
 
+test('follow names the session identity it expects when handed a run id', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-follow-identity-'));
+  const root = join(project, 'private');
+  t.after(() => rm(project, { recursive: true, force: true }));
+  await assert.rejects(
+    followDependencies(root, randomUUID(), { project, taskIds: ['17'], notify: false, scope: 'Observe only.' }),
+    /Pi channel session id[\s\S]*run-status[\s\S]*not the managed run id/,
+  );
+});
+
 test('opt-in initial snapshot, quiet unchanged polling, and receipt-only changes', async (t) => {
   const f = await fixture(t);
   await f.follow();

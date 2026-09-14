@@ -70,11 +70,28 @@ Install from the packaged tarball; see README.md and the installed getting-start
 `.replaceAll('node integrations/pi/cli.mjs ', 'edda-pi ') +
   'Source checkout usage remains: node integrations/pi/cli.mjs <command>.\n';
 
+// Per-verb usage lines taken from the top-level guide, so `edda-pi <verb> --help`
+// prints the accepted flags instead of being rejected by the option parser.
+const usageByVerb = new Map();
+for (const line of help.split('\n')) {
+  const match = /^ {2}edda-pi ([a-z][a-z0-9-]*)(?:[ \t]|$)/.exec(line);
+  if (!match) continue;
+  const lines = usageByVerb.get(match[1]) ?? [];
+  lines.push(line.trim());
+  usageByVerb.set(match[1], lines);
+}
+
 async function main(args) {
   const [command, ...rest] = args;
   if (!command || command === '--help') { process.stdout.write(help); return; }
   if (command === '--version' && !rest.length) {
     process.stdout.write(`edda-pi ${JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version}\n`); return;
+  }
+  if (rest.includes('--help')) {
+    const usage = usageByVerb.get(command);
+    if (usage) { process.stdout.write(`Usage: edda-pi ${command}\n${usage.map((line) => `  ${line}`).join('\n')}\n`); return; }
+    process.stderr.write(`Unknown command '${command}'; run 'edda-pi --help' for the supported commands and options.\n`);
+    process.exitCode = 1; return;
   }
   const root = defaultRoot();
   const positional = [];
