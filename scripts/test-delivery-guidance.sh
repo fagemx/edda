@@ -70,11 +70,10 @@ audit_coord() {
     require_text "$active" '| Codex | task-linked `--prompt-file` plus explicit `--cwd`'
     require_text "$active" '| ACP target | separately created task with matching `--agent acp:<target>`; `--task-id`'
     require_text "$active" 'It does not prove the brief was readable.'
-    require_text "$active" 'controlled reconcile validates and binds an'
-    require_text "$active" 'descriptor with `execution: "none"`'
-    require_text "$active" 'Direct controlled execution remains unavailable'
-    require_text "$active" 'literal `CONTROL_UNAVAILABLE`'
-    require_text "$active" 'future planned S6 contract, not current product evidence'
+    # #1171 (S7.1) split the former S6/control reconciliation paragraph out of
+    # coord-orchestrate; those sentences no longer exist in that skill, so the
+    # assertions that quoted them were stale and made the fleet gate red at
+    # base. The surviving facts are covered by coord-run.md's own doctest.
     require_text "$active" 'validated `WorkReceiptV1`'
     require_text "$active" 'ordinary `task done --evidence` is refused'
     require_text "$active" 'never use the legacy post-Done metadata correction path'
@@ -431,7 +430,7 @@ runbook=$original_runbook
 # Source anchors keep guidance tied to current direct consumers and substrate.
 require_text "$root/crates/edda-ledger/src/task_actions.rs" 'Ready = normal start; Failed = retry.'
 require_text "$root/crates/edda-ledger/src/task_actions.rs" 'if let Some(existing) = tasks::find_by_idempotency_key'
-require_text "$root/crates/edda-cli/src/cmd_dispatch.rs" '--task-id is only valid with an ACP agent'
+require_text "$root/crates/edda-cli/src/cmd_dispatch.rs" '--task-id and immutable brief identity are only valid with an ACP agent'
 require_text "$root/crates/edda-cli/src/cmd_dispatch_acp.rs" 'must be running before an agent turn'
 require_text "$root/crates/edda-cli/src/cmd_dispatch_acp.rs" 'task agent_kind must match selected ACP target'
 require_text "$root/crates/edda-cli/src/cmd_dispatch_acp.rs" 'use a concrete permission root'
