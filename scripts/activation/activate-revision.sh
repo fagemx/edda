@@ -148,27 +148,47 @@ run() {
 # child is tracked and terminated on HUP/INT/TERM.
 pack_dir=""
 child_pid=""
+# Descendant pids of $1, breadth-first, from `ps -ef`'s PPID column (the same
+# layout on MSYS and coreutils ps). MSYS spawns children that `taskkill /T` does
+# not always reach, so the tree is walked explicitly.
+pid_descendants() {
+  frontier=$1
+  while [ -n "$frontier" ]; do
+    next=""
+    for parent in $frontier; do
+      for child in $(ps -ef 2>/dev/null | awk -v p="$parent" 'NR > 1 && $3 == p { print $2 }'); do
+        printf '%s\n' "$child"
+        next="$next $child"
+      done
+    done
+    frontier=$next
+  done
+}
 terminate_child() {
   [ -n "$child_pid" ] || return 0
+  targets=$(pid_descendants "$child_pid")
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
       # Git Bash pids are not Windows pids; /proc/<pid>/winpid maps to one.
       winpid=$(cat "/proc/$child_pid/winpid" 2>/dev/null) || winpid=""
       if [ -n "$winpid" ]; then
         MSYS_NO_PATHCONV=1 taskkill /PID "$winpid" /T /F >/dev/null 2>&1 || true
-      else
-        kill "$child_pid" 2>/dev/null || true
       fi
       ;;
-    *)
-      kill -TERM "$child_pid" 2>/dev/null || true
-      command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$child_pid" 2>/dev/null || true
-      ;;
   esac
+  for p in $targets; do
+    kill -TERM "$p" 2>/dev/null || true
+    wp=$(cat "/proc/$p/winpid" 2>/dev/null) || wp=""
+    if [ -n "$wp" ]; then
+      MSYS_NO_PATHCONV=1 taskkill /PID "$wp" /F >/dev/null 2>&1 || true
+    fi
+  done
+  kill -TERM "$child_pid" 2>/dev/null || true
+  return 0
 }
 cleanup() {
-  [ -n "$child_pid" ] && terminate_child
-  [ -n "$pack_dir" ] && rm -rf "$pack_dir"
+  if [ -n "$child_pid" ]; then terminate_child; child_pid=""; fi
+  if [ -n "$pack_dir" ]; then rm -rf "$pack_dir"; pack_dir=""; fi
   return 0
 }
 signal_exit() { cleanup; exit 130; }

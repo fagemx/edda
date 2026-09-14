@@ -371,6 +371,16 @@ test('a partial /api/service body is not reported healthy', async (t) => {
   assert.ok(receipt.coherence.findings.some((finding) => finding.code === 'manager_not_healthy'));
 });
 
+test('the per-verb help lists every accepted activation flag (GH #1210 item 2)', async (t) => {
+  const dir = await fixture(t);
+  const help = await exec(process.execPath, [channelCli, 'activation', '--help'], { cwd: dir });
+  for (const flag of ['--json', '--check', '--repo', '--registry-root', '--manager-root', '--edda-bin', '--client-root', '--timeout']) {
+    assert.ok(help.stdout.includes(flag), `per-verb help omits ${flag}`);
+  }
+  const topHelp = await exec(process.execPath, [channelCli, '--help'], { cwd: dir });
+  assert.ok(topHelp.stdout.includes('--manager-root') && topHelp.stdout.includes('--timeout'), 'top-level help omits an activation flag');
+});
+
 test('the receipt never leaks the agent-manager owner token', async (t) => {
   const dir = await fixture(t);
   const managerRoot = join(dir, 'manager'), token = 'a1b2c3d4'.repeat(8);

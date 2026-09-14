@@ -174,28 +174,35 @@ mkdir -p "$stub_bin"
 cat > "$stub_bin/cargo" <<'STUB'
 #!/bin/sh
 echo $$ > "$STUB_PID_FILE"
-sleep 30
+sleep 30 &
+echo $! > "$STUB_GRANDCHILD_FILE"
+wait
 STUB
 chmod +x "$stub_bin/cargo"
 STUB_PID_FILE="$work/stub.pid"; export STUB_PID_FILE
+STUB_GRANDCHILD_FILE="$work/stub-grandchild.pid"; export STUB_GRANDCHILD_FILE
 PATH="$stub_bin:$PATH" sh "$driver" --repo "$fixture" --offline --allow-stale --allow-downgrade \
   --no-pi --no-manager --edda-bin edda >"$work/interrupt.txt" 2>&1 &
 driver_pid=$!
 i=0
-while [ ! -s "$work/stub.pid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+while [ ! -s "$work/stub-grandchild.pid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 stub_pid=$(cat "$work/stub.pid" 2>/dev/null || true)
-if [ -z "$stub_pid" ]; then
+grandchild_pid=$(cat "$work/stub-grandchild.pid" 2>/dev/null || true)
+if [ -z "$stub_pid" ] || [ -z "$grandchild_pid" ]; then
   kill -TERM "$driver_pid" 2>/dev/null || true
   fail "stub cargo never started; cannot test interrupt safety"
 fi
 kill -TERM "$driver_pid" 2>/dev/null || true
 sleep 2
-if kill -0 "$stub_pid" 2>/dev/null; then
-  kill -KILL "$stub_pid" 2>/dev/null || true
-  fail "an interrupted route left the build child running"
+alive=""
+if kill -0 "$stub_pid" 2>/dev/null; then alive="$alive $stub_pid"; fi
+if kill -0 "$grandchild_pid" 2>/dev/null; then alive="$alive $grandchild_pid"; fi
+if [ -n "$alive" ]; then
+  for p in $alive; do kill -KILL "$p" 2>/dev/null || true; done
+  fail "an interrupted route left build processes running:$alive"
 fi
 wait "$driver_pid" 2>/dev/null || true
-pass "interrupt terminates the route's build child"
+pass "interrupt terminates the route's build child and its grandchild"
 
 # An unobservable installed identity must not read as "safe to overwrite".
 mkdir -p "$work/empty-client"
