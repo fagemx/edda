@@ -9,7 +9,7 @@ import { startChannel } from './channel.mjs';
 import { followDependencies, unfollowDependencies, doctor } from './dependency-client.mjs';
 import { enroll } from './supervision.mjs';
 import { digest, writeJson, readJson } from './store.mjs';
-import { ownerSubscriptionDir } from './dependency-observer.mjs';
+import { ownerSubscriptionDir, DELIVERY_WAIT_LIMIT } from './dependency-observer.mjs';
 
 const baseTask = () => ({ task_id: 17, title: 'Upstream review', created_event_id: 'evt-17',
   status: 'running', after: [], scope_paths: [], attempts: 1, receipt: null, evidence_paths: [], failure_reason: null });
@@ -216,6 +216,73 @@ test('a never-configured replaced holder cannot pause the current subscription',
   // A never configured, but it must not be able to pause B's subscription.
   await a.dependencies.pause();
   assert.notEqual(b.dependencies.status().phase, 'paused');
+});
+
+test('an unconfirmed delivery is abandoned after a bounded wait so a later revision still arrives', async (t) => {
+  const messages = [];
+  let deliveries = 0;
+  let channel;
+  const f = await fixture(t, (text) => {
+    messages.push(text);
+    // The first delivery never confirms, like a holder replaced mid-delivery.
+    if (deliveries++ === 0) return;
+    channel.messageStarted(text); channel.settled();
+  });
+  channel = f.channel;
+  await f.follow();
+  assert.equal(messages.length, 1);
+  assert.equal(channel.dependencies.status().lastAlert.receiptStatus, 'unconfirmed');
+  await f.change({ status: 'done', receipt: 'v2' });
+  await channel.dependencies.check();
+  assert.equal(channel.dependencies.status().phase, 'awaiting_delivery');
+  for (let i = 0; i < DELIVERY_WAIT_LIMIT + 1; i++) {
+    await channel.dependencies.check();
+    if (channel.dependencies.status().phase !== 'awaiting_delivery') break;
+  }
+  assert.equal(channel.dependencies.status().phase, 'notification_sent');
+  assert.ok(channel.dependencies.status().abandonedAttempts >= 1);
+  assert.equal(messages.length, 2);
+  assert.ok(messages[1].includes('"receipt":"v2"'));
+});
+
+test('an abandoned attempt is never re-sent and a delivered revision is not duplicated', async (t) => {
+  const messages = [];
+  let deliveries = 0;
+  let channel;
+  const f = await fixture(t, (text) => {
+    messages.push(text);
+    if (deliveries++ === 0) return;
+    channel.messageStarted(text); channel.settled();
+  });
+  channel = f.channel;
+  await f.follow();
+  await f.change({ status: 'done', receipt: 'v2' });
+  for (let i = 0; i < DELIVERY_WAIT_LIMIT + 2; i++) await channel.dependencies.check();
+  assert.equal(messages.filter((m) => m.includes('"receipt":"v2"')).length, 1);
+  // A genuinely later revision still arrives; the abandoned initial is not re-sent.
+  await f.change({ receipt: 'v3' });
+  await channel.dependencies.check();
+  assert.equal(messages.filter((m) => m.includes('"receipt":"v3"')).length, 1);
+  assert.equal(messages.filter((m) => m.includes('"receipt":""')).length, 1);
+});
+
+test('an unknown delivery outcome is not blindly retried, and a later revision still arrives', async (t) => {
+  const messages = [];
+  let deliveries = 0;
+  let channel;
+  const f = await fixture(t, (text) => {
+    messages.push(text);
+    if (deliveries++ === 0) throw new Error('transport unknown');
+    channel.messageStarted(text); channel.settled();
+  });
+  channel = f.channel;
+  await f.follow();
+  assert.equal(channel.dependencies.status().phase, 'delivery_unknown');
+  await f.change({ status: 'done', receipt: 'v2' });
+  for (let i = 0; i < DELIVERY_WAIT_LIMIT + 1; i++) await channel.dependencies.check();
+  // The unknown initial is not retried, and the later revision is delivered.
+  assert.equal(messages.filter((m) => m.includes('"status":"running"')).length, 1);
+  assert.equal(messages.filter((m) => m.includes('"receipt":"v2"')).length, 1);
 });
 
 test('pause during configuration wins and malformed enrollment cannot crash polling', async (t) => {
