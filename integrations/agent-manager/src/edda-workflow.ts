@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ManagerError } from './contracts.js';
 import { hash, object, text } from './config.js';
-import type { OwnerReturnFact, OwnerReturnView, WorkBinding } from './workflow-contracts.js';
+import type { OwnerReturnFact, OwnerReturnRead, WorkBinding } from './workflow-contracts.js';
 
 export interface CanonicalTask { id: number; key: string; title: string; status: string; receipt: string | null; updatedAt: string }
 export interface LedgerNote { id: string; at: string; text: string }
@@ -15,13 +15,13 @@ export interface WorkflowLedger {
   append(binding: WorkBinding, value: string): Promise<void>;
   // Optional so observation-only test ledgers stay valid. A failure is reported
   // inside the DTO and never rejects the work row.
-  returns?(binding: WorkBinding): Promise<OwnerReturnView | null>;
+  returns?(binding: WorkBinding, env?: Record<string, string>): Promise<OwnerReturnRead | null>;
 }
-export type EddaRunner = (workspace: string, args: string[]) => Promise<string>;
+export type EddaRunner = (workspace: string, args: string[], env?: Record<string, string>) => Promise<string>;
 export function eddaRunner(executable = process.platform === 'win32' ? 'edda.exe' : 'edda'): EddaRunner {
-  return (cwd, args) => new Promise((resolve, reject) => {
+  return (cwd, args, extra) => new Promise((resolve, reject) => {
     execFile(executable, args, { cwd, shell: false, windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024,
-      encoding: 'utf8', env: { ...process.env, EDDA_SESSION_ID: 'agent-manager-workflow' } }, (error, stdout) => {
+      encoding: 'utf8', env: { ...process.env, EDDA_SESSION_ID: 'agent-manager-workflow', ...(extra ?? {}) } }, (error, stdout) => {
       if (error) reject(new ManagerError('LEDGER_UNAVAILABLE', '無法讀寫此工作的 Edda 紀錄；請確認本機 Edda 與專案路徑。', 503));
       else resolve(stdout);
     });
@@ -54,18 +54,18 @@ export class EddaWorkflowLedger implements WorkflowLedger {
   // argument vectors are the only inputs. Any failure becomes an `error` DTO so
   // a return read can never fail or block the work row, and no registry path or
   // record byte is projected.
-  async returns(binding: WorkBinding): Promise<OwnerReturnView | null> {
+  async returns(binding: WorkBinding, env?: Record<string, string>): Promise<OwnerReturnRead | null> {
     const ownerRef = binding.ownerRef;
     if (!ownerRef) return null;
-    const failed = (reason: string): OwnerReturnView => ({ owner: ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: reason.slice(0, 300) });
+    const failed = (reason: string): OwnerReturnRead => ({ owner: ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: reason.slice(0, 300) });
     try {
-      const status = object(JSON.parse(await this.run(binding.workspace, ['return', 'status', '--owner', ownerRef, '--json'])) as unknown);
+      const status = object(JSON.parse(await this.run(binding.workspace, ['return', 'status', '--owner', ownerRef, '--json'], env)) as unknown);
       const owner = text(status.owner, 200);
       const pending = status.pending;
       if (!Number.isSafeInteger(pending) || Number(pending) < 0) return failed('負責人回件狀態缺少可用的待領取數量。');
       const total = status.total == null ? null : Number(status.total);
       if (total !== null && (!Number.isSafeInteger(total) || total < 0)) return failed('負責人回件狀態的總數不正確。');
-      const list = object(JSON.parse(await this.run(binding.workspace, ['return', 'pending', '--owner', ownerRef, '--json'])) as unknown);
+      const list = object(JSON.parse(await this.run(binding.workspace, ['return', 'pending', '--owner', ownerRef, '--json'], env)) as unknown);
       const items = Array.isArray(list.pending) ? list.pending.slice(0, 20) : [];
       const matched: OwnerReturnFact[] = [];
       let dropped = 0;

@@ -17,7 +17,7 @@ interface Channel { snapshot(): { instanceId: string }; close(): Promise<void> }
 interface ChannelModule { startChannel(options: { root: string; sessionId: string; cwd: string; deliver: () => void; getConversation: () => unknown }): Promise<Channel> }
 
 const running = (): AgentObservation => ({ state: 'idle', instanceId: randomUUID(), observedAt: new Date().toISOString(), heartbeatAt: null, lastProgressAt: null, lastEvent: null,
-  source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null });
+  source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null, ownerMailbox: null });
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'manager-discovery-')), workspace = mkdtempSync(join(tmpdir(), 'manager-ws-')), broken = join(root, 'broken');
@@ -40,6 +40,19 @@ function fixture() {
   const store = new ManagerStore(root), manager = new AgentManager(config, store, adapter);
   return { root, workspace, broken, config, report, calls, adapter, store, manager };
 }
+
+test('registering a run whose managed record pins an owner mailbox keeps that root internal', async () => {
+  const f = fixture();
+  try {
+    f.adapter.observe = async () => ({ ...running(), ownerMailbox: { ref: 'assistant/x', root: f.root } });
+    const id = candidateId({ registryRoot: f.root, sessionId: 'new-session' });
+    const view = await f.manager.registerCandidate({ candidateId: id, id: 'mailbox-run', name: 'Mailbox run', role: 'worker', projectId: 'p' });
+    // The response is a browser projection; only the internal view keeps the path.
+    assert.equal(view.ownerMailbox?.root, null);
+    assert.equal(f.manager.agentViews().find((a) => a.id === 'mailbox-run')?.ownerMailbox?.root, f.root);
+    assert.ok(!JSON.stringify(view).includes(f.root));
+  } finally { await f.manager.stop(); f.store.close(); }
+});
 
 test('candidate projection deduplicates by session, marks configured runs and never leaks the registry root', () => {
   const root = join(tmpdir(), 'manager-projection-registry'), workspace = join(tmpdir(), 'manager-projection-ws'), other = join(tmpdir(), 'manager-projection-other');

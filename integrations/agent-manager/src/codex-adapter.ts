@@ -135,6 +135,7 @@ export class CodexAdapter implements PiAdapter {
       lastProgressAt: state.progress, lastEvent: state.events.at(-1)?.kind ?? null, source: 'recorded', stale: true,
       reason: state.diagnostic ?? '僅為已記錄的回合狀態；沒有程序存活證據。', model: null, usage: null,
       capabilities: { conversation: true, send: false }, latestMessage: state.entries.at(-1) ?? null, degraded: null,
+      ownerMailbox: null,
       sessionEvidence: { sessionId: binding.sessionId, evidenceSource: 'recorded', historyComplete: state.historyComplete, events: state.events } };
   }
   async conversation(binding: AgentBinding, after?: string) {

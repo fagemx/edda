@@ -33,6 +33,13 @@ export interface AgentObservation {
   model: ModelView | null; usage: UsageView | null;
   capabilities: { conversation: boolean; send: boolean };
   latestMessage: PublicEntry | null;
+  // The owner mailbox the run's own runtime pins (`--owner-root`, else the managed
+  // registry default `<registryRoot>/owner-mailbox`), with the stable owner
+  // reference the run declares. Null when the run declares no owner. `root` is an
+  // absolute path and is internal to the manager: the browser projection always
+  // carries null here, and the work card names the mailbox it read through
+  // `WorkView.ownerReturn.mailbox` (an opaque label).
+  ownerMailbox: { ref: string | null; root: string | null } | null;
   sessionEvidence?: import('./session-contracts.js').SessionEvidence;
 }
 export interface AgentView extends AgentObservation {

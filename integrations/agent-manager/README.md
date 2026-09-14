@@ -188,6 +188,22 @@ same project. No task is automatically created or completed by the console.
 
 `ownerRef` is optional; when present it names the owner mailbox already registered
 with `edda return bind`, so the work card can show that owner's pending returns.
+`ownerRoot` is also optional and pins the mailbox root explicitly (an absolute
+path). When it is absent the read resolves the root in precedence order: the
+pinned `works[].ownerRoot`, then an absolute `EDDA_RETURN_ROOT`, then the mailbox
+observed on the work owner's own managed run, then the CLI's own default. The
+managed candidate exists only for a selected agent whose binding carries that
+run's `runId` and whose run declares this owner reference (`edda-pi run-status`
+reports its `ownerRoot`, defaulting to `<registryRoot>/owner-mailbox`); without a
+`runId` the run is never read and that candidate is absent. The last candidate is
+deliberately not pinned to the workspace directory: the `edda return` CLI
+resolves the enclosing Edda root of the work workspace itself, and an ambient
+`EDDA_RETURN_ROOT` is cleared for that read (the CLI reads an empty override as
+absent) so the card and the read can never point at different roots. The first candidate whose `.edda/returns` layout
+exists is read; a higher-precedence candidate with no mailbox is disclosed in a
+bounded notice while a first-choice read stays silent. If no candidate holds a
+mailbox the card reports honest unavailability (with a non-null error) instead of
+a healthy zero.
 
 Use an actual task number from `edda task list`, not the illustrative number
 above. The task's title/status/receipt are read from `edda task show --json`.
@@ -224,7 +240,9 @@ of vanishing, and that reading stays `可恢復` rather than degrading into a ge
 interruption when the owner inbox reports the same session unavailable. When a
 work sets the optional `ownerRef`, the same card shows the
 owner-bound `edda return` status (owner, holder, pending count and each matched
-return; an unusable matched return is reported as dropped, never hidden). A
+return; an unusable matched return is reported as dropped, never hidden), the
+mailbox it read (named by source and an opaque root label) and a bounded notice
+that discloses a fallback or an absent mailbox. A
 fresher native fact — the task rail, a delivery receipt, a bound
 session, an owner-inbox event or a posted return — always wins over a stale
 manual stage.
