@@ -38,7 +38,7 @@ function fixture(root: string, ledger = new MemoryLedger(), secondWork = false) 
   ], works: [{ id: 'work', projectId: 'p', taskId: 7, workspace: root, ownerAgentId: 'owner' },
     ...(secondWork ? [{ id: 'bad', projectId: 'p', taskId: 8, workspace: join(root, 'bad'), ownerAgentId: 'owner' }] : [])] });
   const observation: AgentObservation = { state: 'running', instanceId, observedAt: new Date().toISOString(), heartbeatAt: null,
-    lastProgressAt: null, lastEvent: null, source: 'live', stale: false, reason: null, model: null, usage: null,
+    lastProgressAt: null, lastEvent: null, source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null,
     capabilities: { send: true, conversation: true }, latestMessage: null };
   const adapter: PiAdapter = { observe: async () => observation,
     conversation: async () => ({ entries: [], instanceId, cursor: null, headCursor: null, hasMore: false, observedAt: new Date().toISOString(), source: 'live' }),

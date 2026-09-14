@@ -16,7 +16,7 @@ test('loopback gateway rejects foreign/auth/body/target misuse and preserves mes
   const config = parseConfig({ version: 1, projects: [{ id: 'p', name: 'Project' }], agents: [
     { id: 'a', name: 'Agent', role: 'worker', projectId: 'p', registryRoot: root, workspace: root, sessionId: 'selected' }] });
   const adapter: PiAdapter = { observe: async () => ({ state: 'running', instanceId, observedAt: new Date().toISOString(), heartbeatAt: null, lastProgressAt: null, lastEvent: null,
-    source: 'live', stale: false, reason: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null }),
+    source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { send: true, conversation: true }, latestMessage: null }),
     conversation: async () => ({ instanceId, entries: [], cursor: null, headCursor: null, hasMore: false, observedAt: new Date().toISOString(), source: 'live' }),
     send: async (b, r) => { effects++; return { id: r.operationId, sessionId: b.sessionId, instanceId, status: 'started' }; }, receipt: async () => null };
   const store = new ManagerStore(root), manager = new AgentManager(config, store, adapter);

@@ -17,7 +17,7 @@ interface Channel { snapshot(): { instanceId: string }; close(): Promise<void> }
 interface ChannelModule { startChannel(options: { root: string; sessionId: string; cwd: string; deliver: () => void; getConversation: () => unknown }): Promise<Channel> }
 
 const running = (): AgentObservation => ({ state: 'idle', instanceId: randomUUID(), observedAt: new Date().toISOString(), heartbeatAt: null, lastProgressAt: null, lastEvent: null,
-  source: 'live', stale: false, reason: null, model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null });
+  source: 'live', stale: false, reason: null, degraded: null, model: null, usage: null, capabilities: { conversation: false, send: false }, latestMessage: null });
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'manager-discovery-')), workspace = mkdtempSync(join(tmpdir(), 'manager-ws-')), broken = join(root, 'broken');

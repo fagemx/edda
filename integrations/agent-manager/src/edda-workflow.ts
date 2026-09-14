@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ManagerError } from './contracts.js';
 import { hash, object, text } from './config.js';
-import type { WorkBinding } from './workflow-contracts.js';
+import type { OwnerReturnFact, OwnerReturnView, WorkBinding } from './workflow-contracts.js';
 
 export interface CanonicalTask { id: number; key: string; title: string; status: string; receipt: string | null; updatedAt: string }
 export interface LedgerNote { id: string; at: string; text: string }
@@ -13,6 +13,9 @@ export interface WorkflowLedger {
   task(binding: WorkBinding): Promise<CanonicalTask>;
   notes(binding: WorkBinding): Promise<LedgerNote[]>;
   append(binding: WorkBinding, value: string): Promise<void>;
+  // Optional so observation-only test ledgers stay valid. A failure is reported
+  // inside the DTO and never rejects the work row.
+  returns?(binding: WorkBinding): Promise<OwnerReturnView | null>;
 }
 export type EddaRunner = (workspace: string, args: string[]) => Promise<string>;
 export function eddaRunner(executable = process.platform === 'win32' ? 'edda.exe' : 'edda'): EddaRunner {
@@ -46,6 +49,43 @@ export class EddaWorkflowLedger implements WorkflowLedger {
     // Argument vector is fixed. Neither API callers nor ledger content can supply
     // executable names, working directories, flags, shell syntax, or task verbs.
     await this.run(binding.workspace, ['note', '--role', 'user', '--tag', `manager-work-${binding.taskId}`, '--', value]);
+  }
+  // Read-only, bounded, fail-closed: the fixed `return status`/`return pending`
+  // argument vectors are the only inputs. Any failure becomes an `error` DTO so
+  // a return read can never fail or block the work row, and no registry path or
+  // record byte is projected.
+  async returns(binding: WorkBinding): Promise<OwnerReturnView | null> {
+    const ownerRef = binding.ownerRef;
+    if (!ownerRef) return null;
+    const failed = (reason: string): OwnerReturnView => ({ owner: ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: reason.slice(0, 300) });
+    try {
+      const status = object(JSON.parse(await this.run(binding.workspace, ['return', 'status', '--owner', ownerRef, '--json'])) as unknown);
+      const owner = text(status.owner, 200);
+      const pending = status.pending;
+      if (!Number.isSafeInteger(pending) || Number(pending) < 0) return failed('負責人回件狀態缺少可用的待領取數量。');
+      const total = status.total == null ? null : Number(status.total);
+      if (total !== null && (!Number.isSafeInteger(total) || total < 0)) return failed('負責人回件狀態的總數不正確。');
+      const list = object(JSON.parse(await this.run(binding.workspace, ['return', 'pending', '--owner', ownerRef, '--json'])) as unknown);
+      const items = Array.isArray(list.pending) ? list.pending.slice(0, 20) : [];
+      const matched: OwnerReturnFact[] = [];
+      let dropped = 0;
+      for (const raw of items) {
+        let work: string | null = null;
+        try {
+          const item = object(raw); work = text(item.work, 200);
+          if (work !== String(binding.taskId) && work !== binding.id) continue;
+          // A matched item whose status is not the bounded vocabulary is a dropped
+          // fact, not an absent one: the card must not report a healthy count.
+          if (item.status !== 'done' && item.status !== 'failed') { dropped += 1; continue; }
+          matched.push({ id: text(item.id, 200), work, status: item.status, result: item.result == null ? null : text(item.result, 2000), postedAt: text(item.posted_at, 100) });
+        } catch {
+          // Unreadable only where it might be this work's: an unusable item whose
+          // id is unknown is conservatively counted as dropped.
+          if (work === null || work === String(binding.taskId) || work === binding.id) dropped += 1;
+        }
+      }
+      return { owner, holder: typeof status.holder === 'string' ? status.holder.slice(0, 200) : null, pending: Number(pending), total, matched, dropped, error: null };
+    } catch { return failed('負責人回件狀態暫時無法讀取；未自動重試。'); }
   }
 }
 

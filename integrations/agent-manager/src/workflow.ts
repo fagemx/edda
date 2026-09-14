@@ -4,7 +4,8 @@ import { hash, object, parseConfig, parseSend, selectionRevision, slug, text, uu
 import { EddaWorkflowLedger, WorkflowLocks, type CanonicalTask, type WorkflowLedger } from './edda-workflow.js';
 import type { AgentManager } from './manager.js';
 import type { OwnerInboxEvent, OwnerInboxKind } from './owner-inbox-contracts.js';
-import type { WorkAction, WorkBinding, WorkPhase, WorkSessionBinding, WorkView, WorkWaitingFor, WorksView } from './workflow-contracts.js';
+import type { OwnerReturnFact, OwnerReturnView, WorkAction, WorkBinding, WorkPhase, WorkRegistryRelation, WorkSessionBinding, WorkView, WorkWaitingFor, WorksView } from './workflow-contracts.js';
+import { rootLabel } from './discovery.js';
 
 const PREFIX = 'edda.manager-work.v1 ';
 interface WorkEvent { version: 1; taskKey: string; previous: string | null; action: WorkAction; fingerprint: string; target: AgentBinding | null; transportStoreId: string; priorFailedOperation: string | null }
@@ -40,7 +41,9 @@ export function parseWorkAction(input: unknown): WorkAction {
 function empty(binding: WorkBinding): WorkView {
   return { id: binding.id, projectId: binding.projectId, taskId: binding.taskId, title: `Edda #${binding.taskId}`, taskStatus: 'unknown', taskReceipt: null,
     ownerAgentId: binding.ownerAgentId, assigneeAgentId: null, nextStep: '設定下一步並開始追蹤。', stage: 'uninitialized', revision: '', evidence: null,
+    attempt: 0,
     phase: 'uninitialized', waitingFor: null, waitEvidence: null,
+    ownerReturn: null, registry: { relation: 'unknown', message: '來源關聯尚未判定；空的讀取不代表沒有子代理正在工作。' },
     waitingReason: null, pendingInstruction: null, deliveryOperationId: null, deliveryStatus: null, updatedAt: null, error: null, history: [], lastActionId: null, confirmedActionId: null, sessions: [] };
 }
 // --- Native phase projection (GH1181) ---------------------------------------
@@ -52,6 +55,9 @@ function empty(binding: WorkBinding): WorkView {
 const INTERRUPTING_INBOX: readonly OwnerInboxKind[] = ['interrupted', 'provider_error', 'unavailable', 'overdue'];
 const PROGRESS_STATES: readonly RuntimeState[] = ['running', 'executing_tool'];
 const MAX_WAIT_EVIDENCE = 300;
+// The owner-return read spawns fixed-argument `edda` processes, so it is cached
+// per work and never re-spawned from the mutation path that holds the task lock.
+const RETURN_CACHE_MS = 15000;
 export interface NativeWorkInputs { task: CanonicalTask; view: WorkView; agents: AgentView[]; inbox: OwnerInboxEvent[] }
 export interface NativeWorkProgress { phase: WorkPhase; waitingFor: WorkWaitingFor; waitEvidence: string | null }
 interface BoundSession { session: WorkSessionBinding; agent: AgentView | null }
@@ -65,6 +71,13 @@ function linkedAgent(view: WorkView, agents: AgentView[], session: WorkSessionBi
 }
 const progressing = (agent: AgentView | null): boolean => !!agent && agent.source === 'live' && !agent.stale && PROGRESS_STATES.includes(agent.state);
 const observedAs = (agent: AgentView | null, state: RuntimeState): boolean => !!agent && agent.source === 'live' && !agent.stale && agent.state === state;
+/** `at` is newer than `than`; a missing manual timestamp cannot beat a native fact. */
+function fresherAfter(at: string, than: string | null): boolean {
+  const time = Date.parse(at);
+  if (!Number.isFinite(time)) return false;
+  const base = than ? Date.parse(than) : Number.NaN;
+  return !Number.isFinite(base) || time > base;
+}
 /** Wait target from the recorded role chain. A missing relation resolves to
  *  `null` with an `unlinked` evidence line — never to a guessed role. */
 interface PendingSide { side: WorkWaitingFor; evidence: string | null; session: BoundSession | null }
@@ -87,41 +100,38 @@ export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress 
   const { task, view, agents, inbox } = input;
   const parts: string[] = [];
   const note = (value: string | null | undefined): void => { if (value) parts.push(value); };
-  const finish = (phase: WorkPhase, waitingFor: WorkWaitingFor): NativeWorkProgress =>
-    ({ phase, waitingFor, waitEvidence: parts.length ? parts.join(' · ').slice(0, MAX_WAIT_EVIDENCE) : null });
 
   const bound: BoundSession[] = view.sessions.filter(s => !s.unboundAt).map(session => ({ session, agent: linkedAgent(view, agents, session) }));
   const busy = bound.filter(b => progressing(b.agent));
   const pending = pendingSide(view, bound, agents);
-  // Only the session the work is actually waiting on can interrupt the hand-off;
-  // a stopped session in another role is liveness, not this work's interruption.
   const pendingStopped = pending.session?.agent?.state === 'stopped';
+  const pendingDegraded = pending.session?.agent?.degraded ?? null;
+  const ownerReturn = view.ownerReturn;
+  const returnFacts: OwnerReturnFact[] = ownerReturn && !ownerReturn.error
+    ? [...ownerReturn.matched].sort((a, b) => b.postedAt.localeCompare(a.postedAt)) : [];
+  const finish = (phase: WorkPhase, waitingFor: WorkWaitingFor): NativeWorkProgress => {
+    // A native return the owner has not claimed stays visible on an already
+    // terminal work row; it never re-opens the phase.
+    if (returnFacts.length && ['completed', 'failed', 'accepted', 'delivered', 'blocked'].includes(phase)) note('return:等待負責人領取');
+    return { phase, waitingFor, waitEvidence: parts.length ? parts.join(' · ').slice(0, MAX_WAIT_EVIDENCE) : null };
+  };
 
-  if (task.status === 'done') { note('task:done（原生任務已完成）'); return finish('accepted', 'none'); }
-
-  // An interruption is a native signal, but only while it is fresher than the
-  // last recorded manual action; a session observed after it supersedes it.
-  const ledgerAt = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
-  const interruption = inbox.filter(e => INTERRUPTING_INBOX.includes(e.kind) && Number.isFinite(Date.parse(e.at)) &&
-    (!Number.isFinite(ledgerAt) || Date.parse(e.at) > ledgerAt)).sort((a, b) => b.at.localeCompare(a.at))[0];
+  // 1–4. The native task rail and the delivery receipt outrank every session
+  // fact: a live child must never mask a completed/failed/blocked task.
+  if (task.status === 'done') { note('task:done（原生任務已完成）'); return finish('completed', 'none'); }
+  if (task.status === 'failed') { note('task:failed（原生任務已失敗）'); return finish('failed', 'none'); }
+  if (task.status === 'blocked') { note('task:blocked（原生任務已阻塞）'); return finish('blocked', 'dependency'); }
+  if (view.deliveryStatus === 'failed') { note('delivery:failed'); note(view.waitingReason?.slice(0, 160)); return finish('failed', 'user_decision'); }
+  // 5. Only a live, non-stale, bound session that is running (or using a tool) is
+  // work; a working child is not waiting on the operator.
   if (busy.length) {
-    // Only a live, non-stale session that is running (or using a tool) is work.
-    // A child that is working is not waiting on the operator, so the wait target
-    // is `none`; the tool call itself stays a process fact shown separately.
     const first = busy[0]!;
     note(`session:${first.session.agentId}/${first.session.role}:${first.agent?.state ?? 'unknown'}`);
     if (busy.length > 1) note(`同時有 ${busy.length} 個進行中的 session`);
     return finish('working', 'none');
   }
-  const waitingUser = bound.find(b => observedAs(b.agent, 'waiting_user'));
-  if (waitingUser) { note(`session:${waitingUser.session.agentId}/${waitingUser.session.role}:waiting_user`); return finish('waiting', 'user_decision'); }
-  // Terminal native and delivery facts are decided before a session-liveness stop
-  // can override them, so a delivered/accepted/blocked/failed work keeps its true
-  // phase and its pending hand-off.
-  if (task.status === 'failed') { note('task:failed（原生任務已失敗）'); return finish('failed', 'none'); }
-  if (task.status === 'blocked') { note('task:blocked（原生任務已阻塞）'); return finish('blocked', 'dependency'); }
-  if (view.deliveryStatus === 'failed') { note('delivery:failed'); note(view.waitingReason?.slice(0, 160)); return finish('failed', 'user_decision'); }
-  if (view.stage === 'accepted') { note('ledger:accepted（原生任務狀態尚未更新）'); return finish('accepted', 'none'); }
+  // 6. A delivered hand-off is decided before any `waiting_user` observation so
+  // the pending verifier is preserved (GH1189 F1).
   if (view.stage === 'delivered') {
     // `delivered` means the work now waits on the verifier (or the owner when no
     // reviewer is bound). A stopped verifier is a liveness fact shown separately,
@@ -129,33 +139,67 @@ export function deriveWorkProgress(input: NativeWorkInputs): NativeWorkProgress 
     note(pending.evidence); note(deliveryNote(view));
     return finish('delivered', pending.side);
   }
+  if (view.stage === 'accepted') { note('ledger:accepted（原生任務狀態尚未更新）'); return finish('accepted', 'none'); }
   if (view.stage === 'blocked') { note(pending.evidence); return finish('blocked', 'dependency'); }
-  if (view.stage === 'ready') { note(pending.evidence); return finish('ready', null); }
-  if (view.stage === 'uninitialized') { note(pending.evidence); return finish('uninitialized', null); }
-  // A live, non-stale progressing session is not an interruption, and a
-  // delivered/accepted/blocked/failed work has already been decided above: the
-  // recorded inbox interruption applies only to an active hand-off
-  // (assigned / executing / awaiting_delivery). A liveness event such as
-  // `unavailable` for an already-delivered work is liveness, not a new phase —
-  // otherwise the wired OwnerInbox `unavailable` row would override `delivered`.
+  // 9.
+  const waitingUser = bound.find(b => observedAs(b.agent, 'waiting_user'));
+  if (waitingUser) { note(`session:${waitingUser.session.agentId}/${waitingUser.session.role}:waiting_user`); return finish('waiting', 'user_decision'); }
+  // 10. A corrupt native record for the pending session is `recoverable`, never
+  // an empty `waiting`: the binding identity is preserved, the unreadable record
+  // is named, and the bounded recovery point is shown. This is decided before the
+  // owner-inbox interruption because the inbox regenerates exactly one
+  // `unavailable` row for this same degraded binding — that row is a consequence
+  // of the unreadable record, not a separate, more specific fact, and letting it
+  // win would replace the record name and recovery point with `interrupted`.
+  if (pendingDegraded && pending.session) {
+    note(pending.evidence);
+    note(`record:${pendingDegraded.record} 無法讀取（${pendingDegraded.code}）：${pendingDegraded.message}`);
+    note(`保留身分：${pending.session.session.agentId}/${pending.session.session.sessionId}`);
+    note(pendingDegraded.recovery ? `恢復點：${pendingDegraded.recovery}` : '恢復點：無法取得；請先確認來源後再繼續。');
+    return finish('recoverable', pending.side);
+  }
+  // 11. A fresh owner-inbox interruption applies only to the hand-off this work
+  // is actually waiting on. An event for another bound session is liveness, and
+  // the pending wait target is preserved (GH1189 F3).
+  const ledgerAt = view.updatedAt ? Date.parse(view.updatedAt) : Number.NaN;
+  const interruption = inbox.filter(e => INTERRUPTING_INBOX.includes(e.kind) && pending.session !== null && e.bindingId === pending.session.session.id &&
+    Number.isFinite(Date.parse(e.at)) && (!Number.isFinite(ledgerAt) || Date.parse(e.at) > ledgerAt))
+    .sort((a, b) => b.at.localeCompare(a.at))[0];
   if (interruption) {
     note(`inbox:${interruption.kind} @ ${interruption.at}`);
     note(interruption.summary.slice(0, 160));
     note(pending.evidence);
-    return finish('interrupted', null);
+    return finish('interrupted', pending.side);
   }
-  // assigned / executing / awaiting_delivery: the task rail is not asked to
-  // imply that a child works — only the observed session decides that above.
-  // A stopped session here interrupts only the role this work is waiting on, and
-  // the wait target is preserved. Source, staleness, heartbeat and last progress
-  // stay separate process-liveness fields.
-  note(pending.evidence); note(deliveryNote(view));
-  for (const b of bound) note(`observation:${b.session.agentId}/${b.session.role}:${b.agent?.state ?? 'unlinked'}`);
+  // 12. A stopped pending session interrupts only the role this work waits on.
   if (pendingStopped && pending.session) {
+    note(pending.evidence);
     note(`session:${pending.session.session.agentId}/${pending.session.session.role}:stopped`);
     note(pending.session.agent?.reason?.slice(0, 160));
     return finish('interrupted', pending.side);
   }
+  // 13. A delivery receipt accepted/queued/unconfirmed without an observed
+  // start is `launched`, not yet `working`.
+  if (view.stage === 'assigned' && view.deliveryStatus && ['accepted', 'queued', 'unconfirmed'].includes(view.deliveryStatus)) {
+    note(`delivery:${view.deliveryStatus}`);
+    return finish('launched', pending.side);
+  }
+  // 14. A posted owner return is a native completion fact; it outranks only the
+  // manual stage, so a fresher task/session fact above still wins.
+  const returnFact = returnFacts[0];
+  if (returnFact && fresherAfter(returnFact.postedAt, view.updatedAt)) {
+    note(`return:${returnFact.status} @ ${returnFact.postedAt}`);
+    note(returnFact.result?.slice(0, 160));
+    return finish(returnFact.status === 'done' ? 'completed' : 'failed', 'none');
+  }
+  // 15.
+  if (view.stage === 'ready') { note(pending.evidence); return finish('ready', null); }
+  if (view.stage === 'uninitialized') { note(pending.evidence); return finish('uninitialized', null); }
+  // 16. assigned / executing / awaiting_delivery: the task rail is not asked to
+  // imply that a child works — only the observed session decides that above.
+  // Source, staleness, heartbeat and last progress stay separate liveness fields.
+  note(pending.evidence); note(deliveryNote(view));
+  for (const b of bound) note(`observation:${b.session.agentId}/${b.session.role}:${b.agent?.state ?? 'unlinked'}`);
   const waiting = view.stage !== 'assigned' || view.deliveryStatus === 'started' || view.deliveryStatus === 'settled';
   return finish(waiting ? 'waiting' : 'assigned', pending.side);
 }
@@ -187,6 +231,10 @@ function apply(view: WorkView, action: WorkAction, at: string, target: AgentBind
 export class WorkManager {
   private transportStoreId: string;
   private cache = new Map<string, { at: number; view: WorkView }>();
+  // Owner-return facts are cached per work. A mutation read reuses the cache and
+  // never spawns the fixed `edda return` reads while it holds the per-task lock,
+  // so a slow CLI cannot extend a lock hold (#1196 review F5).
+  private returns = new Map<string, { at: number; value: OwnerReturnView | null }>();
   private reads = new Map<string, Promise<ReadWork>>();
   private queue = new Map<string, Promise<unknown>>();
   private refreshing: Promise<void> | null = null;
@@ -207,9 +255,10 @@ export class WorkManager {
         const binding = bindings[index++]!;
         const cached = this.cache.get(binding.id);
         if (cached && Date.now() - cached.at < 10000) continue;
-        // One native observation snapshot per pass, not one full overview() per work.
-        snapshot ??= this.manager.overview().agents;
-        try { await this.read(binding, snapshot); }
+        // D7: an exception from overview() degrades only the affected row, never
+        // the whole `list()` response. One native observation snapshot per pass,
+        // not one full overview() per work.
+        try { snapshot ??= this.manager.overview().agents; await this.read(binding, snapshot); }
         catch (error) {
           const view = { ...(cached?.view ?? empty(binding)), error: error instanceof ManagerError ? error.message : '此工作的 Edda 紀錄暫時無法讀取。' };
           this.cache.set(binding.id, { at: Date.now(), view });
@@ -228,7 +277,11 @@ export class WorkManager {
     const pending = this.reads.get(binding.id); if (pending) return pending;
     const promise = this.doRead(binding, agents).finally(() => this.reads.delete(binding.id)); this.reads.set(binding.id, promise); return promise;
   }
-  private async doRead(binding: WorkBinding, agents?: AgentView[]): Promise<ReadWork> {
+  private async doRead(binding: WorkBinding, agents?: AgentView[], options: { returns?: boolean } = {}): Promise<ReadWork> {
+    // A return read is fail-closed inside the ledger and never blocks the row; a
+    // ledger that throws unexpectedly still degrades to an honest unavailable DTO.
+    // A mutation read (`returns: false`) only reuses the cached snapshot.
+    const ownerReturn = await this.ownerReturns(binding, options.returns !== false);
     const [task, notes] = await Promise.all([this.ledger.task(binding), this.ledger.notes(binding)]);
     const events: ReadWork['events'] = [];
     for (const note of notes) {
@@ -274,6 +327,10 @@ export class WorkManager {
         summary: event.action.kind === 'attach_continuity' ? `連結原生上下文 ${event.action.reference.capsuleId}` : event.action.kind === 'intervene' ? event.action.send.message : 'nextStep' in event.action ? event.action.nextStep : 'evidence' in event.action ? event.action.evidence : event.action.kind === 'bind_session' ? event.action.expectedEvent : '解除 session 綁定' });
     }
     view.revision = hash(JSON.stringify([binding, task.key, task.updatedAt, previous]));
+    // The current attempt counts the recorded hand-off operations; it is derived
+    // from the same native chain as the role bindings, never from an id the
+    // operator would have to translate.
+    view.attempt = ordered.filter((e) => 'send' in e.action).length;
     if (view.deliveryOperationId) {
       const event = ordered.findLast((e) => 'send' in e.action && e.action.send.operationId === view.deliveryOperationId);
       const op = event ? this.associatedOperation(event) : null;
@@ -285,12 +342,69 @@ export class WorkManager {
       }
     }
     // Derive the operator-facing phase last: it reads the native task rail,
-    // delivery receipt, observed sessions and recorded owner-inbox events, so a
-    // fresher native signal overrides a stale manual stage/waiting reason.
-    const native = deriveWorkProgress({ task, view, agents: agents ?? this.manager.overview().agents,
+    // delivery receipt, observed sessions, owner-inbox events and owner returns,
+    // so a fresher native signal overrides a stale manual stage/waiting reason.
+    const agentViews = agents ?? this.manager.overview().agents;
+    view.ownerReturn = ownerReturn ?? null;
+    view.registry = this.registryRelation(binding, view, agentViews);
+    const native = deriveWorkProgress({ task, view, agents: agentViews,
       inbox: this.manager.store.inboxEvents(view.id, binding.projectId, binding.taskId, 201) });
     view.phase = native.phase; view.waitingFor = native.waitingFor; view.waitEvidence = native.waitEvidence;
     this.cache.set(binding.id, { at: Date.now(), view }); return { task, events: ordered, view };
+  }
+  /** Cached, fail-closed owner-return read. `spawn: false` (the mutation path)
+   *  never starts a process and reuses the last snapshot, so a slow CLI cannot
+   *  extend a lock hold; a cold cache simply projects `null` until the next read. */
+  private async ownerReturns(binding: WorkBinding, spawn: boolean): Promise<OwnerReturnView | null> {
+    const cached = this.returns.get(binding.id);
+    if (!spawn || (cached && Date.now() - cached.at < RETURN_CACHE_MS)) return cached?.value ?? null;
+    const value = await (this.ledger.returns ? this.ledger.returns(binding) : Promise.resolve(null))
+      .catch((): OwnerReturnView | null => binding.ownerRef
+        ? { owner: binding.ownerRef, holder: null, pending: 0, total: null, matched: [], dropped: 0, error: '負責人回件狀態暫時無法讀取；未自動重試。' } : null);
+    this.returns.set(binding.id, { at: Date.now(), value });
+    return value;
+  }
+  /** Bounded known-root relation (GH1181 case1). Cheap: it reuses the config,
+   *  the pass's observation snapshot and opaque root labels — discovery is never
+   *  polled here, and no registry path is serialized. */
+  private registryRelation(binding: WorkBinding, view: WorkView, agents: AgentView[]): WorkRegistryRelation {
+    const projectAgents = this.manager.config.agents.filter(a => a.projectId === binding.projectId && (a.transport ?? 'pi') === 'pi');
+    const allRoots = [...new Set(projectAgents.map(a => a.registryRoot))];
+    const roots = allRoots.slice(0, 32);
+    const truncated = allRoots.length - roots.length;
+    const suffix = truncated > 0 ? `（來源超過 32 個上限，其餘 ${truncated} 個未列出）` : '';
+    // The locator names the project's known roots only by selected agent names and
+    // an opaque root label — never a registry path.
+    const locator = (excludeRoot: string | null): string => {
+      const selected = roots.filter(root => root !== excludeRoot).map(root => {
+        const names = projectAgents.filter(a => a.registryRoot === root).map(a => a.name).slice(0, 3);
+        return `${rootLabel(root)}（${names.join('、')}）`;
+      });
+      return selected.length ? selected.join('、') : '無';
+    };
+    const executor = view.sessions.filter(s => !s.unboundAt).find(s => s.agentId === view.assigneeAgentId && s.role !== 'reviewer')
+      ?? view.sessions.filter(s => !s.unboundAt && s.role === 'worker')[0] ?? null;
+    // No bound executor means no observed source to relate: never claim one was
+    // observed. The known roots are still named so an empty read cannot read as
+    // global no-work.
+    if (!executor) return { relation: 'unknown',
+      message: `此工作尚未綁定可判定的執行 session；專案已知來源：${locator(null)}。空的讀取不代表沒有子代理正在工作。${suffix}`.slice(0, 600) };
+    // The recorded session binding is authoritative: if its agent left the
+    // configuration, the relation is honestly unregistered rather than guessed.
+    const configured = this.manager.config.agents.find(a => a.id === executor.agentId && a.projectId === binding.projectId);
+    if (!configured) return { relation: 'root_not_registered',
+      message: `此工作紀錄的執行來源不在本專案已選取的清單中；請重新選擇來源，或從候選清單加入。${suffix}`.slice(0, 600) };
+    if ((configured.transport ?? 'pi') !== 'pi') return { relation: 'unknown',
+      message: `此工作的執行來源不是 Pi 來源，registry 關聯不適用。${suffix}`.slice(0, 600) };
+    if (!roots.includes(configured.registryRoot)) return { relation: 'unknown',
+      message: `此工作的執行來源不在本專案已知的 32 個來源內；請確認設定後再判斷。${suffix}`.slice(0, 600) };
+    const observed = agents.find(a => a.id === configured.id && a.projectId === binding.projectId);
+    const linked = !!observed && observed.selectionRevision === executor.selectionRevision &&
+      observed.transport === executor.transport && observed.sessionEvidence?.sessionId === executor.sessionId;
+    if (linked) return { relation: 'in_root',
+      message: `已在本專案已知的來源中觀測到對應的執行來源（${configured.name}）。${suffix}`.slice(0, 600) };
+    return { relation: 'not_in_root',
+      message: `「${configured.name}」目前沒有可對應的觀測 session；專案其他已知來源：${locator(configured.registryRoot)}。空的讀取不代表沒有子代理正在工作。${suffix}`.slice(0, 600) };
   }
   async continuationSnapshot(id: string): Promise<{ taskKey: string; view: WorkView; actions: WorkAction[] }> {
     const state = await this.read(this.binding(id)); return { taskKey: state.task.key, view: state.view, actions: state.events.map(e => e.action) };
@@ -309,7 +423,7 @@ export class WorkManager {
   private async perform(binding: WorkBinding, action: WorkAction): Promise<WorkView> {
     // Await and discard any pre-lock read before obtaining the mutation snapshot.
     await this.reads.get(binding.id)?.catch(() => {});
-    const current = await this.doRead(binding), fingerprint = hash(JSON.stringify(action));
+    const current = await this.doRead(binding, undefined, { returns: false }), fingerprint = hash(JSON.stringify(action));
     const duplicate = current.events.find((e) => e.action.actionId === action.actionId);
     if (duplicate) {
       if (duplicate.fingerprint !== fingerprint) throw new ManagerError('ACTION_CONFLICT', '這個交接編號已有不同內容。', 409);
@@ -324,7 +438,7 @@ export class WorkManager {
           await this.manager.send(selected.id, action.send);
         }
       }
-      return { ...(await this.doRead(binding)).view, confirmedActionId: action.actionId };
+      return { ...(await this.doRead(binding, undefined, { returns: false })).view, confirmedActionId: action.actionId };
     }
     if (current.view.revision !== action.revision) throw new ManagerError('STALE_WORK', '工作已被更新，請查看最新狀態後再操作。', 409);
     this.validate(current.view, action);
@@ -354,18 +468,18 @@ export class WorkManager {
     await this.ledger.append(binding, encoded);
     // Re-read the ledger before the effect: detect an external writer that
     // ignored the mutex. An uncertain append/send is never retried automatically.
-    const written = await this.doRead(binding);
+    const written = await this.doRead(binding, undefined, { returns: false });
     if (written.events.at(-1)?.action.actionId !== action.actionId) throw new ManagerError('LEDGER_CONFLICT', '交接紀錄已被其他管理者更新，尚未傳送訊息。', 409);
     if (target && (action.kind === 'assign' || action.kind === 'intervene')) {
       try { await this.manager.send(target.id, action.send); }
       catch (error) {
         // Durable ledger intent remains authoritative even if preflight changes
         // between recording and send. Absence of transport evidence is unknown.
-        const view = (await this.doRead(binding)).view;
+        const view = (await this.doRead(binding, undefined, { returns: false })).view;
         return { ...view, error: error instanceof ManagerError ? error.message : '傳送結果尚待確認；請查詢原交接編號。', confirmedActionId: action.actionId };
       }
     }
-    return { ...(await this.doRead(binding)).view, confirmedActionId: action.actionId };
+    return { ...(await this.doRead(binding, undefined, { returns: false })).view, confirmedActionId: action.actionId };
   }
   private validate(view: WorkView, action: WorkAction): void {
     const fail = (message: string): never => { throw new ManagerError('INVALID_TRANSITION', message, 409); };

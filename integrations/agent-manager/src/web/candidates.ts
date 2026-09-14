@@ -62,6 +62,9 @@ export class CandidatePanel {
     item.append(heading, el('p', candidate.sessionId ?? candidate.runId ?? '尚未有 session 識別', 'identity'));
     if (candidate.workspace) item.append(el('p', candidate.workspace, 'muted'));
     item.append(el('p', candidate.reason ?? (candidate.lastProgressAt ? `最近進度 ${candidate.lastProgressAt}` : '尚無進度紀錄'), candidate.reason ? 'notice' : 'muted'));
+    // A per-record degradation is shown next to the reason; the row identity above
+    // stays the run identity even when the record itself is unreadable.
+    if (candidate.degraded) item.append(el('p', `原生紀錄受損：${candidate.degraded.record}（${candidate.degraded.code}）· ${candidate.degraded.message}`, 'notice'));
     if (candidate.configuredAgentId) { item.append(el('p', `已加入管理：${candidate.configuredAgentId}`, 'muted')); return item; }
     if (!candidate.sessionId || !candidate.workspace) { item.append(el('p', '此項目尚無可綁定的 session 或工作目錄，只能顯示。', 'notice')); return item; }
     if (selected !== candidate.id) {
