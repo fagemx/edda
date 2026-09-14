@@ -248,9 +248,9 @@ mailbox it read (named by source and an opaque root label) and a bounded notice
 that discloses a fallback or an absent mailbox. A
 fresher native fact — the task rail, a delivery receipt, an observed bound
 session or a fresher owner-inbox event — outranks the manual stage; a posted
-return outranks only the manual `assigned` / `executing` / `awaiting_delivery`
-stages, so a recorded `delivered` / `accepted` / `blocked` decision still stands
-over an unclaimed return.
+return outranks only the manual stages below it (`uninitialized` / `ready` /
+`assigned` / `executing` / `awaiting_delivery`), so a recorded `delivered` /
+`accepted` / `blocked` decision still stands over an unclaimed return.
 
 Capability boundary: this projection reads and explains. It does not schedule,
 auto-register a source, wake an owner, restart or replay a worker, collect or

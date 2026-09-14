@@ -302,4 +302,8 @@ test('a run merge keeps a recorded degradation unless a live row clears it', () 
   assert.equal(dedupeRuns({ runs: [recorded({ degraded }), recorded()], failures: [] })[0]?.degraded?.code, 'record_unavailable');
   // A live preferred row keeps its own degradation.
   assert.equal(dedupeRuns({ runs: [liveRow({ degraded }), recorded({ degraded: null })], failures: [] })[0]?.degraded?.code, 'record_unavailable');
+  // The preferred recorded row carries no degradation but the other recorded row
+  // does: the degradation is still a real fact and must be carried, not dropped.
+  assert.equal(dedupeRuns({ runs: [recorded(), recorded({ degraded })], failures: [] })[0]?.degraded?.code, 'record_unavailable');
+  assert.equal(dedupeRuns({ runs: [recorded({ degraded: null }), recorded({ degraded }), recorded({ degraded: null })], failures: [] })[0]?.degraded?.code, 'record_unavailable');
 });
