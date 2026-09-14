@@ -59,7 +59,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
                                        adopt an already-launched run into the owner lifecycle (same run, next turn)
   node integrations/pi/cli.mjs run-conversation RUN_ID [--after ENTRY_ID] [--limit 20]
   node integrations/pi/cli.mjs run-stop RUN_ID [--abort]
-  node integrations/pi/cli.mjs run-resume RUN_ID
+  node integrations/pi/cli.mjs run-resume RUN_ID [--runtime pinned|current]
   node integrations/pi/cli.mjs supervisor-start --config FILE [--id UUID]
   node integrations/pi/cli.mjs supervisor-status SUPERVISOR_ID
   node integrations/pi/cli.mjs supervisor-stop SUPERVISOR_ID
@@ -136,7 +136,7 @@ async function main(args) {
     'authorization-record': ['--record', '--consumer'], 'authorization-revoke': ['--consumer'],
     'inbox-respond': ['--message', '--message-file', '--authorization', '--consumer'], 'inbox-wake': [],
     'runtime-install': [], launch: ['--project', '--pi-entry', '--provider', '--model', '--thinking', '--prompt-file', '--run-id', '--extension', '--agent-dir', '--no-tools', '--owner', '--return-owner', '--owner-root'],
-    'run-status': [], 'run-conversation': ['--after', '--limit'], 'run-stop': ['--abort'], 'run-resume': [],
+    'run-status': [], 'run-conversation': ['--after', '--limit'], 'run-stop': ['--abort'], 'run-resume': ['--runtime'],
     owner: ['--run', '--owner', '--return-owner', '--owner-root'],
     'supervisor-start': ['--config', '--id'], 'supervisor-status': [], 'supervisor-stop': [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
@@ -183,7 +183,7 @@ async function main(args) {
   }
   if (command === 'run-conversation') result = await managedConversation(root, sessionId, { after: options['--after'], limit: options['--limit'] });
   if (command === 'run-stop') result = await stopManaged(root, sessionId, { abort: options['--abort'] === true });
-  if (command === 'run-resume') result = await resumeManaged(root, sessionId);
+  if (command === 'run-resume') result = await resumeManaged(root, sessionId, { runtime: options['--runtime'] });
   if (command === 'inbox') result = listInbox(root, { consumer: options['--consumer'], limit: options['--limit'], after: options['--after'] });
   if (command === 'inbox-read') result = await readInbox(root, sessionId, { consumer: options['--consumer'], budget: options['--budget-bytes'] });
   if (command === 'inbox-ack') result = acknowledgeInbox(root, sessionId, options['--consumer']);
