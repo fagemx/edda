@@ -123,6 +123,17 @@ pub(crate) fn dispatch_claim_outcome(
     Ok(Some(2))
 }
 
+/// Resolve the claim-guard machine identity (GH-656/GH-1126): an explicit
+/// `--machine` always wins, then `EDDA_MACHINE`; the hostname is never
+/// guessed. The environment read goes through [`crate::env::var`] so tests
+/// pin absence/presence themselves instead of inheriting the shell's.
+pub(crate) fn resolve_machine(explicit: Option<&str>) -> String {
+    match explicit {
+        Some(machine) => machine.to_owned(),
+        None => crate::env::var("EDDA_MACHINE").unwrap_or_default(),
+    }
+}
+
 /// The cross-machine claim guard for one dispatch (GH-656). `Ok(None)`
 /// means dispatch may proceed; `Ok(Some((issue, machine, reason)))` means
 /// the issue is claimed by another machine and the turn must not start.
@@ -144,10 +155,7 @@ pub(crate) fn claim_guard_refusal(
         }
         return Ok(None);
     };
-    let machine = match args.machine.as_deref() {
-        Some(machine) => machine.to_owned(),
-        None => std::env::var("EDDA_MACHINE").unwrap_or_default(),
-    };
+    let machine = resolve_machine(args.machine.as_deref());
     if machine.is_empty() {
         bail!(
             "--issue {issue} requires an explicit machine identity: pass --machine <machine>/<role> \

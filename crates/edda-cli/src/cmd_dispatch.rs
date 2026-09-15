@@ -1264,9 +1264,12 @@ mod tests {
     }
 
     /// The guard needs an explicit machine; --issue alone (no flag, no
-    /// EDDA_MACHINE) is an error, never a hostname guess.
+    /// EDDA_MACHINE) is an error, never a hostname guess. GH-1126: the
+    /// absence is pinned through the thread-scoped seam, not inherited from
+    /// the shell.
     #[test]
     fn issue_without_an_explicit_machine_is_refused() {
+        let _env = crate::env::test_config_guard(&[("EDDA_MACHINE", None)]);
         let args = parse(&[
             "edda",
             "--agent",
@@ -1280,6 +1283,31 @@ mod tests {
             .expect_err("machine must be explicit");
         assert!(error.to_string().contains("--machine"), "{error}");
         assert!(error.to_string().contains("EDDA_MACHINE"), "{error}");
+    }
+
+    /// GH-1126: with `--machine` absent the guard resolves `EDDA_MACHINE`
+    /// through the seam — the present case is pinned, not inherited. A
+    /// malformed env value is refused before any gh call, which proves the env
+    /// read happened and was used as the identity (and never a hostname).
+    #[test]
+    fn machine_resolves_from_env_when_the_flag_is_absent() {
+        let _env = crate::env::test_config_guard(&[("EDDA_MACHINE", Some("gh1126-env"))]);
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--issue",
+            "656",
+        ]);
+        let (issue, machine, reason) =
+            crate::claim_guard::claim_guard_refusal(&args, Path::new("."))
+                .expect("refusal, not an error")
+                .expect("a malformed env identity must refuse before gh");
+        assert_eq!(issue, 656);
+        assert_eq!(machine, "gh1126-env");
+        assert!(reason.contains("<machine>/<role>"), "{reason}");
     }
 
     /// Honesty rule: --machine without --issue can never fire the guard,
