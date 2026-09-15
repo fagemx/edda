@@ -119,11 +119,33 @@ test('a channel can adopt an owner reference after start', async (t) => {
   const adopted = await channel.adoptOwner({ owner, returnOwner: 'assistant/adopted-return', ownerRoot: mailboxRoot });
   assert.equal(adopted.status, 'bound');
   assert.equal(channel.snapshot().returnOwner, 'assistant/adopted-return');
-  assert.deepEqual(channel.snapshot().owner, { owner, status: 'bound', replaced: false, dependencyScope: 'session' });
+  assert.deepEqual(channel.snapshot().owner, { owner, status: 'bound', replaced: false, dependencyScope: 'owner' });
   await postReturn(cwd, { work: 'job-adopted', root: mailboxRoot });
   const claimed = await channel.claimOwnerReturns();
   assert.equal(claimed.status, 'ok');
   assert.equal(claimed.returns[0].work, 'job-adopted');
+});
+
+test('re-adopting the same owner with a changed owner root rebinds the mailbox', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'edda-owner-reroot-'));
+  const root = join(cwd, 'private');
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd, ownerCommand: fixture(), deliver() {} });
+  t.after(async () => { await channel.close(); await rm(cwd, { recursive: true, force: true }); });
+  const rootA = join(cwd, 'mailbox-a'), rootB = join(cwd, 'mailbox-b');
+  assert.equal((await channel.adoptOwner({ owner, ownerRoot: rootA })).status, 'bound');
+  assert.equal((await channel.adoptOwner({ owner, ownerRoot: rootA })).status, 'bound'); // same owner + root is a no-op
+  await postReturn(cwd, { work: 'job-a', root: rootA });
+  let claimed = await channel.claimOwnerReturns();
+  assert.equal(claimed.status, 'ok');
+  assert.equal(claimed.returns[0].work, 'job-a'); // still targeting rootA
+  assert.equal((await channel.adoptOwner({ owner, ownerRoot: rootB })).status, 'bound');
+  await postReturn(cwd, { work: 'job-b', root: rootB });
+  claimed = await channel.claimOwnerReturns();
+  assert.equal(claimed.status, 'ok');
+  assert.equal(claimed.returns[0].work, 'job-b');
+  // A return at the old root is no longer claimed: the live mailbox moved.
+  await postReturn(cwd, { work: 'job-a2', root: rootA });
+  assert.equal((await channel.claimOwnerReturns()).status, 'empty');
 });
 
 test('a channel without an owner reports disabled owner returns', async (t) => {
