@@ -1,19 +1,20 @@
 #!/bin/sh
-# Offline self-test for scripts/fleet/reclaim-merged.sh (GH-1009).
+# Offline pass-through test for scripts/fleet/reclaim-merged.sh (GH-1093).
 #
-# What is under test is the EXCLUSION boundary, not the removal: R7 says a
-# reclaimer that is merely usually right is a data-loss tool, so the cases
-# below are written from the keep side. A dirty worktree, an open PR, a
-# worktree nested in the main checkout, a local ref that has moved past the
-# merged head and a branch with no PR at all must survive `--apply` intact,
-# and the one item that satisfies every condition must actually go.
+# The reclaimer's verdict ladder moved into the typed product verb
+# `edda fleet reclaim` (crates/edda-cli/src/cmd_fleet_reclaim.rs), so what is
+# left in the shell is a one-line adapter (`mechanism.shell-role=
+# one-line-adapter-only`). Its whole contract is forwarding: whatever argv the
+# caller passed arrives at the verb unchanged, in order, and the verb's exit
+# status becomes the adapter's. The fixture matrix that used to live here —
+# dry-run classification, R7 exclusions, the merged-clean reclamation, the
+# live-peer protection — is now the Rust integration test
+# crates/edda-cli/tests/reclaim_merged.rs, because the `fleet-tests` CI job
+# does not build the Rust binary and a fixture that needs it cannot run there.
 #
-# Fully offline. `gh` is stubbed on PATH ahead of the real one and answers the
-# single `gh pr list` the script makes off a fixture table, so no network and
-# no GitHub credentials are touched. `git` is the real one, driving a
-# throwaway repository with a bare `origin` beside it — worktree registration,
-# `git worktree remove`'s own refusals and `git push --delete` are the
-# behavior under test, and a stub for them would test nothing.
+# Fully offline, POSIX sh only. A stub `edda` first on PATH records the argv of
+# every invocation and answers with a chosen exit status; no `gh`, no `jq`, no
+# network, no real repository.
 #
 # usage: sh scripts/fleet/test-reclaim-merged.sh
 set -eu
@@ -30,470 +31,78 @@ cleanup() { chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"; }
 trap cleanup 0
 trap 'cleanup; exit 130' HUP INT TERM
 
-TAB=$(printf '\t')
-
-fail() {
-    echo "FAIL: $1" >&2
-    [ ! -f "$work/out" ] || { echo '--- last run ---' >&2; cat "$work/out" >&2; }
-    exit 1
-}
-
-# ── the repository under test ────────────────────────────────────────
+# ── the stub verb ────────────────────────────────────────────────────
+#
+# It records one line per invocation and exits with EDDA_STUB_RC (default 0).
+# PATH is prefixed so the adapter's `exec edda …` resolves here, not to any
+# real binary on the workstation.
 
 mkdir -p "$work/bin"
-git init --quiet --bare "$work/origin.git"
-git init --quiet "$work/repo"
-repo=$work/repo
-cd "$repo"
-git symbolic-ref HEAD refs/heads/main
-git config user.email test@example.com
-git config user.name 'reclaim test'
-git config commit.gpgsign false
-echo seed >seed.txt
-git add seed.txt
-git commit --quiet -m seed
-base=$(git rev-parse HEAD)
-git remote add origin "$work/origin.git"
-
-for b in merged-clean merged-dirty open-clean nested-merged moved no-pr; do
-    git branch "$b" main
-done
-
-# `moved` is the ref that outran its own merged PR: one extra commit that no
-# PR ever saw, which `refs/pull/N/head` therefore does not preserve.
-git checkout --quiet moved
-echo later >later.txt
-git add later.txt
-git commit --quiet -m 'work the PR never saw'
-moved_tip=$(git rev-parse HEAD)
-git checkout --quiet main
-
-git push --quiet origin main merged-clean merged-dirty open-clean moved
-
-# Four linked worktrees. `nested` sits inside the main checkout on purpose —
-# that is the shape of the agent worktrees under `.claude/worktrees/`, and
-# removing one of those reaches into the operator's own checkout.
-git worktree add --quiet "$work/wt-merged-clean" merged-clean
-git worktree add --quiet "$work/wt-merged-dirty" merged-dirty
-git worktree add --quiet "$work/wt-open" open-clean
-git worktree add --quiet "$repo/nested" nested-merged
-echo scratch >"$work/wt-merged-dirty/uncommitted.txt"
-
-# A merged PR whose local ref is already gone but whose remote branch is not:
-# the half of the authority that iterating local refs alone never sees.
-git push --quiet origin "merged-clean:remote-only"
-
-# Paths are compared against what `git worktree list` prints, and git spells a
-# Windows path `C:/...` where the shell spells the same directory `/c/...`.
-# Asking git for each one keeps both sides in git's own spelling.
-g_repo=$(cd "$repo" && git rev-parse --show-toplevel)
-g_clean=$(cd "$work/wt-merged-clean" && git rev-parse --show-toplevel)
-g_dirty=$(cd "$work/wt-merged-dirty" && git rev-parse --show-toplevel)
-g_open=$(cd "$work/wt-open" && git rev-parse --show-toplevel)
-g_nested=$(cd "$repo/nested" && git rev-parse --show-toplevel)
-
-# ── the PR table the stub serves ─────────────────────────────────────
-#
-# Same five fields the script asks `gh pr list --jq` for: head branch, number,
-# state, head oid, merge oid. `moved`'s head oid is deliberately the base
-# commit — its local ref has since advanced.
-squash=1111111111111111111111111111111111111111
-{
-    printf 'merged-clean\t101\tMERGED\t%s\t%s\n' "$base" "$squash"
-    printf 'merged-dirty\t102\tMERGED\t%s\t%s\n' "$base" "$squash"
-    printf 'open-clean\t103\tOPEN\t%s\t-\n' "$base"
-    printf 'nested-merged\t104\tMERGED\t%s\t%s\n' "$base" "$squash"
-    printf 'moved\t105\tMERGED\t%s\t%s\n' "$base" "$squash"
-    printf 'remote-only\t106\tMERGED\t%s\t%s\n' "$base" "$squash"
-} >"$work/prs.tsv"
-
-cat >"$work/bin/gh" <<'STUB'
-#!/bin/sh
-printf 'gh %s\n' "$*" >>"$GH_CALLS"
-case "${1:-} ${2:-}" in
-    "pr list") cat "$STUB_PRS" ;;
-    *) echo "gh stub: unexpected invocation: $*" >&2; exit 1 ;;
-esac
-STUB
-chmod +x "$work/bin/gh"
-PATH="$work/bin:$PATH"
-export PATH
-STUB_PRS=$work/prs.tsv
-export STUB_PRS
-
-# `edda peers --json` is this reclaimer's ONE liveness surface (GH-1094): the
-# shared criterion in crates/edda-bridge-claude/src/peers/liveness.rs is
-# published by `edda peers --json` as each session's own `stale` verdict, and
-# those same rows carry the session's `branch`. The stub defaults to an EMPTY
-# live set so every pre-existing case keeps its verdict. `EDDA_PEERS_JSON` and
-# `EDDA_PEERS_RC` let a case point it at a live peer or break it on purpose.
-printf '{"sessions":[]}\n' >"$work/peers-empty.json"
 cat >"$work/bin/edda" <<'STUB'
 #!/bin/sh
-printf 'edda %s\n' "$*" >>"$EDDA_CALLS"
-case "${1:-} ${2:-}" in
-    "peers --json")
-        cat "$EDDA_PEERS_JSON"
-        exit "${EDDA_PEERS_RC:-0}" ;;
-    *) echo "edda stub: unexpected invocation: $*" >&2; exit 1 ;;
-esac
+printf '%s\n' "$*" >>"$EDDA_CALLS"
+printf '%s\n' "$#" >>"$EDDA_ARGC"
+exit "${EDDA_STUB_RC:-0}"
 STUB
 chmod +x "$work/bin/edda"
-EDDA_PEERS_JSON=$work/peers-empty.json
-EDDA_PEERS_RC=0
-export EDDA_PEERS_JSON EDDA_PEERS_RC
+PATH="$work/bin:$PATH"
+export PATH
+
+calls=$work/calls
+argc=$work/argc
+EDDA_CALLS=$calls
+EDDA_ARGC=$argc
+EDDA_STUB_RC=0
+export EDDA_CALLS EDDA_ARGC EDDA_STUB_RC
 
 # ── harness ──────────────────────────────────────────────────────────
 
-case_no=0
+fail() {
+    echo "FAIL: $1" >&2
+    [ ! -f "$calls" ] || { echo '--- recorded ---' >&2; cat "$calls" >&2; }
+    [ ! -f "$work/err" ] || { echo '--- stderr ---' >&2; cat "$work/err" >&2; }
+    exit 1
+}
+
 run() {
-    case_no=$((case_no + 1))
-    GH_CALLS=$work/gh-calls-$case_no
-    export GH_CALLS
-    : >"$GH_CALLS"
-    EDDA_CALLS=$work/edda-calls-$case_no
-    export EDDA_CALLS
-    : >"$EDDA_CALLS"
+    : >"$calls"
+    : >"$argc"
     set +e
-    (cd "$repo" && sh "$script" "$@") >"$work/out" 2>"$work/err"
+    sh "$script" "$@" >"$work/out" 2>"$work/err"
     code=$?
     set -e
 }
 
-# Rows are TSV: verdict, kind, item, branch, pr, state, tree/sha, reason.
-row() { awk -F"$TAB" -v k="$1" -v i="$2" '$2 == k && $3 == i { print }' "$work/out"; }
-
-# Verdict is the first field and reason the last, so both come out of the one
-# `row` call by parameter expansion. This matters: on the workstation this
-# runs on a process spawn measures ~2.7s, and a three-spawn assertion helper
-# called thirty times is two minutes of pure harness.
-expect() { # kind item verdict reason-substring label
-    got=$(row "$1" "$2")
-    [ -n "$got" ] || fail "$5: no row for $1 $2"
-    got_v=${got%%"$TAB"*}
-    got_r=${got##*"$TAB"}
-    [ "$got_v" = "$3" ] || fail "$5: $1 $2 is $got_v, expected $3 (reason: $got_r)"
-    case $got_r in
-        *"$4"*) : ;;
-        *) fail "$5: $1 $2 reason is '$got_r', expected to mention '$4'" ;;
-    esac
+# The full recorded transcript, exactly — one line per invocation, so a missing
+# or duplicated call fails too. A multi-line expectation is compared whole.
+expect_calls() { # expected label
+    got=$(cat "$calls")
+    [ "$got" = "$1" ] || fail "$2: recorded '$got', expected '$1'"
+    [ "$(cat "$argc")" = "$3" ] || fail "$2: verb received $(cat "$argc") args, expected $3"
 }
 
-# ── case 1: the dry run classifies, and removes nothing ──────────────
-#
-# doneWhen bullet 1: every candidate listed with its worktree, branch, PR,
-# state and tree state, strictly scoped to merged PRs.
+# ── case 1: representative argv forwards verbatim, in order ──────────
 
-wt_before=$(cd "$repo" && git worktree list | wc -l)
+run --apply --protect foo --protect 'bar baz' --pr-limit 7
+[ "$code" -eq 0 ] || fail "case 1: adapter exited $code"
+expect_calls 'fleet reclaim --apply --protect foo --protect bar baz --pr-limit 7' 'case 1' 9
+[ "$(wc -l <"$calls")" -eq 1 ] || fail "case 1: expected exactly one invocation"
+
+# ── case 2: no arguments forwards the bare verb ──────────────────────
+
 run
-[ "$code" -eq 0 ] || fail "case 1: dry run exited $code: $(cat "$work/err")"
-grep -q 'pr list --state all' "$GH_CALLS" || fail "case 1: the PR table was never read"
+[ "$code" -eq 0 ] || fail "case 2: adapter exited $code"
+expect_calls 'fleet reclaim' 'case 2' 2
 
-expect worktree "$g_clean" RECLAIM 'pr-merged' 'case 1'
-expect worktree "$g_dirty" KEEP 'tree-dirty' 'case 1'
-expect worktree "$g_open" KEEP 'pr-OPEN' 'case 1'
-expect worktree "$g_nested" KEEP 'nested-in-main-checkout' 'case 1'
-expect worktree "$g_repo" KEEP 'main-checkout' 'case 1'
-expect local-branch moved KEEP 'local-ahead-of-pr' 'case 1'
-expect local-branch no-pr KEEP 'no-pr' 'case 1'
-expect local-branch merged-dirty KEEP 'checked-out' 'case 1'
-expect local-branch nested-merged KEEP 'checked-out' 'case 1'
-expect local-branch main KEEP 'default-branch' 'case 1'
-# The dry run has to predict --apply: this branch is checked out only in the
-# worktree the same run already listed as RECLAIM.
-expect local-branch merged-clean RECLAIM 'pr-merged' 'case 1'
-expect remote-branch origin/moved KEEP 'remote-moved-since-merge' 'case 1'
-expect remote-branch origin/open-clean KEEP 'pr-OPEN' 'case 1'
-expect remote-branch origin/merged-dirty KEEP 'local-kept' 'case 1'
-expect remote-branch origin/merged-clean RECLAIM 'pr-merged' 'case 1'
-expect remote-branch origin/remote-only RECLAIM 'pr-merged' 'case 1'
-[ -z "$(row local-branch remote-only)" ] \
-    || fail 'case 1: a local row was invented for a branch that exists only on origin'
-
-# The dirty worktree's tree state has to be READ, not inferred from the
-# verdict: a row that says `clean` and keeps for some other reason would pass
-# a verdict-only assertion and still be the bug this test exists to catch.
-[ "$(row worktree "$g_dirty" | cut -f7)" = dirty ] \
-    || fail "case 1: the dirty worktree was not reported dirty"
-
-[ "$(cd "$repo" && git worktree list | wc -l)" -eq "$wt_before" ] \
-    || fail 'case 1: a dry run removed a worktree'
-[ -d "$work/wt-merged-clean" ] || fail 'case 1: a dry run removed the reclaim candidate'
-
-# ── case 2: --protect keeps an otherwise-qualifying item ─────────────
-
-run --protect wt-merged-clean
-expect worktree "$g_clean" KEEP 'protected' 'case 2'
-[ -d "$work/wt-merged-clean" ] || fail 'case 2: a protected worktree was removed'
-
-# ── case 2a: a live peer's branch keeps its otherwise-reclaimable items ─
+# ── case 3: the verb's non-zero status becomes the adapter's ─────────
 #
-# GH-1094: a merged, clean worktree on the recorded branch of a LIVE peer
-# session must be KEEP, named after the peer. The agent may be alive with a
-# momentarily clean tree, so a merge is not a licence to remove it. The same
-# branch's local ref and its origin ref are protected by the same fact.
+# The adapter uses `exec`, so the process is replaced and the status must
+# survive unchanged. Exit 3 is the PR-table-unreadable code the verb uses.
 
-cat >"$work/peers-live.json" <<'JSON'
-{"sessions":[{"stale":false,"branch":"merged-clean","label":"peer-lane","session_id":"deadbeef"}]}
-JSON
-EDDA_PEERS_JSON=$work/peers-live.json
-export EDDA_PEERS_JSON
-run
-[ "$code" -eq 0 ] || fail "case 2a: dry run exited $code: $(cat "$work/err")"
-printf 'case 2a live-peer rows (verbatim):\n'
-row worktree "$g_clean"
-row local-branch merged-clean
-row remote-branch origin/merged-clean
-expect worktree "$g_clean" KEEP 'live-peer peer-lane' 'case 2a'
-expect local-branch merged-clean KEEP 'live-peer peer-lane' 'case 2a'
-expect remote-branch origin/merged-clean KEEP 'live-peer peer-lane' 'case 2a'
-# Protection is specific to the peer's branch: the unrelated merged remote-only
-# branch is still a RECLAIM candidate (and the --apply below removes it).
-expect remote-branch origin/remote-only RECLAIM 'pr-merged' 'case 2a'
-
+EDDA_STUB_RC=3
+export EDDA_STUB_RC
 run --apply
-[ "$code" -eq 0 ] || fail "case 2a: --apply exited $code: $(cat "$work/err")"
-[ -d "$work/wt-merged-clean" ] || fail 'case 2a: --apply removed a live peer worktree'
-(cd "$repo" && git show-ref --verify --quiet refs/heads/merged-clean) \
-    || fail 'case 2a: --apply deleted a live peer local branch'
-[ -n "$(cd "$repo" && git ls-remote --heads origin merged-clean)" ] \
-    || fail 'case 2a: --apply deleted a live peer remote branch'
+[ "$code" -eq 3 ] || fail "case 3: adapter exited $code, expected 3"
+expect_calls 'fleet reclaim --apply' 'case 3' 3
 
-# ── case 2b: the SAME fixture without a live peer is eligible again ──
-#
-# The liveness join must not have simply switched reclamation off: restore the
-# default empty live set and the identical merged, clean worktree is RECLAIM.
-
-EDDA_PEERS_JSON=$work/peers-empty.json
-export EDDA_PEERS_JSON
-run
-[ "$code" -eq 0 ] || fail "case 2b: dry run exited $code: $(cat "$work/err")"
-expect worktree "$g_clean" RECLAIM 'pr-merged' 'case 2b'
-
-# ── case 2c: unreadable liveness fails closed ────────────────────────
-#
-# `edda peers --json` non-zero: the criterion cannot be evaluated, so an item
-# that would otherwise be RECLAIM is KEEP with a liveness-unreadable reason,
-# and `--apply` removes nothing. This is the per-item keep ladder the issue
-# asks for, not the exit-3 fatal the PR table uses.
-
-EDDA_PEERS_RC=1
-export EDDA_PEERS_RC
-run
-[ "$code" -eq 0 ] || fail "case 2c: dry run exited $code: $(cat "$work/err")"
-expect worktree "$g_clean" KEEP 'liveness-unreadable' 'case 2c'
-# The local ref is kept as `checked-out` rather than `liveness-unreadable`: it
-# was never a RECLAIM candidate (its worktree is present), and the ladder keeps
-# the more specific already-KEEP reason. The worktree and remote rows below are
-# the otherwise-reclaimable items, and they carry the fail-closed reason.
-expect local-branch merged-clean KEEP 'checked-out' 'case 2c'
-expect remote-branch origin/merged-clean KEEP 'liveness-unreadable' 'case 2c'
-grep -q 'live peer state unavailable' "$work/err" \
-    || fail 'case 2c: no stderr warning for unreadable liveness'
-if grep -q '^RECLAIM' "$work/out"; then fail 'case 2c: a RECLAIM survived unreadable liveness'; fi
-
-run --apply
-[ "$code" -eq 0 ] || fail "case 2c: --apply exited $code: $(cat "$work/err")"
-[ -d "$work/wt-merged-clean" ] || fail 'case 2c: --apply removed a worktree on unreadable liveness'
-(cd "$repo" && git show-ref --verify --quiet refs/heads/merged-clean) \
-    || fail 'case 2c: --apply deleted a local branch on unreadable liveness'
-[ -n "$(cd "$repo" && git ls-remote --heads origin merged-clean)" ] \
-    || fail 'case 2c: --apply deleted a remote branch on unreadable liveness'
-
-# ── case 2d: an unparseable peers table also fails closed ────────────
-#
-# The stub exits 0 but emits garbage, the other half of "cannot be read": jq
-# fails, and the ladder must land on the same per-item KEEP.
-
-EDDA_PEERS_RC=0
-export EDDA_PEERS_RC
-printf 'not json at all\n' >"$work/peers-garbage.json"
-EDDA_PEERS_JSON=$work/peers-garbage.json
-export EDDA_PEERS_JSON
-run
-[ "$code" -eq 0 ] || fail "case 2d: dry run exited $code: $(cat "$work/err")"
-expect worktree "$g_clean" KEEP 'liveness-unreadable' 'case 2d'
-expect remote-branch origin/merged-clean KEEP 'liveness-unreadable' 'case 2d'
-if grep -q '^RECLAIM' "$work/out"; then fail 'case 2d: a RECLAIM survived unparseable liveness'; fi
-
-run --apply
-[ "$code" -eq 0 ] || fail "case 2d: --apply exited $code: $(cat "$work/err")"
-[ -d "$work/wt-merged-clean" ] || fail 'case 2d: --apply removed a worktree on unparseable liveness'
-
-# Restore the default empty set for every case that follows; cases 3-7 run
-# with an unchanged live table, exactly as before GH-1094.
-EDDA_PEERS_RC=0
-EDDA_PEERS_JSON=$work/peers-empty.json
-export EDDA_PEERS_RC EDDA_PEERS_JSON
-
-# ── case 3: --apply removes exactly the RECLAIM set ──────────────────
-#
-# doneWhen bullets 2 and 3: receipts for what went, and nothing dirty or
-# open-PR touched.
-
-run --apply
-[ "$code" -eq 0 ] || fail "case 3: --apply exited $code: $(cat "$work/err")"
-
-[ ! -d "$work/wt-merged-clean" ] || fail 'case 3: the merged clean worktree survived --apply'
-grep -q "reclaimed worktree.*wt-merged-clean.*pr=#101.*squash=$squash" "$work/out" \
-    || fail 'case 3: no receipt for the reclaimed worktree'
-
-[ -d "$work/wt-merged-dirty" ] || fail 'case 3: a DIRTY worktree was removed'
-[ -f "$work/wt-merged-dirty/uncommitted.txt" ] || fail 'case 3: uncommitted work was destroyed'
-[ -d "$work/wt-open" ] || fail 'case 3: an OPEN-PR worktree was removed'
-[ -d "$repo/nested" ] || fail 'case 3: a worktree nested in the main checkout was removed'
-[ -d "$repo/.git" ] || fail 'case 3: the main checkout was removed'
-
-cd "$repo"
-has_local() { git show-ref --verify --quiet "refs/heads/$1"; }
-has_remote() { [ -n "$(git ls-remote --heads origin "$1")" ]; }
-
-if has_local merged-clean; then fail 'case 3: the merged branch survived --apply'; fi
-grep -q "reclaimed local branch.*merged-clean.*pr=#101" "$work/out" \
-    || fail 'case 3: no receipt for the reclaimed local branch'
-has_local moved || fail 'case 3: a branch ahead of its PR was deleted'
-has_local no-pr || fail 'case 3: a branch with no PR was deleted'
-has_local merged-dirty || fail 'case 3: a checked-out branch was deleted'
-
-if has_remote merged-clean; then fail 'case 3: the merged remote branch survived --apply'; fi
-grep -q "reclaimed remote branch.*origin/merged-clean.*pr=#101" "$work/out" \
-    || fail 'case 3: no receipt for the reclaimed remote branch'
-if has_remote remote-only; then fail 'case 3: a remote-only merged branch survived --apply'; fi
-has_remote moved || fail 'case 3: a remote branch that moved past its merged head was deleted'
-has_remote open-clean || fail 'case 3: an OPEN-PR remote branch was deleted'
-has_remote merged-dirty || fail 'case 3: the remote of a kept dirty lane was deleted'
-
-grep -q 'reclaim-merged: after' "$work/out" || fail 'case 3: no before/after snapshot line'
-
-# ── case 4: a second --apply is a no-op ──────────────────────────────
-#
-# Everything left is excluded for a reason that does not decay, so a repeated
-# run must find nothing — a reclaimer that creeps outward on each pass is the
-# same defect as one that over-reaches on the first.
-
-run --apply
-[ "$code" -eq 0 ] || fail "case 4: second --apply exited $code: $(cat "$work/err")"
-if grep -q '^RECLAIM' "$work/out"; then fail 'case 4: a second pass found new candidates'; fi
-[ -d "$work/wt-merged-dirty" ] && [ -d "$work/wt-open" ] && [ -d "$repo/nested" ] \
-    || fail 'case 4: a second pass removed a kept worktree'
-
-# ── case 5: an unreadable PR table reclaims nothing ──────────────────
-#
-# Without PR state every item's state is unknown, and unknown is not merged.
-
-STUB_PRS=$work/does-not-exist
-export STUB_PRS
-run --apply
-[ "$code" -eq 3 ] || fail "case 5: expected exit 3 on an unreadable PR table, got $code"
-if grep -q 'reclaimed' "$work/out"; then fail 'case 5: something was removed without PR state'; fi
-
-# ── case 6: a batch the remote only PARTIALLY accepts is verified, not
-#            trusted by the push's exit code ─────────────────────────
-#
-# `delete_batched` sends every remote reclaim of one run in ONE `git push
-# --delete`. A real remote can reject one ref out of that batch — a branch
-# protection rule, a ref that moved server-side — while still accepting the
-# rest of the same push, and the combined command exits non-zero either way.
-# That is exactly why the receipt comes from re-reading `git ls-remote`
-# afterwards instead of the push's exit code: an `update` hook that rejects
-# one ref out of two, offline, is the stand-in for that server behavior. Two
-# fresh remote-only branches keep this batch isolated from every branch the
-# earlier cases already resolved.
-
-git branch partial-a main
-git branch partial-b main
-git push --quiet origin partial-a partial-b
-git branch -D partial-a partial-b >/dev/null
-
-{
-    cat "$work/prs.tsv"
-    printf 'partial-a\t201\tMERGED\t%s\t%s\n' "$base" "$squash"
-    printf 'partial-b\t202\tMERGED\t%s\t%s\n' "$base" "$squash"
-} >"$work/prs-case6.tsv"
-STUB_PRS=$work/prs-case6.tsv
-export STUB_PRS
-
-cat >"$work/origin.git/hooks/update" <<'HOOK'
-#!/bin/sh
-case "$1" in
-    refs/heads/partial-b) echo "rejected by hook: $1" >&2; exit 1 ;;
-esac
-exit 0
-HOOK
-chmod +x "$work/origin.git/hooks/update"
-
-run --apply
-[ "$code" -eq 0 ] || fail "case 6: --apply exited $code: $(cat "$work/err")"
-
-if has_remote partial-a; then fail 'case 6: the ref the hook ACCEPTED survived the batch'; fi
-grep -q "reclaimed remote branch.*origin/partial-a.*pr=#201" "$work/out" \
-    || fail 'case 6: no receipt for the ref the hook accepted'
-
-has_remote partial-b || fail 'case 6: a ref the hook REJECTED was deleted anyway'
-grep -q "KEPT remote branch.*origin/partial-b.*still present after delete" "$work/err" \
-    || fail 'case 6: the rejected ref was not reported KEPT'
-if grep -q "reclaimed remote branch.*origin/partial-b" "$work/out"; then
-    fail 'case 6: a ref the remote REJECTED was receipted as reclaimed — exit-code trust, not verification'
-fi
-
-# ── case 7: the remote re-read failing must not fabricate a receipt ──
-#
-# P1-1 (Round 1 review): `git ls-remote --heads origin | sed … || true` (the
-# remote arm's post-delete verification) discarded both the exit status and
-# stderr of `ls-remote`, so a re-read that failed left after.txt EMPTY —
-# indistinguishable from "origin now has zero branches" — and every ref in
-# the batch was receipted `reclaimed remote branch` anyway, on exit 0. This
-# reproduces the failure point directly: a `git` shim lets the FIRST
-# `ls-remote --heads origin` (fact-gathering, before any delete) through to
-# the real git, then fails every subsequent one — the shape of a network
-# drop or token expiry landing between the delete push and its verification
-# re-read. `has_remote`'s own 4-argument form (`ls-remote --heads origin
-# <branch>`) is a different argv and passes through the shim untouched.
-
-git branch verify-fail main
-git push --quiet origin verify-fail
-
-{
-    cat "$work/prs.tsv"
-    printf 'verify-fail\t301\tMERGED\t%s\t%s\n' "$base" "$squash"
-} >"$work/prs-case7.tsv"
-STUB_PRS=$work/prs-case7.tsv
-export STUB_PRS
-
-rm -f "$work/origin.git/hooks/update"
-
-real_git=$(command -v git)
-export REAL_GIT="$real_git"
-LSREMOTE_CALLS_FILE="$work/lsremote-calls"
-export LSREMOTE_CALLS_FILE
-printf '0\n' >"$LSREMOTE_CALLS_FILE"
-cat >"$work/bin/git" <<'GITSHIM'
-#!/bin/sh
-if [ "$1" = 'ls-remote' ] && [ "$2" = '--heads' ] && [ "$3" = 'origin' ] && [ $# -eq 3 ]; then
-    n=$(cat "$LSREMOTE_CALLS_FILE")
-    n=$((n + 1))
-    echo "$n" >"$LSREMOTE_CALLS_FILE"
-    if [ "$n" -gt 1 ]; then
-        echo 'git shim: origin unreachable' >&2
-        exit 128
-    fi
-fi
-exec "$REAL_GIT" "$@"
-GITSHIM
-chmod +x "$work/bin/git"
-
-run --apply
-[ "$code" -eq 4 ] || fail "case 7: expected exit 4 on an unverifiable remote re-read, got $code"
-
-grep -q "reclaimed local branch.*verify-fail.*pr=#301" "$work/out" \
-    || fail 'case 7: the local arm (unaffected by the shim) should still reclaim and receipt normally'
-
-if grep -q 'reclaimed remote branch.*verify-fail' "$work/out"; then
-    fail 'case 7: a receipt was fabricated for a batch whose re-read could not be verified'
-fi
-grep -q 'KEPT remote branch.*origin/verify-fail.*unverified' "$work/err" \
-    || fail 'case 7: no unverified/KEPT line for the ref whose re-read failed'
-
-rm -f "$work/bin/git"
-
-echo 'PASS scripts/fleet/test-reclaim-merged.sh'
+echo "PASS scripts/fleet/test-reclaim-merged.sh"
