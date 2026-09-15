@@ -43,6 +43,13 @@ pub enum FleetCmd {
         #[command(flatten)]
         args: crate::cmd_fleet_order::OrderArgs,
     },
+    /// Fleet watch: detect and bounded-recover orphaned lanes (GH-573)
+    ///
+    /// Exit: 0 ok; 1 error, 2 usage.
+    Watch {
+        #[command(flatten)]
+        args: crate::cmd_fleet_watch::WatchArgs,
+    },
 }
 
 /// Path class assigned by `classify_path` / `classify_paths`.
@@ -584,6 +591,7 @@ pub fn run(cmd: FleetCmd, repo_root: &Path) -> anyhow::Result<()> {
     match cmd {
         FleetCmd::Health { window, json, line } => run_health(window, json, line, repo_root),
         FleetCmd::Order { args } => crate::cmd_fleet_order::run(args, repo_root),
+        FleetCmd::Watch { args } => crate::cmd_fleet_watch::run(args, repo_root),
     }
 }
 

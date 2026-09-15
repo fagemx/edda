@@ -1359,6 +1359,49 @@ Exit codes:
 | 1 | error (a `gh` or `git` failure, an unreadable fixture, a failed stdout write) |
 | 2 | usage |
 
+#### edda fleet watch
+
+Detect and bounded-recover orphaned lanes (GH-573). A lane dies abnormally
+when its heartbeat is stale, its work has no terminal record for (plan, phase)
+in the workspace ledger or the conductor plan state, **and** no board claim that
+still stands holds it. Heartbeat absence alone is never a death verdict
+(`docs/fleet/rules.md` R3/R17): a normally finished lane also ages out of its
+heartbeat, so the terminal record is what stops the false positive, and the
+standing claim is what stops taking over a live peer's work.
+
+```bash
+edda fleet watch                       # dry run: report verdicts only
+edda fleet watch --json                # machine-readable report
+edda fleet watch --apply               # write the terminal record, release the claim, redispatch
+edda fleet watch --apply --max-redispatch 0   # bound the ladder at zero retries
+```
+
+Flags:
+
+- `--apply` — perform the recovery. Without it the command is read-only
+  (the default).
+- `--json` — emit the report as JSON.
+- `--max-redispatch <N>` — stop-loss after N redispatches per (plan, phase);
+  default is the ledger decision `fleet.watch.max-redispatch`, else 1.
+
+Recovery order is fixed: write the terminal record (a ledger note keyed by
+plan/phase/session, plus the `Running`/`Checking` → `Stale` transition), then
+release the dead session's board claim, then redispatch or stop-loss. The
+redispatch count is read back from the verb's own `fleet_watch` ledger notes,
+so there is no second state system, and a phase is re-armed through the
+existing retry transition (`edda conduct run` picks it up on resume). The
+terminal record makes the lane `finished` on the next run, so a second
+invocation with no state change is a no-op. The verb installs no scheduler and
+starts no loop or agent.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | report rendered (orphans found or not) |
+| 1 | error |
+| 2 | usage |
+
 ### edda review
 
 Review a committed branch using an independent read-only agent and record a
