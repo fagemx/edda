@@ -408,11 +408,14 @@ test('adoption migrates a session-scoped dependency subscription to the owner st
   const root = join(project, 'private');
   const ownerRef = 'assistant/rebind-owner';
   await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const messages = [];
   const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
-  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerCommand: returnFixture(), dependencyCommand,
+    deliver: (text) => messages.push(text) });
   t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
   await enroll(root, channel.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
-  await channel.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  await channel.dependencies.configure({ project, taskIds: ['17'], notify: true, maxNotifications: 10 });
+  await channel.dependencies.check();
   assert.equal(channel.dependencies.status().scope, 'session');
   const result = await channel.adoptOwner({ owner: ownerRef });
   assert.equal(result.dependency?.scope, 'owner');
@@ -422,4 +425,34 @@ test('adoption migrates a session-scoped dependency subscription to the owner st
   assert.equal(migrated.ownerRef, ownerRef);
   assert.deepEqual(migrated.taskIds, ['17']);
   assert.equal(typeof migrated.scope, 'string');
+  assert.equal(migrated.scopeDigest, digest(migrated.scope)); // scope and its digest stay consistent
+  // Observation continues after the rebind, with no manual refollow.
+  const before = messages.length;
+  await writeFile(join(project, 'task.json'), JSON.stringify({ ...baseTask(), status: 'done', receipt: 'v2' }));
+  await channel.dependencies.check();
+  assert.ok(messages.length > before, 'a change after adoption is still observed');
+});
+
+test('a failed dependency rebind is retried on a later adoption of the same owner', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-retry-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/retry-owner';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
+  await enroll(root, channel.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await channel.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  // Block the owner-lifecycle path so the rebind fails transiently.
+  const blocker = join(root, 'owner-lifecycle');
+  await writeFile(blocker, 'blocked');
+  const first = await channel.adoptOwner({ owner: ownerRef });
+  assert.equal(first.status, 'bound');
+  assert.equal(first.dependency?.scope, 'session');
+  assert.equal(channel.dependencies.status().scope, 'session');
+  // Clear the transient blocker: the next adopt for the same owner retries and succeeds.
+  await rm(blocker, { force: true });
+  const second = await channel.adoptOwner({ owner: ownerRef });
+  assert.equal(second.dependency?.scope, 'owner');
+  assert.equal(channel.dependencies.status().scope, 'owner');
 });

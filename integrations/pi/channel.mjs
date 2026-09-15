@@ -119,25 +119,28 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     manifestRevision: () => handoff.currentRevision(), send: (body) => submitMessage(body, true),
     receipt: (id) => receipts.get(id), command: dependencyCommand, pollMs: dependencyPollMs });
   async function rebindDependencies(ref) {
-    let dir;
-    try { dir = ownerSubscriptionDir(root, ref); }
-    catch (error) { return { scope: 'session', error: error.message }; }
-    // Move an existing session-scoped subscription into the owner-scoped store
-    // (the same store) so it survives replacement without a manual refollow.
-    if (!readJson(join(dir, 'dependencies.json'))) {
-      const sessionRecord = readJson(join(store.dir, 'dependencies.json'));
-      if (sessionRecord) {
-        const enrollment = readEnrollment(root, sessionId);
-        writeJson(join(dir, 'dependencies.json'), { ...sessionRecord, ownerRef: ref, holderSession: sessionId, sessionId,
-          enabled: enrollment?.enabled === true,
-          scope: typeof enrollment?.scope === 'string' ? enrollment.scope : sessionRecord.scope });
+    try {
+      const dir = ownerSubscriptionDir(root, ref);
+      // Move an existing session-scoped subscription into the owner-scoped store
+      // (the same store) so it survives replacement without a manual refollow.
+      if (!readJson(join(dir, 'dependencies.json'))) {
+        const sessionRecord = readJson(join(store.dir, 'dependencies.json'));
+        if (sessionRecord) {
+          const enrollment = readEnrollment(root, sessionId);
+          const scope = typeof enrollment?.scope === 'string' ? enrollment.scope : sessionRecord.scope;
+          writeJson(join(dir, 'dependencies.json'), { ...sessionRecord, ownerRef: ref, holderSession: sessionId, sessionId,
+            enabled: enrollment?.enabled === true, scope,
+            scopeDigest: typeof scope === 'string' ? digest(scope) : sessionRecord.scopeDigest });
+        }
       }
+      const prior = dependencies;
+      dependencies = buildDependencies(dir, ref);
+      ownerSubscription = dir; dependencyOwnerRef = ref;
+      await prior?.close?.();
+      return { scope: 'owner' };
+    } catch (error) {
+      return { scope: 'session', error: error.message };
     }
-    const prior = dependencies;
-    try { dependencies = buildDependencies(dir, ref); ownerSubscription = dir; dependencyOwnerRef = ref; }
-    catch (error) { return { scope: 'session', error: error.message }; }
-    await prior?.close?.();
-    return { scope: 'owner' };
   }
   const channel = {
     sessionId, instanceId,
@@ -157,13 +160,18 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
       if (!ref) return { status: 'no-owner' };
       if (typeof refs.returnOwner === 'string' && refs.returnOwner) currentReturnOwner = refs.returnOwner;
       const nextRoot = typeof refs.ownerRoot === 'string' && refs.ownerRoot ? refs.ownerRoot : mailboxRoot;
-      if (mailbox && mailbox.owner === ref && mailboxRoot === nextRoot) return mailbox.state();
-      if (mailbox) { const prior = mailbox; mailbox = null; mailboxRoot = null; prior.close(); }
-      createMailbox(ref, nextRoot);
-      if (!mailbox) return { status: 'unavailable', owner: ref, error: ownerError };
-      const bound = await mailbox.bind();
-      const dependency = await rebindDependencies(ref);
-      return { ...bound, owner: ref, ...(dependency ? { dependency } : {}) };
+      const mailboxCurrent = mailbox && mailbox.owner === ref && mailboxRoot === nextRoot;
+      if (!mailboxCurrent) {
+        if (mailbox) { const prior = mailbox; mailbox = null; mailboxRoot = null; prior.close(); }
+        createMailbox(ref, nextRoot);
+        if (!mailbox) return { status: 'unavailable', owner: ref, error: ownerError };
+      }
+      const bound = mailboxCurrent ? mailbox.state() : await mailbox.bind();
+      // Keyed on the dependency identity, not the mailbox: a failed rebind is
+      // retried on a later adopt for the same owner until it succeeds, so a
+      // transient failure cannot strand a bound mailbox on a session subscription.
+      const dependency = dependencyOwnerRef === ref ? { scope: 'owner' } : await rebindDependencies(ref);
+      return { ...bound, owner: ref, dependency };
     },
     get dependencies() { return dependencies; },
     handoffContext: (budget) => handoff.context(channel.snapshot(), budget),

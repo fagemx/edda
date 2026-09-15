@@ -134,13 +134,18 @@ test('re-adopting the same owner with a changed owner root rebinds the mailbox',
   const rootA = join(cwd, 'mailbox-a'), rootB = join(cwd, 'mailbox-b');
   assert.equal((await channel.adoptOwner({ owner, ownerRoot: rootA })).status, 'bound');
   assert.equal((await channel.adoptOwner({ owner, ownerRoot: rootA })).status, 'bound'); // same owner + root is a no-op
-  assert.equal((await channel.adoptOwner({ owner, ownerRoot: rootB })).status, 'bound');
-  // The live mailbox now targets rootB, so a return there is claimed and a
-  // return at the old root is not.
-  await postReturn(cwd, { work: 'job-at-root-b', root: rootB });
-  const claimed = await channel.claimOwnerReturns();
+  await postReturn(cwd, { work: 'job-a', root: rootA });
+  let claimed = await channel.claimOwnerReturns();
   assert.equal(claimed.status, 'ok');
-  assert.equal(claimed.returns[0].work, 'job-at-root-b');
+  assert.equal(claimed.returns[0].work, 'job-a'); // still targeting rootA
+  assert.equal((await channel.adoptOwner({ owner, ownerRoot: rootB })).status, 'bound');
+  await postReturn(cwd, { work: 'job-b', root: rootB });
+  claimed = await channel.claimOwnerReturns();
+  assert.equal(claimed.status, 'ok');
+  assert.equal(claimed.returns[0].work, 'job-b');
+  // A return at the old root is no longer claimed: the live mailbox moved.
+  await postReturn(cwd, { work: 'job-a2', root: rootA });
+  assert.equal((await channel.claimOwnerReturns()).status, 'empty');
 });
 
 test('a channel without an owner reports disabled owner returns', async (t) => {
