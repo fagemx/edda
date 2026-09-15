@@ -10,6 +10,10 @@ import { randomUUID } from 'node:crypto';
 import { createOwnerMailbox } from './owner-mailbox.mjs';
 import { startChannel } from './channel.mjs';
 
+// The mailbox fixtures prefer an explicit EDDA_RETURN_ROOT over cwd; clear any
+// ambient value so a managed session cannot change where these tests write.
+delete process.env.EDDA_RETURN_ROOT;
+
 const exec = promisify(execFile);
 const cli = (name) => ({ file: process.execPath, args: [fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))] });
 const fixture = () => cli('edda-return.mjs');

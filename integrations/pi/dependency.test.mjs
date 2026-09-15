@@ -8,8 +8,12 @@ import { randomUUID } from 'node:crypto';
 import { startChannel } from './channel.mjs';
 import { followDependencies, unfollowDependencies, dependencyStatus, doctor } from './dependency-client.mjs';
 import { enroll } from './supervision.mjs';
-import { digest, writeJson, readJson } from './store.mjs';
+import { digest, writeJson, readJson, sessionDir } from './store.mjs';
 import { ownerSubscriptionDir, DELIVERY_WAIT_LIMIT } from './dependency-observer.mjs';
+
+// The owner-return fixture prefers an explicit EDDA_RETURN_ROOT; clear any
+// ambient value so a managed session cannot change where these tests write.
+delete process.env.EDDA_RETURN_ROOT;
 
 const baseTask = () => ({ task_id: 17, title: 'Upstream review', created_event_id: 'evt-17',
   status: 'running', after: [], scope_paths: [], attempts: 1, receipt: null, evidence_paths: [], failure_reason: null });
@@ -433,6 +437,25 @@ test('adoption migrates a session-scoped dependency subscription to the owner st
   assert.ok(messages.length > before, 'a change after adoption is still observed');
 });
 
+test('switching an adopted run to another owner does not re-migrate the stale session record', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-switch-'));
+  const root = join(project, 'private');
+  const ownerA = 'assistant/switch-a', ownerB = 'assistant/switch-b';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
+  await enroll(root, channel.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await channel.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  await channel.adoptOwner({ owner: ownerA });
+  // The migrated session snapshot is dropped; A's owner record is the live copy.
+  assert.equal(readJson(join(sessionDir(root, channel.sessionId), 'dependencies.json')), null);
+  assert.ok(readJson(join(ownerSubscriptionDir(root, ownerA), 'dependencies.json')));
+  // Switching to B does not re-migrate a stale snapshot.
+  await channel.adoptOwner({ owner: ownerB });
+  assert.equal(readJson(join(ownerSubscriptionDir(root, ownerB), 'dependencies.json')), null);
+});
+
 test('a failed dependency rebind is retried on a later adoption of the same owner', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'edda-owner-retry-'));
   const root = join(project, 'private');
@@ -450,9 +473,14 @@ test('a failed dependency rebind is retried on a later adoption of the same owne
   assert.equal(first.status, 'bound');
   assert.equal(first.dependency?.scope, 'session');
   assert.equal(channel.dependencies.status().scope, 'session');
+  // The failure is visible on a bound run, not swallowed (covers any
+  // ownerSubscriptionDir failure, including the PrivateRootError ACL path).
+  assert.equal(typeof channel.snapshot().owner.dependencyError, 'string');
+  assert.ok(channel.snapshot().owner.dependencyError.length > 0);
   // Clear the transient blocker: the next adopt for the same owner retries and succeeds.
   await rm(blocker, { force: true });
   const second = await channel.adoptOwner({ owner: ownerRef });
   assert.equal(second.dependency?.scope, 'owner');
   assert.equal(channel.dependencies.status().scope, 'owner');
+  assert.equal(channel.snapshot().owner.dependencyError, undefined);
 });

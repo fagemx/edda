@@ -8,6 +8,14 @@ import { readJson, readRecord, writeJson, validateId, digest, sessionDir, recove
 import { requestSession, getReceipt } from './client.mjs';
 import { readTranscript } from './conversation.mjs';
 
+// Wait, with a bound, for a just-stopped owned process to be reaped: an
+// observable PID condition, never a fixed sleep.
+async function previousProcessLingering(pid, timeoutMs = 5000) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (alive(pid) && Date.now() < deadline) await delay(50);
+  return alive(pid);
+}
 function runConfig(root, id) {
   const dir = managedDir(root, id), config = readJson(join(dir, 'config.json'));
   if (!config || config.runId !== id || config.root !== resolve(root)) throw new Error('Managed run configuration not found or identity mismatch');
@@ -220,14 +228,18 @@ export async function resumeManaged(root, id, { runtime = 'pinned' } = {}) {
     if (existing.live) return existing;
     const state = readJson(join(dir, 'state.json'));
     const owner = readJson(join(dir, 'owner.json'));
-    if (alive(owner?.pid) || alive(state?.runnerPid)) throw new Error('Previous runner may still be alive; no duplicate launch');
+    if (await previousProcessLingering(owner?.pid) || await previousProcessLingering(state?.runnerPid)) throw new Error('Previous runner may still be alive; no duplicate launch');
     ownedSessionFile(dir, config, state);
     try {
       const live = await requestSession(root, state.sessionId, '/status');
       if (live.live) throw Object.assign(new Error('Pi is still running; reconnect instead of launching another process'), { live: true });
     } catch (error) { if (error.live) throw error; }
     const piOwner = readJson(join(sessionDir(root, state.sessionId), 'owner.json'));
-    if (alive(state.childPid) || alive(piOwner?.pid)) throw new Error('Previous Pi may still be alive; recovery refused');
+    // A just-stopped owned child can read alive for a moment (not yet reaped).
+    // Wait on the observable PID with a bound before refusing, so a correct
+    // resume is not refused by a transient read while a genuinely live process
+    // still blocks duplicate launch.
+    if (await previousProcessLingering(state.childPid) || await previousProcessLingering(piOwner?.pid)) throw new Error('Previous Pi may still be alive; recovery refused');
     if (piOwner) recover(root, state.sessionId, piOwner.instanceId);
     // Explicit opt-in re-pin: keep the pinned runtime by default (existing runs
     // are not upgraded in place), but allow adopting a run whose pinned release

@@ -8,7 +8,7 @@ import { readEnrollment } from './supervision.mjs';
 import { createInboxProducer } from './inbox-producer.mjs';
 import { inboxStore, inboxId, messageId } from './inbox-store.mjs';
 import { assertCurrentEvent } from './inbox-binding.mjs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -53,6 +53,9 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
   let ownerSubscription = store.dir;
   let dependencyOwnerRef = null;
   let ownerError = null;
+  // A dependency rebind failure is surfaced, not swallowed: a bound run whose
+  // subscription stayed session-scoped must not look fully owner-bound.
+  let dependencyError = null;
   let currentReturnOwner = returnOwner || null;
   // An unavailable owner mailbox leaves the channel fully functional, but the
   // failure stays visible in the snapshot instead of looking like "no owner".
@@ -131,14 +134,19 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
           writeJson(join(dir, 'dependencies.json'), { ...sessionRecord, ownerRef: ref, holderSession: sessionId, sessionId,
             enabled: enrollment?.enabled === true, scope,
             scopeDigest: typeof scope === 'string' ? digest(scope) : sessionRecord.scopeDigest });
+          // Drop the migrated session snapshot so a later switch to another owner
+          // cannot re-migrate a stale baseline; the live state is the owner store.
+          rmSync(join(store.dir, 'dependencies.json'), { force: true });
         }
       }
       const prior = dependencies;
       dependencies = buildDependencies(dir, ref);
       ownerSubscription = dir; dependencyOwnerRef = ref;
       await prior?.close?.();
+      dependencyError = null;
       return { scope: 'owner' };
     } catch (error) {
+      dependencyError = error.message;
       return { scope: 'session', error: error.message };
     }
   }
@@ -146,7 +154,7 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
     sessionId, instanceId,
     snapshot: () => ({ ...state, toolNames: [...state.toolNames], live: !closed,
       owner: mailbox
-        ? { ...mailbox.state(), dependencyScope: dependencyOwnerRef ? 'owner' : 'session', ...(ownerError ? { warning: ownerError } : {}) }
+        ? { ...mailbox.state(), dependencyScope: dependencyOwnerRef ? 'owner' : 'session', ...(ownerError ? { warning: ownerError } : {}), ...(dependencyError ? { dependencyError } : {}) }
         : (ownerRef ? { owner: ownerRef, status: 'unavailable', error: ownerError } : null), returnOwner: currentReturnOwner,
       integration: { version: integrationVersion, modulePath: fileURLToPath(import.meta.url), releaseId: process.env.EDDA_PI_RELEASE_ID || null },
       capabilities: ['send', 'receipts', 'handoff', 'dependencies', 'inbox', ...(getConversation ? ['conversation'] : [])],
