@@ -15,13 +15,26 @@
 # RECLAIM. Every check that errors demotes its item to KEEP — an item whose
 # state could not be established is not a reclamation candidate.
 #
+# A merged, clean worktree is still KEEPped while a LIVE peer session owns its
+# branch (GH-1094): an agent mid-round can sit with a momentarily clean tree,
+# and removing its worktree under it is the loss R7 guards against. Liveness is
+# read once from `edda peers --json`, which publishes the ONE shared
+# criterion's own per-session `stale` verdict
+# (crates/edda-bridge-claude/src/peers/liveness.rs, GH-617) together with each
+# session's `branch`. Reading the heartbeat files here and re-deriving
+# staleness would be a second, disagreeing notion of "dead". If that table
+# cannot be read at all — no `edda` or `jq`, a non-zero `edda peers --json`,
+# or an absent/unparseable `sessions` — every candidate is KEEPped rather than
+# reclaimed: unreadable liveness fails closed.
+#
 # TRANSITIONAL CARRIER. `mechanism.shell-role=one-line-adapter-only` (ratified)
 # marks a new shell program with control flow as migration debt, and this is
 # one. It is accepted for this ticket as an explicitly-transitional carrier on
 # the condition it stays a thin loop: every per-item fact below comes from
-# `git` or `gh` directly, the only processing applied to their output is field
-# extraction and joining those fields onto one row per item, and the judgement
-# is the plain `if` ladder you can read in one screen. The eventual product
+# `git`, `gh` or `edda` directly, the only processing applied to their output
+# is field extraction and joining those fields onto one row per item, and the
+# judgement is the plain `if` ladder you can read in one screen. The eventual
+# product
 # home is an `edda fleet reclaim` verb, where that ladder becomes typed and
 # unit-testable in Rust; this file is expected to shrink to the one line that
 # calls it. Do not grow judgement here — take it to the verb.
@@ -34,7 +47,9 @@
 # exactly, and may be repeated; a protected item is always KEEP. The main
 # checkout, anything nested inside it (agent worktrees under
 # `.claude/worktrees/`), the worktree this script runs from, and locked
-# worktrees are protected unconditionally and need no flag.
+# worktrees are protected unconditionally and need no flag. A branch owned by a
+# live peer session needs no flag either: `edda peers --json` protects it
+# automatically (and, when that table is unreadable, everything is kept).
 #
 # Exit codes: 0 = ran, 2 = usage, 3 = the PR table could not be read (without
 # it every item's PR state is unknown, so nothing may be reclaimed), 4 = a
@@ -120,6 +135,35 @@ git ls-remote --heads origin 2>/dev/null \
 
 git worktree list --porcelain >"$work/wt.raw"
 
+# The liveness fact table (GH-1094). `edda peers --json` is the ONE surface
+# that publishes the shared criterion's per-session verdict — each session row
+# carries its own `stale` flag and its `branch` — so the reclaimer reuses that
+# verdict instead of deriving a second one from the heartbeat files. Read once
+# for the whole run, like the other fact tables.
+#
+liveness_known=1
+: >"$work/live-peers.tsv"
+if command -v edda >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    # `edda peers --json`'s own exit status is checked directly, never the
+    # status of the pipeline it feeds — the same class of bug already noted
+    # for `git ls-remote` below.
+    if edda peers --json >"$work/peers.json" 2>"$work/edda.err"; then
+        jq -r '.sessions[]
+               | select(.stale == false)
+               | [ (.branch // ""),
+                   ( if (.label // "") == "" then ((.session_id // "unknown")[0:8]) else .label end )
+                 ] | @tsv' "$work/peers.json" >"$work/live-peers.tsv" \
+            || liveness_known=0
+    else
+        liveness_known=0
+    fi
+else
+    liveness_known=0
+fi
+if [ "$liveness_known" -eq 0 ]; then
+    echo 'reclaim-merged: live peer state unavailable — every candidate is KEEP (fail closed)' >&2
+fi
+
 # ── snapshot ─────────────────────────────────────────────────────────
 count_worktrees() { git worktree list | wc -l | tr -d ' '; }
 count_branches() { git for-each-ref --format='x' refs/heads | wc -l | tr -d ' '; }
@@ -166,7 +210,22 @@ join_prs() { # <file-of-rows> <1-based field holding the branch name>
     ' "$work/prs.tsv" "$1"
 }
 
-join_prs "$work/wt.base" 2 >"$work/wt.tsv"
+join_prs "$work/wt.base" 2 >"$work/wt.join"
+
+# One pass appending the live-peer name (or `-`) as the last column, keyed by
+# the row's branch. Same shape as `join_prs`: no process per item, and a
+# branch held by two live sessions still names one.
+join_peers() { # <file-of-rows> <1-based field holding the branch name>
+    awk -F"$TAB" -v OFS="$TAB" -v lv="$work/live-peers.tsv" -v key="$2" '
+        FILENAME == lv {
+            if (!($1 in seen)) { live[$1] = $2; seen[$1] = 1 }
+            next
+        }
+        { print $0, ($key in seen ? live[$key] : "-") }
+    ' "$work/live-peers.tsv" "$1"
+}
+
+join_peers "$work/wt.join" 2 >"$work/wt.tsv"
 
 main_path=$(head -n 1 "$work/wt.base" | cut -f1)
 self_path=$(git rev-parse --show-toplevel)
@@ -174,7 +233,7 @@ self_path=$(git rev-parse --show-toplevel)
 printf 'VERDICT\tKIND\tITEM\tBRANCH\tPR\tSTATE\tTREE/SHA\tREASON\n'
 
 : >"$work/wt.reclaim"
-while IFS="$TAB" read -r path branch head locked prunable prcount pr state head_oid merge_oid; do
+while IFS="$TAB" read -r path branch head locked prunable prcount pr state head_oid merge_oid live; do
     [ -n "$path" ] || continue
     [ "$pr" = '-' ] || pr="#$pr"
 
@@ -215,6 +274,10 @@ while IFS="$TAB" read -r path branch head locked prunable prcount pr state head_
         reason="pr-$state"
     elif [ "$tree" != 'clean' ]; then
         reason="tree-$tree"
+    elif [ "$liveness_known" -eq 0 ]; then
+        reason='liveness-unreadable — live peer state could not be read'
+    elif [ "$live" != '-' ]; then
+        reason="live-peer $live"
     else
         verdict='RECLAIM'
         reason='pr-merged, tree clean'
@@ -275,11 +338,12 @@ awk -F"$TAB" -v OFS="$TAB" \
             print b, (b in tip ? tip[b] : "-"), (b in rsha ? rsha[b] : "-"), (out[b] ? 1 : 0)
     }
 ' "$work/local.tsv" "$work/remote.tsv" "$work/checkedout" | sort >"$work/br.base"
-join_prs "$work/br.base" 1 >"$work/branches.tsv"
+join_prs "$work/br.base" 1 >"$work/br.join"
+join_peers "$work/br.join" 1 >"$work/branches.tsv"
 
 : >"$work/br.reclaim"
 : >"$work/remote.reclaim"
-while IFS="$TAB" read -r branch tip remote_sha checkedout prcount pr state head_oid merge_oid; do
+while IFS="$TAB" read -r branch tip remote_sha checkedout prcount pr state head_oid merge_oid live; do
     [ -n "$branch" ] || continue
     [ "$pr" = '-' ] || pr="#$pr"
 
@@ -289,6 +353,12 @@ while IFS="$TAB" read -r branch tip remote_sha checkedout prcount pr state head_
         verdict='KEEP'
         if [ "$branch" = "$default" ]; then
             reason='default-branch'
+        elif [ "$live" != '-' ]; then
+            # Before `checked-out`: a live peer's branch is normally checked out
+            # in its own worktree, and that is exactly the fact being protected.
+            # Naming the owner is the point of GH-1094, so it must not be masked
+            # by the generic `checked-out` the way it would be below.
+            reason="live-peer $live"
         elif [ "$checkedout" = 1 ]; then
             reason='checked-out'
         elif is_protected "$branch"; then
@@ -301,6 +371,8 @@ while IFS="$TAB" read -r branch tip remote_sha checkedout prcount pr state head_
             reason="pr-$state"
         elif [ "$tip" != "$head_oid" ]; then
             reason='local-ahead-of-pr'
+        elif [ "$liveness_known" -eq 0 ]; then
+            reason='liveness-unreadable — live peer state could not be read'
         else
             verdict='RECLAIM'
             reason='pr-merged, tip = merged head'
@@ -324,6 +396,10 @@ while IFS="$TAB" read -r branch tip remote_sha checkedout prcount pr state head_
         rreason="pr-$state"
     elif [ "$remote_sha" != "$head_oid" ]; then
         rreason='remote-moved-since-merge'
+    elif [ "$liveness_known" -eq 0 ]; then
+        rreason='liveness-unreadable — live peer state could not be read'
+    elif [ "$live" != '-' ]; then
+        rreason="live-peer $live"
     elif [ -n "$verdict" ] && [ "$verdict" != 'RECLAIM' ]; then
         # The local ref survived for some reason — a dirty lane, a ref ahead
         # of its PR, an explicit protection. Whatever that reason was, it is

@@ -121,6 +121,28 @@ export PATH
 STUB_PRS=$work/prs.tsv
 export STUB_PRS
 
+# `edda peers --json` is this reclaimer's ONE liveness surface (GH-1094): the
+# shared criterion in crates/edda-bridge-claude/src/peers/liveness.rs is
+# published by `edda peers --json` as each session's own `stale` verdict, and
+# those same rows carry the session's `branch`. The stub defaults to an EMPTY
+# live set so every pre-existing case keeps its verdict. `EDDA_PEERS_JSON` and
+# `EDDA_PEERS_RC` let a case point it at a live peer or break it on purpose.
+printf '{"sessions":[]}\n' >"$work/peers-empty.json"
+cat >"$work/bin/edda" <<'STUB'
+#!/bin/sh
+printf 'edda %s\n' "$*" >>"$EDDA_CALLS"
+case "${1:-} ${2:-}" in
+    "peers --json")
+        cat "$EDDA_PEERS_JSON"
+        exit "${EDDA_PEERS_RC:-0}" ;;
+    *) echo "edda stub: unexpected invocation: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$work/bin/edda"
+EDDA_PEERS_JSON=$work/peers-empty.json
+EDDA_PEERS_RC=0
+export EDDA_PEERS_JSON EDDA_PEERS_RC
+
 # ── harness ──────────────────────────────────────────────────────────
 
 case_no=0
@@ -129,6 +151,9 @@ run() {
     GH_CALLS=$work/gh-calls-$case_no
     export GH_CALLS
     : >"$GH_CALLS"
+    EDDA_CALLS=$work/edda-calls-$case_no
+    export EDDA_CALLS
+    : >"$EDDA_CALLS"
     set +e
     (cd "$repo" && sh "$script" "$@") >"$work/out" 2>"$work/err"
     code=$?
@@ -200,6 +225,106 @@ expect remote-branch origin/remote-only RECLAIM 'pr-merged' 'case 1'
 run --protect wt-merged-clean
 expect worktree "$g_clean" KEEP 'protected' 'case 2'
 [ -d "$work/wt-merged-clean" ] || fail 'case 2: a protected worktree was removed'
+
+# ── case 2a: a live peer's branch keeps its otherwise-reclaimable items ─
+#
+# GH-1094: a merged, clean worktree on the recorded branch of a LIVE peer
+# session must be KEEP, named after the peer. The agent may be alive with a
+# momentarily clean tree, so a merge is not a licence to remove it. The same
+# branch's local ref and its origin ref are protected by the same fact.
+
+cat >"$work/peers-live.json" <<'JSON'
+{"sessions":[{"stale":false,"branch":"merged-clean","label":"peer-lane","session_id":"deadbeef"}]}
+JSON
+EDDA_PEERS_JSON=$work/peers-live.json
+export EDDA_PEERS_JSON
+run
+[ "$code" -eq 0 ] || fail "case 2a: dry run exited $code: $(cat "$work/err")"
+printf 'case 2a live-peer rows (verbatim):\n'
+row worktree "$g_clean"
+row local-branch merged-clean
+row remote-branch origin/merged-clean
+expect worktree "$g_clean" KEEP 'live-peer peer-lane' 'case 2a'
+expect local-branch merged-clean KEEP 'live-peer peer-lane' 'case 2a'
+expect remote-branch origin/merged-clean KEEP 'live-peer peer-lane' 'case 2a'
+# Protection is specific to the peer's branch: the unrelated merged remote-only
+# branch is still a RECLAIM candidate (and the --apply below removes it).
+expect remote-branch origin/remote-only RECLAIM 'pr-merged' 'case 2a'
+
+run --apply
+[ "$code" -eq 0 ] || fail "case 2a: --apply exited $code: $(cat "$work/err")"
+[ -d "$work/wt-merged-clean" ] || fail 'case 2a: --apply removed a live peer worktree'
+(cd "$repo" && git show-ref --verify --quiet refs/heads/merged-clean) \
+    || fail 'case 2a: --apply deleted a live peer local branch'
+[ -n "$(cd "$repo" && git ls-remote --heads origin merged-clean)" ] \
+    || fail 'case 2a: --apply deleted a live peer remote branch'
+
+# ── case 2b: the SAME fixture without a live peer is eligible again ──
+#
+# The liveness join must not have simply switched reclamation off: restore the
+# default empty live set and the identical merged, clean worktree is RECLAIM.
+
+EDDA_PEERS_JSON=$work/peers-empty.json
+export EDDA_PEERS_JSON
+run
+[ "$code" -eq 0 ] || fail "case 2b: dry run exited $code: $(cat "$work/err")"
+expect worktree "$g_clean" RECLAIM 'pr-merged' 'case 2b'
+
+# ── case 2c: unreadable liveness fails closed ────────────────────────
+#
+# `edda peers --json` non-zero: the criterion cannot be evaluated, so an item
+# that would otherwise be RECLAIM is KEEP with a liveness-unreadable reason,
+# and `--apply` removes nothing. This is the per-item keep ladder the issue
+# asks for, not the exit-3 fatal the PR table uses.
+
+EDDA_PEERS_RC=1
+export EDDA_PEERS_RC
+run
+[ "$code" -eq 0 ] || fail "case 2c: dry run exited $code: $(cat "$work/err")"
+expect worktree "$g_clean" KEEP 'liveness-unreadable' 'case 2c'
+# The local ref is kept as `checked-out` rather than `liveness-unreadable`: it
+# was never a RECLAIM candidate (its worktree is present), and the ladder keeps
+# the more specific already-KEEP reason. The worktree and remote rows below are
+# the otherwise-reclaimable items, and they carry the fail-closed reason.
+expect local-branch merged-clean KEEP 'checked-out' 'case 2c'
+expect remote-branch origin/merged-clean KEEP 'liveness-unreadable' 'case 2c'
+grep -q 'live peer state unavailable' "$work/err" \
+    || fail 'case 2c: no stderr warning for unreadable liveness'
+if grep -q '^RECLAIM' "$work/out"; then fail 'case 2c: a RECLAIM survived unreadable liveness'; fi
+
+run --apply
+[ "$code" -eq 0 ] || fail "case 2c: --apply exited $code: $(cat "$work/err")"
+[ -d "$work/wt-merged-clean" ] || fail 'case 2c: --apply removed a worktree on unreadable liveness'
+(cd "$repo" && git show-ref --verify --quiet refs/heads/merged-clean) \
+    || fail 'case 2c: --apply deleted a local branch on unreadable liveness'
+[ -n "$(cd "$repo" && git ls-remote --heads origin merged-clean)" ] \
+    || fail 'case 2c: --apply deleted a remote branch on unreadable liveness'
+
+# ── case 2d: an unparseable peers table also fails closed ────────────
+#
+# The stub exits 0 but emits garbage, the other half of "cannot be read": jq
+# fails, and the ladder must land on the same per-item KEEP.
+
+EDDA_PEERS_RC=0
+export EDDA_PEERS_RC
+printf 'not json at all\n' >"$work/peers-garbage.json"
+EDDA_PEERS_JSON=$work/peers-garbage.json
+export EDDA_PEERS_JSON
+run
+[ "$code" -eq 0 ] || fail "case 2d: dry run exited $code: $(cat "$work/err")"
+expect worktree "$g_clean" KEEP 'liveness-unreadable' 'case 2d'
+expect remote-branch origin/merged-clean KEEP 'liveness-unreadable' 'case 2d'
+if grep -q '^RECLAIM' "$work/out"; then fail 'case 2d: a RECLAIM survived unparseable liveness'; fi
+
+run --apply
+[ "$code" -eq 0 ] || fail "case 2d: --apply exited $code: $(cat "$work/err")"
+[ -d "$work/wt-merged-clean" ] || fail 'case 2d: --apply removed a worktree on unparseable liveness'
+
+# Restore the default empty set for every case that follows; cases 3-7 run
+# with an unchanged live table, exactly as before GH-1094.
+EDDA_PEERS_RC=0
+EDDA_PEERS_JSON=$work/peers-empty.json
+export EDDA_PEERS_RC EDDA_PEERS_JSON
 
 # ── case 3: --apply removes exactly the RECLAIM set ──────────────────
 #
