@@ -992,7 +992,7 @@ fn ctrlc_cancel(cancel: CancellationToken) {
     });
 }
 
-mod store;
+pub(crate) mod store;
 
 #[cfg(test)]
 mod tests;
