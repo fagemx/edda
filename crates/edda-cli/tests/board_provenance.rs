@@ -211,6 +211,43 @@ fn peers_text_names_the_board_it_read() {
 }
 
 #[test]
+fn peers_json_reports_the_board_it_read() {
+    // The machine surface carries a `board` object naming the project id and
+    // root it read, so a consumer can tell which board produced these sessions
+    // and claims (GH-1048). The unit-level twin of this assertion was moved
+    // here: `cmd_bridge/tests.rs` sits exactly at its file-length ceiling
+    // (1162) and only its two `peers_json` call sites changed, so the ratchet
+    // is honoured rather than bypassed.
+    let fx = fixture();
+    let (code, stdout, stderr) = run_in(
+        &fx.board_a,
+        fx.store(),
+        &["bridge", "claude", "peers", "--json"],
+    );
+    assert_eq!(code, 0, "peers --json failed:\n{stdout}\n{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("peers --json not JSON: {e}\n{stdout}"));
+
+    let id = json["board"]["project_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("board.project_id must be a string:\n{stdout}"));
+    assert_eq!(id.len(), 32, "project id is 32 hex chars, got {id:?}");
+    assert!(
+        id.chars().all(|c| c.is_ascii_hexdigit()),
+        "project id is hex, got {id:?}"
+    );
+
+    let root = json["board"]["root"]
+        .as_str()
+        .unwrap_or_else(|| panic!("board.root must be a string:\n{stdout}"));
+    assert!(!root.is_empty(), "board.root must not be empty");
+    assert!(
+        root.contains("board-a"),
+        "board.root must name the board directory, got {root:?}"
+    );
+}
+
+#[test]
 fn unclaim_success_names_the_board() {
     let fx = fixture();
     let (id, root) = board_of(&fx.board_a, fx.store());

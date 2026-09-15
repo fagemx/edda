@@ -3,7 +3,7 @@ use edda_bridge_claude::peers::{colliding_labels, machine_identity, PeerSummary}
 use std::path::Path;
 
 /// JSON board snapshot for `edda peers --json`.
-pub(super) fn peers_json(project_id: &str) -> serde_json::Value {
+pub(super) fn peers_json(project_id: &str, root: &Path) -> serde_json::Value {
     let sessions: Vec<serde_json::Value> =
         edda_bridge_claude::peers::discover_all_sessions(project_id)
             .into_iter()
@@ -33,6 +33,10 @@ pub(super) fn peers_json(project_id: &str) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({
+        "board": {
+            "project_id": project_id,
+            "root": root.display().to_string(),
+        },
         "sessions": sessions,
         "claims": claims,
         "requests": board.requests,
@@ -42,14 +46,19 @@ pub(super) fn peers_json(project_id: &str) -> serde_json::Value {
 
 /// `edda bridge claude peers` — show active peer sessions
 pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
-    let project_id = edda_store::project_id(repo_root);
+    let root = edda_store::project_root(repo_root);
+    let project_id = edda_store::project_id_for_root(&root);
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&peers_json(&project_id))?
+            serde_json::to_string_pretty(&peers_json(&project_id, &root))?
         );
         return Ok(());
     }
+    // The board line prints on every text path, including the empty-board and
+    // all-stale early returns: "no peers" and "wrong board" must not look
+    // identical (GH-1048).
+    println!("{}", super::board_provenance_line(&project_id, &root));
     let sessions = edda_bridge_claude::peers::discover_all_sessions(&project_id);
 
     if sessions.is_empty() {

@@ -17,15 +17,24 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// The directory `project_id` derives a board from.
+///
+/// Inside a git worktree this is the **main checkout** root, because
+/// [`edda_core::git::resolve_git_root`] resolves a linked worktree's `.git`
+/// file to the common repository root — a worktree and its main checkout share
+/// one board. Outside a git repository it is the input path itself.
+pub fn project_root(repo_root_or_cwd: &Path) -> PathBuf {
+    edda_core::git::resolve_git_root(repo_root_or_cwd)
+        .unwrap_or_else(|| repo_root_or_cwd.to_path_buf())
+}
+
 /// Compute a deterministic project ID from a repo root or cwd path.
 /// project_id = blake3(normalize_path(input)) → hex string (first 32 chars).
 ///
 /// If `repo_root_or_cwd` is inside a git worktree, resolves to the main
 /// repository root so that all worktrees share the same project ID.
 pub fn project_id(repo_root_or_cwd: &Path) -> String {
-    let resolved = edda_core::git::resolve_git_root(repo_root_or_cwd)
-        .unwrap_or_else(|| repo_root_or_cwd.to_path_buf());
-    project_id_for_root(&resolved)
+    project_id_for_root(&project_root(repo_root_or_cwd))
 }
 
 /// Compute a deterministic project ID from an already-resolved authoritative root.
@@ -207,6 +216,19 @@ mod tests {
         assert_eq!(id1, id2);
         assert_eq!(id1.len(), 32);
         assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn project_root_of_a_non_git_directory_is_the_directory_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plain");
+        fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            project_root(&dir).canonicalize().unwrap(),
+            dir.canonicalize().unwrap(),
+            "outside a git repo the board root is the path itself"
+        );
     }
 
     #[test]

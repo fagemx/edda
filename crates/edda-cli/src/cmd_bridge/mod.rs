@@ -31,6 +31,14 @@ pub use vendors::{
 
 pub(crate) use request::resolve_session_id;
 
+/// One line naming the board a verb read or wrote: the project id and the
+/// directory `edda_store::project_root` resolved it from (GH-1048). Without
+/// it, an exit-0 no-op ("Nothing to unclaim") from a directory that resolves
+/// to another board reads as a release that happened.
+pub(crate) fn board_provenance_line(project_id: &str, root: &Path) -> String {
+    format!("Board: {project_id} (project root: {})", root.display())
+}
+
 // ── CLI Schema ──
 
 #[derive(Subcommand)]
