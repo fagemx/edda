@@ -1,3 +1,4 @@
+use crate::claim_standing::{claim_standing, ClaimStanding};
 use edda_bridge_claude::peers::liveness;
 use edda_bridge_claude::peers::{colliding_labels, machine_identity, PeerSummary};
 use std::path::Path;
@@ -29,6 +30,17 @@ pub(super) fn peers_json(project_id: &str, root: &Path) -> serde_json::Value {
             value["age_secs"] =
                 serde_json::json!(liveness::claim_age_secs_at(&claim.ts, now_epoch));
             value["stale"] = serde_json::json!(liveness::claim_is_stale_at(&claim.ts, now_epoch));
+            // GH-1069: `stale` answers "is this claim fresh?" against the
+            // heartbeat window, which is not the question a writer asks. A
+            // claim is written once and never refreshed, so it can be past
+            // that window and still refuse a writer until it is unclaimed or
+            // outlives `claim_ttl_secs`. Publish that second answer from the
+            // one claim-standing rule `edda claim check` and
+            // `edda dispatch --owns` share, so a program never has to
+            // recompute either threshold itself.
+            value["blocks"] = serde_json::json!(
+                claim_standing(project_id, claim, now_epoch) != ClaimStanding::Expired
+            );
             value
         })
         .collect();
