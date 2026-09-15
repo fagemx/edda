@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, stat, copyFile, symli
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -207,6 +207,21 @@ async function mutantRelease(registry, root) {
   await writeFile(join(source, 'cli.mjs'), (await readFile(join(source, 'cli.mjs'), 'utf8')) + '\n// mutant release marker\n');
   return installRuntime(registry, source);
 }
+
+test('run-resume waits out a just-stopped owned child instead of refusing', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
+  await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
+  await stopManaged(f.registry, f.runId);
+  const dir = managedDir(f.registry, f.runId);
+  const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
+  // A just-stopped owned child can read alive for a moment; simulate that with a
+  // short-lived process and require resume to wait on the observable PID.
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)'], { stdio: 'ignore' });
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ ...state, childPid: child.pid }));
+  const resumed = await resumeManaged(f.registry, f.runId);
+  assert.equal(resumed.live, true, JSON.stringify(resumed).slice(0, 240));
+});
 
 test('run-resume --runtime current re-pins a run but the default keeps the pinned runtime', async (t) => {
   const f = await fixture(t);
