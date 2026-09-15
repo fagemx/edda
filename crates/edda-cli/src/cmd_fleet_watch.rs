@@ -14,14 +14,23 @@
 //!    (`edda_bridge_claude::peers::liveness_from_heartbeat`, re-exported as
 //!    `peers::liveness_from_heartbeat` — the rule `edda peers`,
 //!    `edda claim check` and `edda conduct status` read), and
-//! 2. its work has **no terminal record** for (plan, phase) in the workspace
-//!    ledger or the conductor plan state, and
+//! 2. its work has **no terminal record**: no `conductor_phase` note with a
+//!    terminal status, no done/failed rail task bound to the session, no
+//!    completed `#session_digest` note for it, and no terminal phase/plan in
+//!    the conductor plan state, and
 //! 3. no board claim that still stands holds it.
 //!
 //! `docs/fleet/rules.md` R3/R17 state the same rule for the operator:
 //! heartbeat absence is a hint, never a death verdict. A normally finished
 //! lane also ages out of its heartbeat, so condition 2 is what stops the false
 //! positive; condition 3 is what stops us taking over a live peer's work.
+//!
+//! The one shape the product cannot answer for is a **stateless
+//! `edda dispatch` lane that recorded no claim lifecycle**: dispatch keeps no
+//! plan state, and without an un-released claim or a completed session digest
+//! there is no terminal record and no evidence the unit was ever recorded at
+//! all. That lane is reported `unrecorded`, never recovered — R17 exactly:
+//! one proof is not a verdict.
 //!
 //! ## Recovery is bounded, idempotent, and dry-run by default
 //!
@@ -66,6 +75,10 @@ const MAX_REDISPATCH_KEY: &str = "fleet.watch.max-redispatch";
 /// per-session terminal record are read back from the ledger itself.
 const PAYLOAD_KEY: &str = "fleet_watch";
 
+/// The plan name the runner stamps on an `edda dispatch` single-turn lane
+/// (`crates/edda-conductor/src/runner/heartbeat.rs` via `cmd_dispatch`).
+const DISPATCH_PLAN: &str = "dispatch";
+
 #[derive(Args, Debug, Clone)]
 pub struct WatchArgs {
     /// Perform the bounded recovery (default: report only)
@@ -96,17 +109,52 @@ pub(crate) enum LaneVerdict {
     /// Stale heartbeat, but the terminal record could not be read: never
     /// declared dead on an unreadable surface (fail closed).
     Unjudged,
+    /// Stale heartbeat, and the product keeps no terminal state for this lane
+    /// at all (a stateless `edda dispatch` lane that never recorded a claim
+    /// lifecycle). Heartbeat absence is then a hint and nothing more
+    /// (`docs/fleet/rules.md` R17): report it, never recover it.
+    Unrecorded,
+}
+
+impl LaneVerdict {
+    /// The one-line reason a lane is not actionable, for the text/JSON report.
+    pub(crate) fn detail(self) -> Option<&'static str> {
+        match self {
+            LaneVerdict::Unjudged => Some("a surface could not be read; not judged"),
+            LaneVerdict::Unrecorded => Some(
+                "stateless dispatch lane with no recorded claim or completion; \
+                 heartbeat absence is a hint, not a death verdict (R17)",
+            ),
+            _ => None,
+        }
+    }
+}
+
+/// What the terminal-record read concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalRecord {
+    /// A terminal record exists for this lane's work.
+    Recorded,
+    /// Every readable surface says there is none, and the lane's work is a
+    /// unit the product does keep terminal state for.
+    Absent,
+    /// Every readable surface says there is none, and the product keeps no
+    /// terminal state for this lane at all (no plan state, no ledger note, no
+    /// un-released claim): a stateless `edda dispatch` lane.
+    NotKept,
+    /// A surface could not be read; never a death verdict.
+    Unreadable,
 }
 
 /// The whole classification rule, pure over three facts.
 ///
-/// `terminal` is `Some(true)` when a terminal record exists, `Some(false)`
-/// when a readable surface says there is none, and `None` when no surface
-/// could be read. `claimed` is `Some(true/false)` from the board and `None`
-/// when the board itself could not be read. Either `None` must never become a
-/// death verdict: a surface we could not read is not evidence that the work
-/// is unowned.
-pub(crate) fn verdict(stale: bool, terminal: Option<bool>, claimed: Option<bool>) -> LaneVerdict {
+/// `claimed` is `Some(true/false)` from the board and `None` when the board
+/// itself (or the path-conflict rule over it) could not be judged. `None` must
+/// never become a death verdict: a surface we could not read is not evidence
+/// that the work is unowned. `terminal` carries the same fail-closed
+/// direction and adds the one case the product simply cannot answer for
+/// ([`TerminalRecord::NotKept`]).
+pub(crate) fn verdict(stale: bool, terminal: TerminalRecord, claimed: Option<bool>) -> LaneVerdict {
     if !stale {
         return LaneVerdict::Live;
     }
@@ -116,9 +164,10 @@ pub(crate) fn verdict(stale: bool, terminal: Option<bool>, claimed: Option<bool>
         // fail-closed direction `terminal` takes below.
         None => LaneVerdict::Unjudged,
         Some(false) => match terminal {
-            Some(true) => LaneVerdict::Finished,
-            Some(false) => LaneVerdict::Orphan,
-            None => LaneVerdict::Unjudged,
+            TerminalRecord::Recorded => LaneVerdict::Finished,
+            TerminalRecord::Absent => LaneVerdict::Orphan,
+            TerminalRecord::NotKept => LaneVerdict::Unrecorded,
+            TerminalRecord::Unreadable => LaneVerdict::Unjudged,
         },
     }
 }
@@ -166,6 +215,28 @@ struct Lane {
     last_heartbeat: String,
     project_id: String,
     stores: Vec<PathBuf>,
+    /// Files the lane touched, as its own heartbeat reports them. The only
+    /// surface identity a dead lane has when it never held a claim; used for
+    /// the live-peer path-conflict check.
+    focus_files: Vec<String>,
+}
+
+impl Lane {
+    /// The surfaces this lane was writing: its own recorded claim paths (when
+    /// it held one) plus the heartbeat's focus files.
+    fn work_paths(&self, claims: &[peers::ClaimEntry]) -> Vec<String> {
+        let mut paths = self.focus_files.clone();
+        for claim in claims {
+            if claim.session_id == self.session_id {
+                for path in &claim.paths {
+                    if !paths.contains(path) {
+                        paths.push(path.clone());
+                    }
+                }
+            }
+        }
+        paths
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -238,6 +309,7 @@ fn collect_lanes(repo_root: &Path) -> Vec<Lane> {
                 last_heartbeat: hb.last_heartbeat,
                 project_id: project_id.clone(),
                 stores: project_stores.clone(),
+                focus_files: hb.focus_files,
             });
         }
     }
@@ -313,6 +385,14 @@ fn ledger_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool
                 return Ok(Some(true));
             }
         }
+        // A completed `edda dispatch` turn ingests its session digest. That
+        // note names the session and is the product's completion record for a
+        // lane that has no plan state of its own.
+        if payload.get("source").and_then(|v| v.as_str()) == Some("bridge:session_digest")
+            && payload.get("session_id").and_then(|v| v.as_str()) == Some(lane.session_id.as_str())
+        {
+            return Ok(Some(true));
+        }
     }
     // The rail is a separate acceptance system and this verb never writes it,
     // but a done/failed rail task bound to this session is a terminal record
@@ -352,14 +432,17 @@ fn state_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool>
 
 /// Is there a terminal record for this lane's work?
 ///
-/// `Some(true)` yes; `Some(false)` every readable surface says no; `None`
-/// nothing readable could be found — which is never a death verdict. A read
-/// error is `None` too: an unreadable surface must not turn into a takeover.
-fn terminal_record(lane: &Lane) -> Option<bool> {
+/// [`TerminalRecord::Unreadable`] (no readable surface at all, or a read error)
+/// is never a death verdict: an unreadable surface must not turn into a
+/// takeover. `has_open_claim` is whether the board still carries an
+/// un-released claim for this session — for a stateless `edda dispatch` lane
+/// that is the only thing that can make its work a unit the product records
+/// state for at all; without it the lane is [`TerminalRecord::NotKept`].
+fn terminal_record(lane: &Lane, has_open_claim: bool) -> TerminalRecord {
     let mut judged = false;
     for store_path in &lane.stores {
         match ledger_terminal(store_path, lane) {
-            Ok(Some(true)) => return Some(true),
+            Ok(Some(true)) => return TerminalRecord::Recorded,
             Ok(Some(false)) => judged = true,
             Ok(None) => {}
             Err(e) => {
@@ -368,11 +451,11 @@ fn terminal_record(lane: &Lane) -> Option<bool> {
                     store_path.display(),
                     lane.session_id
                 );
-                return None;
+                return TerminalRecord::Unreadable;
             }
         }
         match state_terminal(store_path, lane) {
-            Ok(Some(true)) => return Some(true),
+            Ok(Some(true)) => return TerminalRecord::Recorded,
             Ok(Some(false)) => judged = true,
             Ok(None) => {}
             Err(e) => {
@@ -381,26 +464,53 @@ fn terminal_record(lane: &Lane) -> Option<bool> {
                     store_path.display(),
                     lane.session_id
                 );
-                return None;
+                return TerminalRecord::Unreadable;
             }
         }
     }
-    if judged {
-        Some(false)
+    if !judged {
+        return TerminalRecord::Unreadable;
+    }
+    if lane.plan == DISPATCH_PLAN && !has_open_claim {
+        TerminalRecord::NotKept
     } else {
-        None
+        TerminalRecord::Absent
     }
 }
 
-/// A claim that still stands for this lane's session. Read through the one
-/// admission rule, so `fleet watch` can never open a surface `edda claim
-/// check`/`edda dispatch --owns` still refuse a writer.
+/// A claim that still stands for this lane's session, or a live peer holding
+/// the surfaces this lane was writing. Read through the one admission rule
+/// (`claim_standing`) and the one intersection rule (`cmd_claim::check`), so
+/// `fleet watch` can never open a surface `edda claim check`/`edda dispatch
+/// --owns` still refuse a writer. A rule error fails closed.
 fn lane_claimed(lane: &Lane, claims: &[peers::ClaimEntry], now_epoch: u64) -> bool {
-    claims.iter().any(|claim| {
-        claim.session_id == lane.session_id
-            && crate::claim_standing::claim_standing(&lane.project_id, claim, now_epoch)
-                != crate::claim_standing::ClaimStanding::Expired
-    })
+    let stands = |claim: &peers::ClaimEntry| {
+        crate::claim_standing::claim_standing(&lane.project_id, claim, now_epoch)
+            != crate::claim_standing::ClaimStanding::Expired
+    };
+    if claims
+        .iter()
+        .any(|claim| claim.session_id == lane.session_id && stands(claim))
+    {
+        return true;
+    }
+    let others: Vec<peers::ClaimEntry> = claims
+        .iter()
+        .filter(|claim| claim.session_id != lane.session_id && stands(claim))
+        .cloned()
+        .collect();
+    if others.is_empty() {
+        return false;
+    }
+    let paths = lane.work_paths(claims);
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    if refs.is_empty() {
+        return false;
+    }
+    match crate::cmd_claim::check(&others, &refs) {
+        Ok(report) => !report.conflicts.is_empty() || !report.unjudgeable_claims.is_empty(),
+        Err(_) => true,
+    }
 }
 
 mod recover;
@@ -440,6 +550,8 @@ struct LaneJson {
     age_secs: u64,
     stale: bool,
     verdict: LaneVerdict,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'static str>,
     last_heartbeat: String,
 }
 
@@ -467,13 +579,18 @@ fn render_text(report: &WatchReport) -> String {
             LaneVerdict::Finished => "⏰ finished",
             LaneVerdict::Orphan => "⏰ ORPHAN  ",
             LaneVerdict::Unjudged => "?  unjudged",
+            LaneVerdict::Unrecorded => "?  norecord",
         };
         let pid = lane
             .pid
             .map(|p| p.to_string())
             .unwrap_or_else(|| "?".into());
+        let detail = lane
+            .detail
+            .map(|detail| format!("  ({detail})"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  {mark} {}  {}/{}  age={}s  pid={pid}\n",
+            "  {mark} {}  {}/{}  age={}s  pid={pid}{detail}\n",
             lane.session_id, lane.plan, lane.phase, lane.age_secs
         ));
     }
@@ -537,13 +654,18 @@ fn build_report(args: &WatchArgs, repo_root: &Path) -> anyhow::Result<WatchRepor
     let mut rows = Vec::new();
     let mut orphans = Vec::new();
     for lane in lanes {
-        let claims = claims_by_project
+        // A missing key cannot happen (collected above), but a missing board is
+        // `None` either way: not judged, never a death verdict.
+        let board = claims_by_project
             .get(&lane.project_id)
-            .expect("claims were collected for every lane's project");
-        let claimed = claims
-            .as_ref()
-            .map(|claims| lane_claimed(&lane, claims, now));
-        let terminal = terminal_record(&lane);
+            .and_then(Option::as_ref);
+        let claimed = board.map(|claims| lane_claimed(&lane, claims, now));
+        let has_open_claim = board.is_some_and(|claims| {
+            claims
+                .iter()
+                .any(|claim| claim.session_id == lane.session_id)
+        });
+        let terminal = terminal_record(&lane, has_open_claim);
         let judged = verdict(lane.stale, terminal, claimed);
         if judged == LaneVerdict::Orphan {
             orphans.push(lane);
@@ -624,6 +746,7 @@ fn lane_json(lane: &Lane, judged: LaneVerdict) -> LaneJson {
         age_secs: lane.age_secs,
         stale: lane.stale,
         verdict: judged,
+        detail: judged.detail(),
         last_heartbeat: lane.last_heartbeat.clone(),
     }
 }

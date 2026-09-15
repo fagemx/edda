@@ -276,6 +276,17 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> 
     if !state_path(store_path, &lane.plan).is_file() {
         return Ok(None);
     }
+    // Read the worktree BEFORE re-arming, so the instruction the redispatch
+    // carries is evidence-based (the issue's doneWhen item 3).
+    let worktree = worktree_state(store_path);
+    let takeover = format!(
+        "A previous attempt at this phase (lane {}) terminated abnormally. {} \
+         Read the worktree's current state first and continue on top of it — do not \
+         redo work that is already there.",
+        lane.session_id,
+        worktree.describe()
+    );
+
     let plan_file = update_state(store_path, &lane.plan, |state| {
         let plan_file = state.plan_file.clone();
         let Some(current) = state
@@ -295,12 +306,20 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> 
         if current != PhaseStatus::Stale && current != PhaseStatus::Failed {
             return Ok(None);
         }
+        // `retry_context` is the channel the runner actually consumes: it is
+        // injected into the phase prompt by `build_phase_prompt` on the next
+        // attempt. Writing the instruction only into a ledger note would leave
+        // the re-dispatched worker without the takeover brief (REVIEW round 2
+        // finding 3), so the note and the prompt carry the same text.
         edda_conductor::state::machine::transition(
             state,
             &lane.phase,
             current,
             PhaseStatus::Pending,
-            None,
+            Some(edda_conductor::state::machine::PhaseUpdate {
+                retry_context: Some(Some(takeover.clone())),
+                ..Default::default()
+            }),
         )?;
         edda_conductor::state::derive::update_plan_status(state);
         Ok(Some(plan_file))
@@ -309,18 +328,15 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> 
         return Ok(None);
     };
 
-    let worktree = worktree_state(store_path);
     let ledger = Ledger::open(store_path)?;
     let text = format!(
-        "fleet watch: redispatch lane \"{}\" ({}/{}) — the phase was re-armed to Pending; \
-         {} read the worktree's current state and continue on top of it, do not redo it",
-        lane.session_id,
-        lane.plan,
-        lane.phase,
-        worktree.describe()
+        "fleet watch: redispatch lane \"{}\" ({}/{}) — the phase was re-armed to Pending with \
+         this takeover instruction in its retry context: {takeover}",
+        lane.session_id, lane.plan, lane.phase
     );
     let mut payload = fleet_payload("redispatch", lane, None);
     payload["worktree"] = serde_json::to_value(&worktree)?;
+    payload["takeover_instruction"] = serde_json::Value::String(takeover);
     append_fleet_note(
         &ledger,
         &text,

@@ -166,20 +166,25 @@ fn phase_status(repo: &Path, plan: &str, phase: &str) -> PhaseStatus {
 
 #[test]
 fn verdict_never_infers_death_from_the_heartbeat_alone() {
-    assert_eq!(verdict(false, None, None), LaneVerdict::Live);
-    assert_eq!(verdict(false, Some(false), Some(false)), LaneVerdict::Live);
+    use TerminalRecord::*;
+    assert_eq!(verdict(false, Unreadable, None), LaneVerdict::Live);
+    assert_eq!(verdict(false, Absent, Some(false)), LaneVerdict::Live);
+    assert_eq!(verdict(true, Recorded, Some(false)), LaneVerdict::Finished);
+    assert_eq!(verdict(true, Absent, Some(true)), LaneVerdict::Claimed);
+    assert_eq!(verdict(true, Absent, Some(false)), LaneVerdict::Orphan);
     assert_eq!(
-        verdict(true, Some(true), Some(false)),
-        LaneVerdict::Finished
+        verdict(true, Unreadable, Some(false)),
+        LaneVerdict::Unjudged
     );
-    assert_eq!(verdict(true, Some(false), Some(true)), LaneVerdict::Claimed);
-    assert_eq!(verdict(true, Some(false), Some(false)), LaneVerdict::Orphan);
-    assert_eq!(verdict(true, None, Some(false)), LaneVerdict::Unjudged);
+    // The product keeps no terminal state for a stateless lane that recorded
+    // no claim lifecycle: report it, never recover it (R17).
+    assert_eq!(verdict(true, NotKept, Some(false)), LaneVerdict::Unrecorded);
     // An unreadable board never becomes a death verdict, and a standing claim
     // is respected even when the terminal record is unreadable.
-    assert_eq!(verdict(true, Some(false), None), LaneVerdict::Unjudged);
-    assert_eq!(verdict(true, None, None), LaneVerdict::Unjudged);
-    assert_eq!(verdict(true, None, Some(true)), LaneVerdict::Claimed);
+    assert_eq!(verdict(true, Absent, None), LaneVerdict::Unjudged);
+    assert_eq!(verdict(true, Unreadable, None), LaneVerdict::Unjudged);
+    assert_eq!(verdict(true, NotKept, None), LaneVerdict::Unjudged);
+    assert_eq!(verdict(true, Unreadable, Some(true)), LaneVerdict::Claimed);
 }
 
 #[test]
@@ -425,6 +430,264 @@ fn watch_recovers_into_the_store_that_holds_the_worktree_plan_state() {
     assert_eq!(fleet_notes(&wt, "redispatch"), 1);
     assert_eq!(fleet_note_total(&main), 0);
     assert_eq!(phase_status(&wt, "wave-wt", "p1"), PhaseStatus::Pending);
+}
+
+#[test]
+fn watch_reports_a_stateless_dispatch_lane_as_unrecorded() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let _ = Ledger::open_or_init(&repo).unwrap();
+    // A normally finished `edda dispatch` lane without --owns: no plan state,
+    // no digest note, no claim lifecycle. The product keeps no terminal record
+    // for it, and one proof (heartbeat absence) is not a verdict (R17).
+    lane_heartbeat(
+        &repo,
+        "lane-dispatch",
+        "dispatch",
+        "setup",
+        peers::stale_secs() * 10,
+        1234,
+    );
+
+    let report = build_report(
+        &WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+    assert_eq!(fleet_note_total(&repo), 0);
+    assert_eq!(report.orphan_count, 0);
+    let lane = report
+        .lanes
+        .iter()
+        .find(|l| l.session_id == "lane-dispatch")
+        .expect("lane must be reported");
+    assert_eq!(lane.verdict, LaneVerdict::Unrecorded);
+    assert!(lane.detail.is_some(), "the report must say why");
+}
+
+#[test]
+fn watch_recovers_a_dispatch_lane_whose_claim_was_never_released() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let project_id = edda_store::project_id(&repo);
+    let _ = Ledger::open_or_init(&repo).unwrap();
+    // The 2026-09-01 shape: a dispatch lane that owned paths claimed them and
+    // died without releasing, so the claim lifecycle is the record that says
+    // the unit was real and never finished.
+    lane_heartbeat(
+        &repo,
+        "lane-owns",
+        "dispatch",
+        "setup",
+        peers::stale_secs() * 10,
+        4321,
+    );
+    write_aged_claim(
+        &project_id,
+        "lane-owns",
+        peers::stale_secs() * 10,
+        &["crates/x".to_string()],
+    );
+
+    let report = build_report(
+        &WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+    assert_eq!(report.orphan_count, 1);
+    assert_eq!(fleet_notes(&repo, "terminal"), 1);
+    assert!(!crate::cmd_claim::read_active_claims(&project_id)
+        .unwrap()
+        .iter()
+        .any(|c| c.session_id == "lane-owns"));
+}
+
+#[test]
+fn watch_treats_a_session_digest_note_as_a_completion_record() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let ledger = Ledger::open_or_init(&repo).unwrap();
+    let branch = ledger.head_branch().unwrap();
+    let parent = ledger.last_event_hash().unwrap();
+    let mut event = edda_core::event::new_note_event(
+        &branch,
+        parent.as_deref(),
+        "system",
+        "session digest",
+        &["session_digest".to_string()],
+    )
+    .unwrap();
+    event.payload["source"] = serde_json::json!("bridge:session_digest");
+    event.payload["session_id"] = serde_json::json!("lane-digest");
+    edda_core::event::finalize_event(&mut event).unwrap();
+    ledger.append_event(&event).unwrap();
+
+    lane_heartbeat(
+        &repo,
+        "lane-digest",
+        "dispatch",
+        "setup",
+        peers::stale_secs() * 10,
+        555,
+    );
+    let report = build_report(
+        &WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+    assert_eq!(fleet_note_total(&repo), 0);
+    let lane = report
+        .lanes
+        .iter()
+        .find(|l| l.session_id == "lane-digest")
+        .expect("lane must be reported");
+    assert_eq!(lane.verdict, LaneVerdict::Finished);
+}
+
+#[test]
+fn watch_does_not_re_arm_a_lane_a_live_peer_claims() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let project_id = edda_store::project_id(&repo);
+    let _ = Ledger::open_or_init(&repo).unwrap();
+    save_state(
+        &repo,
+        &fabricated_state("wave-peer", "p1", PhaseStatus::Running),
+    )
+    .unwrap();
+    lane_heartbeat(
+        &repo,
+        "lane-peer",
+        "wave-peer",
+        "p1",
+        peers::stale_secs() * 10,
+        111,
+    );
+    // The dead lane owned `crates/x` and never released it.
+    write_aged_claim(
+        &project_id,
+        "lane-peer",
+        peers::stale_secs() * 10,
+        &["crates/x".to_string()],
+    );
+    // A live peer holds a LIVE claim on the same surface: fresh heartbeat, so
+    // its claim still stands, and `cmd_claim::check` intersects.
+    lane_heartbeat(&repo, "peer-live", "dispatch", "setup", 3, 222);
+    write_aged_claim(&project_id, "peer-live", 5, &["crates/x".to_string()]);
+
+    let report = build_report(
+        &WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+    let lane = report
+        .lanes
+        .iter()
+        .find(|l| l.session_id == "lane-peer")
+        .expect("lane must be reported");
+    assert_eq!(lane.verdict, LaneVerdict::Claimed);
+    assert_eq!(fleet_note_total(&repo), 0);
+    assert_eq!(phase_status(&repo, "wave-peer", "p1"), PhaseStatus::Running);
+}
+
+#[test]
+fn watch_puts_the_takeover_instruction_into_the_retry_context() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let _ = Ledger::open_or_init(&repo).unwrap();
+    save_state(
+        &repo,
+        &fabricated_state("wave-ctx", "p1", PhaseStatus::Running),
+    )
+    .unwrap();
+    lane_heartbeat(
+        &repo,
+        "lane-ctx",
+        "wave-ctx",
+        "p1",
+        peers::stale_secs() * 10,
+        333,
+    );
+
+    run(
+        WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+
+    // `retry_context` is the channel the runner injects into the next phase
+    // prompt; the takeover instruction must reach the re-dispatched worker
+    // there, not only in a ledger note.
+    let state = load_state(&repo, "wave-ctx").unwrap().unwrap();
+    let ctx = state.phases[0]
+        .retry_context
+        .as_deref()
+        .expect("retry_context must be set by the redispatch");
+    assert!(ctx.contains("do not"), "got: {ctx}");
+    assert!(ctx.contains("continue on top of it"), "got: {ctx}");
+}
+
+#[derive(clap::Parser)]
+struct FleetTestCli {
+    #[command(subcommand)]
+    cmd: crate::cmd_fleet::FleetCmd,
+}
+
+#[test]
+fn watch_cli_flags_parse_into_the_args() {
+    use clap::Parser;
+    let cli = FleetTestCli::try_parse_from([
+        "edda",
+        "watch",
+        "--apply",
+        "--json",
+        "--max-redispatch",
+        "2",
+    ])
+    .expect("the watch flags must parse");
+    match cli.cmd {
+        crate::cmd_fleet::FleetCmd::Watch { args } => {
+            assert!(args.apply);
+            assert!(args.json);
+            assert_eq!(args.max_redispatch, Some(2));
+        }
+        _ => panic!("expected the Watch subcommand"),
+    }
+
+    let cli = FleetTestCli::try_parse_from(["edda", "watch"]).unwrap();
+    match cli.cmd {
+        crate::cmd_fleet::FleetCmd::Watch { args } => {
+            assert!(!args.apply, "dry run is the default");
+            assert!(!args.json);
+            assert_eq!(args.max_redispatch, None);
+        }
+        _ => panic!("expected the Watch subcommand"),
+    }
 }
 
 #[test]
