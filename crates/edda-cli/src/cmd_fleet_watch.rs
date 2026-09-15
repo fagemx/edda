@@ -14,16 +14,21 @@
 //!    (`edda_bridge_claude::peers::liveness_from_heartbeat`, re-exported as
 //!    `peers::liveness_from_heartbeat` — the rule `edda peers`,
 //!    `edda claim check` and `edda conduct status` read), and
-//! 2. its work has **no terminal record**: no `conductor_phase` note with a
-//!    terminal status, no done/failed rail task bound to the session, no
-//!    completed `#session_digest` note for it, and no terminal phase/plan in
-//!    the conductor plan state, and
+//! 2. its work has **no terminal record**: no done/failed rail task bound to
+//!    the session, no completed `#session_digest` note for it, no terminal
+//!    phase/plan in the conductor plan state, and no `fleet_watch` terminal
+//!    note this verb already wrote for that session, and
 //! 3. no board claim that still stands holds it.
 //!
 //! `docs/fleet/rules.md` R3/R17 state the same rule for the operator:
 //! heartbeat absence is a hint, never a death verdict. A normally finished
 //! lane also ages out of its heartbeat, so condition 2 is what stops the false
 //! positive; condition 3 is what stops us taking over a live peer's work.
+//!
+//! The terminal record is per-lane, not per-(plan, phase): a lane's identity is
+//! its session, so a record that cannot name the session cannot mark *this*
+//! lane terminal. That is why the conductor's own `conductor_phase` note is not
+//! consulted — see `ledger_terminal`.
 //!
 //! The one shape the product cannot answer for is a **stateless
 //! `edda dispatch` lane that recorded no claim lifecycle**: dispatch keeps no
@@ -332,10 +337,9 @@ fn store_ledger(store_path: &Path) -> anyhow::Result<Option<Ledger>> {
     Ledger::open_existing(store_path).map(Some)
 }
 
-/// The one terminal vocabulary for both surfaces this verb reads — the
-/// conductor plan state and the `conductor_phase` ledger note the runner
-/// writes on the same transition. A phase's turn is over unless it is
-/// `Pending`, `Running` or `Checking`.
+/// The one terminal vocabulary for the surface that can answer the question:
+/// the conductor plan state. A phase's turn is over unless it is `Pending`,
+/// `Running` or `Checking`.
 ///
 /// `Stale`, `Failed` and `GateTimedOut` are terminal **records**: the conductor
 /// already recorded an outcome, so this observer never overrides one by taking
@@ -348,15 +352,18 @@ fn phase_status_is_terminal(status: PhaseStatus) -> bool {
     )
 }
 
-/// The same predicate over a ledger note's snake_case status token. An
-/// unrecognised token counts as terminal: a record we cannot read is not a
-/// licence to take the work over.
-fn conductor_status_is_terminal(status: &str) -> bool {
-    serde_json::from_value::<PhaseStatus>(serde_json::Value::String(status.to_string()))
-        .map(phase_status_is_terminal)
-        .unwrap_or(true)
-}
-
+/// The session-scoped terminal records — the ones that can name *this* lane.
+///
+/// The conductor's `conductor_phase` ledger note is deliberately **not** one of
+/// them: its payload carries only `plan_id`/`phase_id`/`status`
+/// (`crates/edda-conductor/src/runner/edda.rs`), no session or attempt, so a
+/// note from an earlier attempt would mark a re-run attempt finished. The
+/// default `on_fail: auto_retry` routes `Failed → Pending` and re-runs the
+/// phase, so that shape is the norm, not an edge: an attempt that died after a
+/// prior failure would never be recovered and its phase would stay `Running`
+/// forever — exactly what GH-573 exists to fix (REVIEW round 3, finding 1).
+/// The plan state is the authority for a plan lane, and it is attempt-aware.
+///
 /// `Ok(Some(true))` terminal, `Ok(Some(false))` readable and not terminal,
 /// `Ok(None)` no ledger in this store.
 fn ledger_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool>> {
@@ -365,17 +372,6 @@ fn ledger_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool
     };
     for event in ledger.iter_events()? {
         let payload = &event.payload;
-        if let Some(cp) = payload.get("conductor_phase") {
-            if cp.get("plan_id").and_then(|v| v.as_str()) == Some(lane.plan.as_str())
-                && cp.get("phase_id").and_then(|v| v.as_str()) == Some(lane.phase.as_str())
-                && cp
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(conductor_status_is_terminal)
-            {
-                return Ok(Some(true));
-            }
-        }
         if let Some(fw) = payload.get(PAYLOAD_KEY) {
             if fw.get("action").and_then(|v| v.as_str()) == Some("terminal")
                 && fw.get("plan").and_then(|v| v.as_str()) == Some(lane.plan.as_str())

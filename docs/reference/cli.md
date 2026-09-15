@@ -1362,14 +1362,16 @@ Exit codes:
 #### edda fleet watch
 
 Detect and bounded-recover orphaned lanes (GH-573). A lane dies abnormally
-when its heartbeat is stale, its work has no terminal record (no `conductor_phase`
-note, no done/failed rail task, no completed `#session_digest`, no terminal
-phase/plan in the conductor plan state), **and** no claim that still stands holds
-it — including a live peer whose standing claim intersects the surfaces the dead
-lane was writing. Heartbeat absence alone is never a death verdict
-(`docs/fleet/rules.md` R3/R17): a normally finished lane also ages out of its
-heartbeat, so the terminal record is what stops the false positive, and the
-standing claim is what stops taking over a live peer's work.
+when its heartbeat is stale, its work has no terminal record (no done/failed rail
+task, no completed `#session_digest`, no terminal phase/plan in the conductor
+plan state — a lane's terminal record must be able to name its session, so the
+conductor's own per-attempt `conductor_phase` receipts are not consulted),
+**and** no claim that still stands holds it — including a live peer whose
+standing claim intersects the surfaces the dead lane was writing. Heartbeat
+absence alone is never a death verdict (`docs/fleet/rules.md` R3/R17): a normally
+finished lane also ages out of its heartbeat, so the terminal record is what
+stops the false positive, and the standing claim is what stops taking over a
+live peer's work.
 
 The one shape the product cannot answer for is a stateless `edda dispatch` lane
 that recorded no claim lifecycle: dispatch keeps no plan state, so with no

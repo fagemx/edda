@@ -85,7 +85,13 @@ fn append_fleet_note(
     ledger
         .append_event(&event)
         .context("appending note event")?;
-    let _ = edda_derive::rebuild_branch(ledger, &branch);
+    if let Err(e) = edda_derive::rebuild_branch(ledger, &branch) {
+        // Same best-effort convention as `edda note` and the conductor's notes,
+        // but never silent: a shrinking derived view stays observable.
+        eprintln!(
+            "⚠ fleet watch: derived-view rebuild failed after writing a note (the ledger write stands): {e:#}"
+        );
+    }
     Ok(())
 }
 
@@ -106,18 +112,54 @@ fn fleet_payload(action: &str, lane: &Lane, reason: Option<&str>) -> serde_json:
 /// Step 1 — write the terminal record.
 ///
 /// The lane died; its work must not stay `Running` forever. Two writes, both
-/// into surfaces that already exist: a ledger note keyed by
-/// (plan, phase, session) — the record that makes this lane terminal for the
-/// next run — and, when the phase is still Running/Checking, the same
-/// transition `detect_stale_phases` applies on resume ("phase was running
-/// when conductor stopped"). That transition is assigned directly for the
-/// same reason `detect_stale_phases` assigns it directly: `Checking → Stale`
-/// has no edge in the state machine, so there is no `transition` call to make.
+/// into surfaces that already exist: the same `Running`/`Checking → Stale`
+/// transition `detect_stale_phases` applies on resume ("phase was running when
+/// conductor stopped"), and a ledger note keyed by (plan, phase, session) —
+/// the record that makes *this* lane terminal for the next run.
+///
+/// The state transition goes **first**. The note alone would make every later
+/// run read the lane `finished` (so the recovery is never retried) while a
+/// crash between the two writes left the phase `Running` — the exact state the
+/// transition exists to clear (REVIEW round 3, finding 2). This order can only
+/// leave a `Stale` phase with no note, which is a terminal record in its own
+/// right.
+///
+/// The transition is assigned directly for the same reason
+/// `detect_stale_phases` assigns it directly: `Checking → Stale` has no edge in
+/// the state machine, so there is no `transition` call to make.
 fn write_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<bool> {
     let reason = format!(
         "lane {} terminated abnormally: heartbeat stale for {}s with no terminal record",
         lane.session_id, lane.age_secs
     );
+
+    let marked = if edda_conductor::state::persist::validate_plan_name(&lane.plan).is_err()
+        || !state_path(store_path, &lane.plan).is_file()
+    {
+        false
+    } else {
+        update_state(store_path, &lane.plan, |state| {
+            let Some(phase) = state.phases.iter_mut().find(|p| p.id == lane.phase) else {
+                return Ok(false);
+            };
+            if phase.status != PhaseStatus::Running && phase.status != PhaseStatus::Checking {
+                return Ok(false);
+            }
+            phase.status = PhaseStatus::Stale;
+            phase.error = Some(ErrorInfo {
+                error_type: ErrorType::Timeout,
+                message: "phase was running when conductor stopped; lane heartbeat expired with \
+                          no terminal record (edda fleet watch)"
+                    .to_string(),
+                retryable: true,
+                check_index: None,
+                timestamp: now_rfc3339(),
+            });
+            edda_conductor::state::derive::update_plan_status(state);
+            Ok(true)
+        })?
+    };
+
     let ledger = Ledger::open(store_path)?;
     let text = format!(
         "fleet watch: lane \"{}\" ({}/{}) terminated abnormally — {reason}",
@@ -129,32 +171,7 @@ fn write_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<bool> {
         &["fleet_watch".to_string(), "orphan".to_string()],
         fleet_payload("terminal", lane, Some(&reason)),
     )?;
-
-    if edda_conductor::state::persist::validate_plan_name(&lane.plan).is_err()
-        || !state_path(store_path, &lane.plan).is_file()
-    {
-        return Ok(false);
-    }
-    update_state(store_path, &lane.plan, |state| {
-        let Some(phase) = state.phases.iter_mut().find(|p| p.id == lane.phase) else {
-            return Ok(false);
-        };
-        if phase.status != PhaseStatus::Running && phase.status != PhaseStatus::Checking {
-            return Ok(false);
-        }
-        phase.status = PhaseStatus::Stale;
-        phase.error = Some(ErrorInfo {
-            error_type: ErrorType::Timeout,
-            message: "phase was running when conductor stopped; lane heartbeat expired with no \
-                      terminal record (edda fleet watch)"
-                .to_string(),
-            retryable: true,
-            check_index: None,
-            timestamp: now_rfc3339(),
-        });
-        edda_conductor::state::derive::update_plan_status(state);
-        Ok(true)
-    })
+    Ok(marked)
 }
 
 /// Step 2 — release the dead session's claim, if one is on the board. A

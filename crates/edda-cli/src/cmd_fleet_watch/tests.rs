@@ -348,26 +348,32 @@ fn watch_does_not_recover_when_the_board_is_unreadable() {
 }
 
 #[test]
-fn watch_treats_a_conductor_note_as_a_terminal_record_whatever_the_outcome() {
+fn watch_recovers_a_rerun_attempt_after_an_earlier_failed_note() {
     let _store = isolated_store();
     let tmp = repo_dir();
     let repo = tmp.path().join("repo");
     let _ = Ledger::open_or_init(&repo).unwrap();
+    // Attempt 1 failed (the conductor wrote its receipt), the default
+    // `on_fail: auto_retry` reset the phase to Pending, attempt 2 ran, and
+    // attempt 2 died abnormally. The ledger note from attempt 1 carries no
+    // session or attempt identity, so it must NOT mark attempt 2 finished.
+    conductor_note(&repo, "wave-rerun", "p1", "failed");
+    save_state(
+        &repo,
+        &fabricated_state("wave-rerun", "p1", PhaseStatus::Running),
+    )
+    .unwrap();
     lane_heartbeat(
         &repo,
-        "lane-note",
-        "wave-note",
+        "lane-rerun",
+        "wave-rerun",
         "p1",
         peers::stale_secs() * 10,
-        999,
+        321,
     );
-    // The conductor writes a `conductor_phase` note only on a terminal
-    // transition; `stale` is one of those records, so the work is recorded and
-    // this observer must not take it over.
-    conductor_note(&repo, "wave-note", "p1", "stale");
 
-    let report = build_report(
-        &WatchArgs {
+    run(
+        WatchArgs {
             apply: true,
             json: false,
             max_redispatch: Some(1),
@@ -375,14 +381,11 @@ fn watch_treats_a_conductor_note_as_a_terminal_record_whatever_the_outcome() {
         &repo,
     )
     .unwrap();
-    assert_eq!(fleet_note_total(&repo), 0);
-    assert_eq!(report.orphan_count, 0);
-    let lane = report
-        .lanes
-        .iter()
-        .find(|l| l.session_id == "lane-note")
-        .expect("lane must be reported");
-    assert_eq!(lane.verdict, LaneVerdict::Finished);
+    assert_eq!(fleet_notes(&repo, "terminal"), 1);
+    assert_eq!(
+        phase_status(&repo, "wave-rerun", "p1"),
+        PhaseStatus::Pending
+    );
 }
 
 #[test]
