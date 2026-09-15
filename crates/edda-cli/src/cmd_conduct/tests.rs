@@ -472,3 +472,128 @@ fn corrupt_only_state_is_not_reported_as_no_plans() {
     assert!(err.contains("unreadable"), "got: {err}");
     assert!(!err.contains("No plans found"), "got: {err}");
 }
+
+/// GH-567: write a conductor-lane heartbeat (the shape the runner stamps for
+/// both `edda conduct` phases and `edda dispatch` single-turn lanes) into an
+/// isolated store. `age_secs` controls the staleness of `last_heartbeat`.
+fn write_lane_heartbeat(
+    repo: &Path,
+    session: &str,
+    plan: &str,
+    phase: &str,
+    age_secs: u64,
+    pid: u32,
+) {
+    let project_id = edda_store::project_id(repo);
+    let ts = (time::OffsetDateTime::now_utc() - time::Duration::seconds(age_secs as i64))
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("rfc3339");
+    let mut hb = edda_bridge_claude::peers::SessionHeartbeat::blank(session);
+    hb.started_at = ts.clone();
+    hb.last_heartbeat = ts;
+    hb.label = plan.to_string();
+    hb.plan = Some(plan.to_string());
+    hb.phase = Some(phase.to_string());
+    hb.attempt = Some(1);
+    hb.stage = Some("running".to_string());
+    hb.pid = Some(pid);
+    edda_store::write_heartbeat(&project_id, &hb).expect("write lane heartbeat");
+}
+
+/// GH-567 fail-before: a `edda dispatch` single-turn lane writes the same
+/// conductor heartbeat, but `conduct status` never listed it. The unified read
+/// model must surface it with the pid it is actually running under.
+#[test]
+fn status_lists_a_live_dispatch_lane_with_age_and_pid() {
+    let _store = crate::test_support::isolated_store();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    write_lane_heartbeat(&repo, "dispatch-1", "dispatch", "setup", 5, 4242);
+
+    let text = status_impl(&repo, None, false).unwrap();
+    assert!(text.contains("dispatch"), "lane must appear, got: {text}");
+    assert!(text.contains("setup"), "phase must appear, got: {text}");
+    assert!(text.contains("4242"), "pid must appear, got: {text}");
+    assert!(text.contains("age="), "age must appear, got: {text}");
+    assert!(
+        text.contains("s ago"),
+        "age must be human-readable, got: {text}"
+    );
+    assert!(
+        !text.contains("stale"),
+        "a fresh lane is not stale, got: {text}"
+    );
+}
+
+/// GH-567: a heartbeat that aged past the shared threshold while the plan
+/// still records the phase as running must be *marked* stale — neither hidden
+/// nor promoted to a death claim.
+#[test]
+fn status_marks_a_stale_heartbeat_stale_without_calling_it_dead() {
+    let _store = crate::test_support::isolated_store();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    save_state(
+        &repo,
+        &fabricated_state("wave-x", "p1", PhaseStatus::Running),
+    )
+    .unwrap();
+    let stale = edda_bridge_claude::peers::stale_secs();
+    write_lane_heartbeat(&repo, "lane-stale", "wave-x", "p1", stale * 10, 7777);
+
+    let text = status_impl(&repo, None, false).unwrap();
+    assert!(text.contains("wave-x"), "plan must appear, got: {text}");
+    assert!(
+        text.contains("stale"),
+        "an expired lane must be marked stale, got: {text}"
+    );
+    assert!(
+        !text.to_lowercase().contains("dead"),
+        "the read model must not declare death, got: {text}"
+    );
+}
+
+/// GH-567: the machine-readable view carries the same lane facts (age, pid,
+/// staleness) so an external panel can retire.
+#[test]
+fn status_json_includes_lane_entries_with_age_and_pid() {
+    let _store = crate::test_support::isolated_store();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    write_lane_heartbeat(&repo, "dispatch-1", "dispatch", "setup", 5, 4242);
+
+    let text = status_impl(&repo, None, true).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let rows = parsed.as_array().expect("top level stays an array");
+    let lane = rows
+        .iter()
+        .find(|row| row["kind"] == "lane")
+        .expect("a lane row must be present");
+    assert_eq!(lane["plan"], "dispatch");
+    assert_eq!(lane["phase"], "setup");
+    assert_eq!(lane["pid"], 4242);
+    assert_eq!(lane["stale"], false);
+    assert!(lane["age_secs"].as_u64().unwrap() < 60);
+}
+
+/// GH-567 bound: a dispatch lane is in flight only while its heartbeat is
+/// live. Once it ages out there is no plan state to keep it in flight
+/// (dispatch is single-turn and stateless by decision), so it is a finished
+/// observation — not resurrected on every `status` — and reclamation is the
+/// separate concern #573. A long-lived machine must not accumulate an
+/// unbounded stale lane wall.
+#[test]
+fn status_does_not_resurrect_a_stale_dispatch_lane_with_no_plan_state() {
+    let _store = crate::test_support::isolated_store();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let stale = edda_bridge_claude::peers::stale_secs();
+    write_lane_heartbeat(&repo, "dispatch-old", "dispatch", "setup", stale * 10, 111);
+
+    let text = status_impl(&repo, None, false).unwrap();
+    assert_eq!(text.trim(), "No plans found.", "got: {text}");
+}

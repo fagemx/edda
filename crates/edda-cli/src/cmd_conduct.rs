@@ -1,6 +1,9 @@
 use crate::agent_kind::{build_launcher, AgentKind, LauncherOptions};
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
+use edda_bridge_claude::peers::{
+    format_age, liveness_from_heartbeat, SessionHeartbeat, SessionLiveness,
+};
 use edda_conductor::agent::budget::BudgetTracker;
 use edda_conductor::agent::launcher::phase_session_id;
 use edda_conductor::check::engine::CheckEngine;
@@ -11,6 +14,7 @@ use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, update_state};
 use edda_conductor::tmux::TmuxSession;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -339,6 +343,11 @@ pub fn status(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<(
 /// GH-557: plan state lives in the store that launched it (the invocation
 /// root or any git worktree) — scan all of them. Split from [`status`] so
 /// the rendered text is testable without stdout capture.
+///
+/// GH-567 adds a read-only lane half: the same call also joins the shared
+/// session heartbeat surface (the one `edda peers` reads) so a
+/// `edda dispatch` single-turn lane — which has no plan state of its own —
+/// appears alongside the plan phases with its heartbeat age and pid.
 fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<String> {
     let mut out = String::new();
     let plans: Vec<(String, PathBuf)> = if let Some(name) = plan_name {
@@ -362,10 +371,46 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
         found
     };
 
-    if plans.is_empty() {
-        out.push_str(if json { "[]\n" } else { "No plans found.\n" });
-        return Ok(out);
+    // Load every plan state once: the plan listing and the GH-567 lane join
+    // must read one snapshot. A corrupt record degrades to a warning +
+    // omission on the JSON overview (matching the pre-lane behaviour); a
+    // named plan and the text overview propagate instead.
+    let mut loaded: Vec<(String, PathBuf, PlanState)> = Vec::new();
+    for (name, store) in &plans {
+        match load_state(store, name) {
+            Ok(Some(state)) => loaded.push((name.clone(), store.clone(), state)),
+            Ok(None) => {
+                if plan_name.is_none() {
+                    eprintln!(
+                        "⚠ plan \"{name}\" state in {} disappeared before load, omitted",
+                        store.display()
+                    );
+                }
+            }
+            Err(e) => {
+                if plan_name.is_some() || !json {
+                    return Err(e);
+                }
+                eprintln!(
+                    "⚠ plan \"{name}\" state in {} unreadable at load, omitted: {e:#}",
+                    store.display()
+                );
+            }
+        }
     }
+
+    // Phases the plan still records as active. A lane heartbeat that aged out
+    // for one of these is the honest "state says alive, heartbeat says else"
+    // case: show it marked stale rather than hide it or call it dead.
+    let mut active: HashSet<(String, String)> = HashSet::new();
+    for (_, _, state) in &loaded {
+        for ps in &state.phases {
+            if lane_phase_is_active(ps.status) {
+                active.insert((state.plan_name.clone(), ps.id.clone()));
+            }
+        }
+    }
+    let lanes = in_flight_lanes(repo_root, &active, plan_name);
 
     if json {
         // Every machine-readable object carries `store` so same-named plans
@@ -382,53 +427,249 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
             state,
         };
         if plan_name.is_some() {
-            let (name, store) = &plans[0];
-            match load_state(store, name)? {
-                Some(s) => {
-                    out.push_str(&serde_json::to_string_pretty(&row(store, s))?);
+            match loaded.into_iter().next() {
+                Some((_, store, state)) => {
+                    // Additive field so a named-plan consumer keeps reading
+                    // every pre-existing path (`plan_name`, `phases`, `store`).
+                    let mut value = serde_json::to_value(row(&store, state))?;
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "lane_heartbeats".to_string(),
+                            serde_json::to_value(
+                                lanes.iter().map(LaneJson::from).collect::<Vec<_>>(),
+                            )?,
+                        );
+                    }
+                    out.push_str(&serde_json::to_string_pretty(&value)?);
                     out.push('\n');
                 }
                 None => out.push_str("null\n"),
             }
         } else {
-            let mut states = Vec::new();
-            for (name, store) in &plans {
-                match load_state(store, name) {
-                    Ok(Some(s)) => states.push(row(store, s)),
-                    Ok(None) => eprintln!(
-                        "⚠ plan \"{name}\" state in {} disappeared before load, omitted",
-                        store.display()
-                    ),
-                    Err(e) => eprintln!(
-                        "⚠ plan \"{name}\" state in {} unreadable at load, omitted: {e:#}",
-                        store.display()
-                    ),
-                }
+            // Keep the top-level array stable; lane rows are appended and
+            // tagged `kind: "lane"`, so a consumer keyed on `plan_name` sees
+            // exactly the rows it saw before.
+            let mut rows: Vec<serde_json::Value> = Vec::new();
+            for (_, store, state) in loaded {
+                rows.push(serde_json::to_value(row(&store, state))?);
             }
-            out.push_str(&serde_json::to_string_pretty(&states)?);
+            for lane in &lanes {
+                rows.push(serde_json::to_value(LaneJson::from(lane))?);
+            }
+            out.push_str(&serde_json::to_string_pretty(&rows)?);
             out.push('\n');
         }
-    } else {
-        for (name, store) in &plans {
-            let state = load_state(store, name)?;
-            match state {
-                Some(s) => {
-                    let label = if store::normalize_store_path(store)
-                        == store::normalize_store_path(repo_root)
-                    {
-                        "(invocation root)".to_string()
-                    } else {
-                        store::normalize_store_path(store)
-                    };
-                    out.push_str(&format!("  Store: {label}\n"));
-                    out.push_str(&print_status_to_string(&s));
-                }
-                None => out.push_str(&format!("Plan \"{name}\": no state file found\n")),
+    } else if loaded.is_empty() && lanes.is_empty() {
+        out.push_str("No plans found.\n");
+    } else if plan_name.is_some() {
+        match loaded.first() {
+            Some((_, store, state)) => {
+                out.push_str(&format!("  Store: {}\n", store_label(store, repo_root)));
+                out.push_str(&print_status_to_string(state));
             }
+            None => out.push_str(&format!(
+                "Plan \"{}\": no state file found\n",
+                plan_name.unwrap_or_default()
+            )),
         }
+        out.push_str(&render_lanes_text(&lanes));
+    } else {
+        for (_, store, state) in &loaded {
+            out.push_str(&format!("  Store: {}\n", store_label(store, repo_root)));
+            out.push_str(&print_status_to_string(state));
+        }
+        out.push_str(&render_lanes_text(&lanes));
     }
 
     Ok(out)
+}
+
+/// The label `status` shows for a plan's store: the invocation root is named
+/// rather than echoing a path the operator already knows.
+fn store_label(store: &Path, repo_root: &Path) -> String {
+    if store::normalize_store_path(store) == store::normalize_store_path(repo_root) {
+        "(invocation root)".to_string()
+    } else {
+        store::normalize_store_path(store)
+    }
+}
+
+/// Phase statuses for which the plan still asserts the phase is running.
+fn lane_phase_is_active(status: PhaseStatus) -> bool {
+    matches!(
+        status,
+        PhaseStatus::Running
+            | PhaseStatus::Checking
+            | PhaseStatus::AwaitingVerdict
+            | PhaseStatus::GateTimedOut
+    )
+}
+
+/// One conductor lane's live observation (GH-567).
+struct LaneEntry {
+    session_id: String,
+    label: String,
+    plan: String,
+    phase: String,
+    stage: Option<String>,
+    attempt: Option<u32>,
+    pid: Option<u32>,
+    age_secs: u64,
+    stale: bool,
+    last_heartbeat: String,
+}
+
+/// Machine-readable lane row. `kind` distinguishes appended rows from plan
+/// rows in the existing top-level array.
+#[derive(serde::Serialize)]
+struct LaneJson<'a> {
+    kind: &'static str,
+    session_id: &'a str,
+    label: &'a str,
+    plan: &'a str,
+    phase: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    age_secs: u64,
+    stale: bool,
+    last_heartbeat: &'a str,
+}
+
+impl<'a> From<&'a LaneEntry> for LaneJson<'a> {
+    fn from(lane: &'a LaneEntry) -> Self {
+        Self {
+            kind: "lane",
+            session_id: &lane.session_id,
+            label: &lane.label,
+            plan: &lane.plan,
+            phase: &lane.phase,
+            stage: lane.stage.as_deref(),
+            attempt: lane.attempt,
+            pid: lane.pid,
+            age_secs: lane.age_secs,
+            stale: lane.stale,
+            last_heartbeat: &lane.last_heartbeat,
+        }
+    }
+}
+
+/// Collect the conductor-lane heartbeats `status` should show (GH-567).
+///
+/// Read-only: enumerates the shared `SessionHeartbeat` surface (the one
+/// `edda peers` reads — one liveness format, no new store) under the same
+/// candidate store roots the plan verbs resolve, and keeps only the entries
+/// the conductor runner stamps (`plan` set; a hook-only Claude session leaves
+/// it empty). A lane is *in flight* when its heartbeat is live, or — for a
+/// conduct lane — while its plan still records the phase as active (then it
+/// is marked stale, never declared dead). A stale dispatch lane has no plan
+/// state to keep it in flight: dispatch is single-turn and stateless by
+/// recorded decision, so its aged-out heartbeat is a finished observation,
+/// and orphan reclamation is the separate concern #573 this read model must
+/// not absorb.
+fn in_flight_lanes(
+    repo_root: &Path,
+    active: &HashSet<(String, String)>,
+    plan_filter: Option<&str>,
+) -> Vec<LaneEntry> {
+    let now = edda_bridge_claude::peers::liveness::now_epoch();
+    let mut project_ids: Vec<String> = Vec::new();
+    for store_dir in store::candidate_stores(repo_root) {
+        let project_id = edda_store::project_id(&store_dir);
+        if !project_ids.contains(&project_id) {
+            project_ids.push(project_id);
+        }
+    }
+
+    let mut lanes = Vec::new();
+    for project_id in &project_ids {
+        let state_dir = edda_store::project_dir(project_id).join("state");
+        let entries = match std::fs::read_dir(&state_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("session.") || !name.ends_with(".json") {
+                continue;
+            }
+            let content = match std::fs::read_to_string(entry.path()) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let hb: SessionHeartbeat = match serde_json::from_str(&content) {
+                Ok(hb) => hb,
+                Err(_) => continue,
+            };
+            // Only conductor lanes carry `plan`; a plain hook session does not.
+            let plan = match hb.plan.as_deref() {
+                Some(plan) if !plan.is_empty() => plan.to_string(),
+                _ => continue,
+            };
+            if plan_filter.is_some_and(|filter| filter != plan.as_str()) {
+                continue;
+            }
+            let phase = hb.phase.clone().unwrap_or_default();
+            let (age_secs, stale) = match liveness_from_heartbeat(&hb, now) {
+                SessionLiveness::Live { age_secs } => (age_secs, false),
+                SessionLiveness::Stale { age_secs } => (age_secs, true),
+                // No timestamp to judge: not evidence of life or death.
+                SessionLiveness::NoHeartbeat => continue,
+            };
+            if stale && !(plan != "dispatch" && active.contains(&(plan.clone(), phase.clone()))) {
+                continue;
+            }
+            lanes.push(LaneEntry {
+                session_id: hb.session_id,
+                label: hb.label,
+                plan,
+                phase,
+                stage: hb.stage,
+                attempt: hb.attempt,
+                pid: hb.pid,
+                age_secs,
+                stale,
+                last_heartbeat: hb.last_heartbeat,
+            });
+        }
+    }
+    lanes.sort_by(|a, b| {
+        a.age_secs
+            .cmp(&b.age_secs)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    lanes
+}
+
+fn render_lanes_text(lanes: &[LaneEntry]) -> String {
+    if lanes.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\nLanes ({} in flight):\n", lanes.len());
+    for lane in lanes {
+        let icon = if lane.stale { "\u{23F0}" } else { "\u{25B6}" };
+        let stage = lane.stage.as_deref().unwrap_or("?");
+        let pid = lane
+            .pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "?".into());
+        let suffix = if lane.stale {
+            format!("  stale (no heartbeat for {}s)", lane.age_secs)
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "  {icon} {:<28} {:<12} age={}  pid={pid}{suffix}\n",
+            format!("{}/{}", lane.plan, lane.phase),
+            stage,
+            format_age(lane.age_secs)
+        ));
+    }
+    out.push('\n');
+    out
 }
 
 /// Execute `edda conduct retry <phase-id>`
