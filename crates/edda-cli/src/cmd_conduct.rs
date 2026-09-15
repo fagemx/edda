@@ -402,12 +402,22 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
     // Plan-recorded status per (plan, phase), so a stale lane can be told from
     // a finished one: the issue's "expired and no terminal state = suspected"
     // line, marked rather than guessed. Absent = the lane has no plan state.
-    let mut phase_states: HashMap<(String, String), PhaseStatus> = HashMap::new();
+    let mut phase_states: HashMap<(String, String), Option<PhaseStatus>> = HashMap::new();
     for (_, _, state) in &loaded {
         for ps in &state.phases {
-            phase_states
-                .entry((state.plan_name.clone(), ps.id.clone()))
-                .or_insert(ps.status);
+            let key = (state.plan_name.clone(), ps.id.clone());
+            match phase_states.get(&key) {
+                None => {
+                    phase_states.insert(key, Some(ps.status));
+                }
+                // Same-named plans in different stores are allowed to
+                // disagree, and a lane heartbeat carries no store identity to
+                // disambiguate: claim neither status rather than one plan's.
+                Some(Some(existing)) if *existing == ps.status => {}
+                Some(_) => {
+                    phase_states.insert(key, None);
+                }
+            }
         }
     }
     let lanes = in_flight_lanes(repo_root, &plans, &phase_states, plan_name);
@@ -568,7 +578,7 @@ impl<'a> From<&'a LaneEntry> for LaneJson<'a> {
 fn in_flight_lanes(
     repo_root: &Path,
     plans: &[(String, PathBuf)],
-    phase_states: &HashMap<(String, String), PhaseStatus>,
+    phase_states: &HashMap<(String, String), Option<PhaseStatus>>,
     plan_filter: Option<&str>,
 ) -> Vec<LaneEntry> {
     let now = edda_bridge_claude::peers::liveness::now_epoch();
@@ -621,7 +631,10 @@ fn in_flight_lanes(
                 // belongs to the file-level classifier, which we never call.
                 SessionLiveness::NoHeartbeat => continue,
             };
-            let phase_status = phase_states.get(&(plan.clone(), phase.clone())).copied();
+            let phase_status = phase_states
+                .get(&(plan.clone(), phase.clone()))
+                .copied()
+                .flatten();
             lanes.push(LaneEntry {
                 session_id: hb.session_id,
                 label: hb.label,

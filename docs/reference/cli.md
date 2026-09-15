@@ -1083,14 +1083,16 @@ whose heartbeat has aged past the shared staleness threshold is marked
 `stale (no heartbeat for Xs)` and is never hidden. When the lane's plan records
 that phase's status the stale line names it (e.g. `stale (phase Passed; ...)`),
 so a finished phase is distinguishable from a lane with no terminal state — the
-issue's suspected-death case. Reclaiming stale lane observations is a separate
+issue's suspected-death case. The text line prints the status in Rust `Debug`
+form (`Passed`); the JSON field carries the serde `snake_case` value (`passed`). Reclaiming stale lane observations is a separate
 concern (#573); this view keeps them visible in the meantime.
 
 `--json` carries the same facts. Without a plan name the top-level array keeps
 its original plan rows and appends one row per lane, tagged `"kind": "lane"`
-(`session_id`, `label`, `plan`, `phase`, `phase_status`, `stage`, `attempt`,
-`pid`, `age_secs`, `stale`, `last_heartbeat`). With a plan name the plan object
- gains an additive
+(`session_id`, `label`, `plan`, `phase`, `phase_status` (snake_case, omitted
+when no plan records that phase or two same-named plans disagree), `stage`,
+`attempt`, `pid`, `age_secs`, `stale`, `last_heartbeat`). With a plan name the
+plan object gains an additive
 `lane_heartbeats` array; every pre-existing field path is unchanged.
 
 ### `edda return`
