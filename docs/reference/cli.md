@@ -1069,7 +1069,7 @@ Multi-phase AI plan conductor.
 
 ```bash
 edda conduct run <PLAN.yaml>     # run a plan
-edda conduct status              # show plans plus in-flight lanes
+edda conduct status              # show plans and conductor lanes
 edda conduct retry <PLAN>        # reset a failed phase
 edda conduct skip <PLAN>         # skip a phase
 edda conduct abort <PLAN>        # abort a running plan
@@ -1080,14 +1080,17 @@ conductor lanes observed through the shared session heartbeat — the same
 surface `edda peers` reads, so `edda dispatch`'s single-turn lane (which has no
 plan state of its own) appears with its phase, heartbeat age and pid. A lane
 whose heartbeat has aged past the shared staleness threshold is marked
-`stale (no heartbeat for Xs)`; it is never hidden and never declared dead.
-Reclaiming stale lane observations is a separate concern (#573); this view
-keeps them visible in the meantime.
+`stale (no heartbeat for Xs)` and is never hidden. When the lane's plan records
+that phase's status the stale line names it (e.g. `stale (phase Passed; ...)`),
+so a finished phase is distinguishable from a lane with no terminal state — the
+issue's suspected-death case. Reclaiming stale lane observations is a separate
+concern (#573); this view keeps them visible in the meantime.
 
 `--json` carries the same facts. Without a plan name the top-level array keeps
 its original plan rows and appends one row per lane, tagged `"kind": "lane"`
-(`session_id`, `label`, `plan`, `phase`, `stage`, `attempt`, `pid`, `age_secs`,
-`stale`, `last_heartbeat`). With a plan name the plan object gains an additive
+(`session_id`, `label`, `plan`, `phase`, `phase_status`, `stage`, `attempt`,
+`pid`, `age_secs`, `stale`, `last_heartbeat`). With a plan name the plan object
+ gains an additive
 `lane_heartbeats` array; every pre-existing field path is unchanged.
 
 ### `edda return`

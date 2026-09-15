@@ -14,6 +14,7 @@ use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, update_state};
 use edda_conductor::tmux::TmuxSession;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -398,7 +399,18 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
         }
     }
 
-    let lanes = in_flight_lanes(repo_root, &plans, plan_name);
+    // Plan-recorded status per (plan, phase), so a stale lane can be told from
+    // a finished one: the issue's "expired and no terminal state = suspected"
+    // line, marked rather than guessed. Absent = the lane has no plan state.
+    let mut phase_states: HashMap<(String, String), PhaseStatus> = HashMap::new();
+    for (_, _, state) in &loaded {
+        for ps in &state.phases {
+            phase_states
+                .entry((state.plan_name.clone(), ps.id.clone()))
+                .or_insert(ps.status);
+        }
+    }
+    let lanes = in_flight_lanes(repo_root, &plans, &phase_states, plan_name);
 
     if json {
         // Every machine-readable object carries `store` so same-named plans
@@ -488,6 +500,7 @@ struct LaneEntry {
     label: String,
     plan: String,
     phase: String,
+    phase_status: Option<PhaseStatus>,
     stage: Option<String>,
     attempt: Option<u32>,
     pid: Option<u32>,
@@ -510,6 +523,8 @@ struct LaneJson<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     attempt: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    phase_status: Option<PhaseStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u32>,
     age_secs: u64,
     stale: bool,
@@ -526,6 +541,7 @@ impl<'a> From<&'a LaneEntry> for LaneJson<'a> {
             phase: &lane.phase,
             stage: lane.stage.as_deref(),
             attempt: lane.attempt,
+            phase_status: lane.phase_status,
             pid: lane.pid,
             age_secs: lane.age_secs,
             stale: lane.stale,
@@ -552,6 +568,7 @@ impl<'a> From<&'a LaneEntry> for LaneJson<'a> {
 fn in_flight_lanes(
     repo_root: &Path,
     plans: &[(String, PathBuf)],
+    phase_states: &HashMap<(String, String), PhaseStatus>,
     plan_filter: Option<&str>,
 ) -> Vec<LaneEntry> {
     let now = edda_bridge_claude::peers::liveness::now_epoch();
@@ -593,17 +610,10 @@ fn in_flight_lanes(
             if plan_filter.is_some_and(|filter| filter != plan.as_str()) {
                 continue;
             }
-            // A heartbeat with no parseable clock is not evidence either way:
-            // do not dress a corrupt timestamp up as an expiry.
-            if time::OffsetDateTime::parse(
-                &hb.last_heartbeat,
-                &time::format_description::well_known::Rfc3339,
-            )
-            .is_err()
-            {
-                continue;
-            }
             let phase = hb.phase.clone().unwrap_or_default();
+            // The shared criterion is the only judge of freshness; adding a
+            // second parser or threshold here would be a second criterion for
+            // the same question (liveness.rs's one-criterion rule).
             let (age_secs, stale) = match liveness_from_heartbeat(&hb, now) {
                 SessionLiveness::Live { age_secs } => (age_secs, false),
                 SessionLiveness::Stale { age_secs } => (age_secs, true),
@@ -611,11 +621,13 @@ fn in_flight_lanes(
                 // belongs to the file-level classifier, which we never call.
                 SessionLiveness::NoHeartbeat => continue,
             };
+            let phase_status = phase_states.get(&(plan.clone(), phase.clone())).copied();
             lanes.push(LaneEntry {
                 session_id: hb.session_id,
                 label: hb.label,
                 plan,
                 phase,
+                phase_status,
                 stage: hb.stage,
                 attempt: hb.attempt,
                 pid: hb.pid,
@@ -645,8 +657,17 @@ fn render_lanes_text(lanes: &[LaneEntry]) -> String {
             .pid
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "?".into());
+        // A stale lane whose plan already records a phase status is marked
+        // with it, so a finished phase is distinguishable from the issue's
+        // suspected-death case (expired and no terminal state).
         let suffix = if lane.stale {
-            format!("  stale (no heartbeat for {}s)", lane.age_secs)
+            match lane.phase_status {
+                Some(status) => format!(
+                    "  stale (phase {status:?}; no heartbeat for {}s)",
+                    lane.age_secs
+                ),
+                None => format!("  stale (no heartbeat for {}s)", lane.age_secs),
+            }
         } else {
             String::new()
         };

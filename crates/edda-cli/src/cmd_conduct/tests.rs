@@ -635,3 +635,32 @@ fn named_plan_json_carries_lane_heartbeats() {
     assert_eq!(lanes[0]["plan"], "wave-x");
     assert_eq!(lanes[0]["stale"], false);
 }
+
+/// GH-567 review round 2 P2: an expired lane whose plan records a terminal
+/// phase is a finished observation, while one with no terminal state is the
+/// issue's suspected-death case. They must not render identically.
+#[test]
+fn stale_lane_names_a_terminal_phase_when_the_plan_records_one() {
+    let _store = crate::test_support::isolated_store();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    save_state(
+        &repo,
+        &fabricated_state("done-plan", "p1", PhaseStatus::Passed),
+    )
+    .unwrap();
+    let stale = edda_bridge_claude::peers::stale_secs();
+    write_lane_heartbeat(&repo, "finished", "done-plan", "p1", stale * 10, 333);
+    write_lane_heartbeat(&repo, "orphan", "dispatch", "setup", stale * 10, 444);
+
+    let text = status_impl(&repo, None, false).unwrap();
+    assert!(
+        text.contains("stale (phase Passed;"),
+        "a finished phase must be named, got: {text}"
+    );
+    assert!(
+        text.contains("stale (no heartbeat for"),
+        "a lane with no terminal state keeps the bare stale mark, got: {text}"
+    );
+}
