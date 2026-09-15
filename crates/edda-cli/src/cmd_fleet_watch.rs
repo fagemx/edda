@@ -102,18 +102,24 @@ pub(crate) enum LaneVerdict {
 ///
 /// `terminal` is `Some(true)` when a terminal record exists, `Some(false)`
 /// when a readable surface says there is none, and `None` when no surface
-/// could be read — which must never become a death verdict.
-pub(crate) fn verdict(stale: bool, terminal: Option<bool>, claimed: bool) -> LaneVerdict {
+/// could be read. `claimed` is `Some(true/false)` from the board and `None`
+/// when the board itself could not be read. Either `None` must never become a
+/// death verdict: a surface we could not read is not evidence that the work
+/// is unowned.
+pub(crate) fn verdict(stale: bool, terminal: Option<bool>, claimed: Option<bool>) -> LaneVerdict {
     if !stale {
         return LaneVerdict::Live;
     }
-    if claimed {
-        return LaneVerdict::Claimed;
-    }
-    match terminal {
-        Some(true) => LaneVerdict::Finished,
-        Some(false) => LaneVerdict::Orphan,
+    match claimed {
+        Some(true) => LaneVerdict::Claimed,
+        // An unreadable board cannot say "nobody holds it" — the same
+        // fail-closed direction `terminal` takes below.
         None => LaneVerdict::Unjudged,
+        Some(false) => match terminal {
+            Some(true) => LaneVerdict::Finished,
+            Some(false) => LaneVerdict::Orphan,
+            None => LaneVerdict::Unjudged,
+        },
     }
 }
 
@@ -254,8 +260,29 @@ fn store_ledger(store_path: &Path) -> anyhow::Result<Option<Ledger>> {
     Ledger::open_existing(store_path).map(Some)
 }
 
-fn is_terminal_conductor_status(status: &str) -> bool {
-    matches!(status, "passed" | "failed" | "gate_timed_out")
+/// The one terminal vocabulary for both surfaces this verb reads — the
+/// conductor plan state and the `conductor_phase` ledger note the runner
+/// writes on the same transition. A phase's turn is over unless it is
+/// `Pending`, `Running` or `Checking`.
+///
+/// `Stale`, `Failed` and `GateTimedOut` are terminal **records**: the conductor
+/// already recorded an outcome, so this observer never overrides one by taking
+/// the work over. Re-arming a recorded outcome stays with `edda conduct retry`,
+/// which walks the machine's own retry edges.
+fn phase_status_is_terminal(status: PhaseStatus) -> bool {
+    !matches!(
+        status,
+        PhaseStatus::Pending | PhaseStatus::Running | PhaseStatus::Checking
+    )
+}
+
+/// The same predicate over a ledger note's snake_case status token. An
+/// unrecognised token counts as terminal: a record we cannot read is not a
+/// licence to take the work over.
+fn conductor_status_is_terminal(status: &str) -> bool {
+    serde_json::from_value::<PhaseStatus>(serde_json::Value::String(status.to_string()))
+        .map(phase_status_is_terminal)
+        .unwrap_or(true)
 }
 
 /// `Ok(Some(true))` terminal, `Ok(Some(false))` readable and not terminal,
@@ -272,7 +299,7 @@ fn ledger_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool
                 && cp
                     .get("status")
                     .and_then(|v| v.as_str())
-                    .is_some_and(is_terminal_conductor_status)
+                    .is_some_and(conductor_status_is_terminal)
             {
                 return Ok(Some(true));
             }
@@ -316,13 +343,9 @@ fn state_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool>
         return Ok(Some(true));
     }
     match state.phases.iter().find(|p| p.id == lane.phase) {
-        // Pending/Running/Checking are the only non-terminal phase states: the
-        // lane's work is not recorded finished. Passed/Failed/Skipped/Stale/
-        // AwaitingVerdict/GateTimedOut all mean the phase's turn is over.
-        Some(phase) => Ok(Some(!matches!(
-            phase.status,
-            PhaseStatus::Pending | PhaseStatus::Running | PhaseStatus::Checking
-        ))),
+        Some(phase) => Ok(Some(phase_status_is_terminal(phase.status))),
+        // The state exists but knows nothing about this phase: nothing terminal
+        // has been recorded for this work here.
         None => Ok(Some(false)),
     }
 }
@@ -380,327 +403,8 @@ fn lane_claimed(lane: &Lane, claims: &[peers::ClaimEntry], now_epoch: u64) -> bo
     })
 }
 
-// ── Recovery ─────────────────────────────────────────────────────────────────
-
-/// What `--apply` did (or, in a dry run, what it would do) for one orphan.
-#[derive(Debug, Clone, serde::Serialize)]
-struct Recovered {
-    session_id: String,
-    plan: String,
-    phase: String,
-    steps: Vec<RecoveryStep>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resume: Option<String>,
-    terminal_recorded: bool,
-    claim_released: bool,
-    redispatch_recorded: bool,
-    stop_loss_recorded: bool,
-}
-
-/// The store the recovery writes into: the first one that is an edda
-/// workspace. `terminal_record` returned `Some(false)`, so at least one store
-/// had a readable surface; a store with neither a ledger nor a plan state
-/// cannot hold the record.
-fn writable_store(lane: &Lane) -> Option<&Path> {
-    lane.stores
-        .iter()
-        .find(|s| s.join(".edda").exists())
-        .map(PathBuf::as_path)
-}
-
-fn append_fleet_note(
-    ledger: &Ledger,
-    text: &str,
-    tags: &[String],
-    payload: serde_json::Value,
-) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let _lock = WorkspaceLock::acquire(&ledger.paths).context("acquiring workspace lock")?;
-    let branch = ledger.head_branch().context("reading HEAD branch")?;
-    let parent_hash = ledger
-        .last_event_hash()
-        .context("reading last event hash")?;
-    let (safe_text, hits) = edda_core::secret_guard::redact(text);
-    if !hits.is_empty() {
-        eprintln!(
-            "⚠ fleet watch: secret-guard redacted {} pattern(s) before writing the note",
-            hits.len()
-        );
-    }
-    let mut event = edda_core::event::new_note_event(
-        &branch,
-        parent_hash.as_deref(),
-        "fleet watch",
-        &safe_text,
-        tags,
-    )
-    .context("building note event")?;
-    event.payload[PAYLOAD_KEY] = payload;
-    // Embedding the structured payload changes the body; re-hash exactly like
-    // the conductor's phase notes do, or the append rejects the event.
-    edda_core::event::finalize_event(&mut event).context("re-finalizing note event")?;
-    ledger
-        .append_event(&event)
-        .context("appending note event")?;
-    let _ = edda_derive::rebuild_branch(ledger, &branch);
-    Ok(())
-}
-
-fn fleet_payload(action: &str, lane: &Lane, reason: Option<&str>) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "action": action,
-        "plan": lane.plan,
-        "phase": lane.phase,
-        "session_id": lane.session_id,
-        "attempt": lane.attempt,
-    });
-    if let Some(reason) = reason {
-        value["reason"] = serde_json::Value::String(reason.to_string());
-    }
-    value
-}
-
-/// Step 1 — write the terminal record.
-///
-/// The lane died; its work must not stay `Running` forever. Two writes, both
-/// into surfaces that already exist: a ledger note keyed by
-/// (plan, phase, session) — the record that makes this lane terminal for the
-/// next run — and, when the phase is still Running/Checking, the same
-/// transition `detect_stale_phases` applies on resume ("phase was running
-/// when conductor stopped"). That transition is assigned directly for the
-/// same reason `detect_stale_phases` assigns it directly: `Checking → Stale`
-/// has no edge in the state machine, so there is no `transition` call to make.
-fn write_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<bool> {
-    let reason = format!(
-        "lane {} terminated abnormally: heartbeat stale for {}s with no terminal record",
-        lane.session_id, lane.age_secs
-    );
-    let ledger = Ledger::open(store_path)?;
-    let text = format!(
-        "fleet watch: lane \"{}\" ({}/{}) terminated abnormally — {reason}",
-        lane.session_id, lane.plan, lane.phase
-    );
-    append_fleet_note(
-        &ledger,
-        &text,
-        &["fleet_watch".to_string(), "orphan".to_string()],
-        fleet_payload("terminal", lane, Some(&reason)),
-    )?;
-
-    if edda_conductor::state::persist::validate_plan_name(&lane.plan).is_err()
-        || !state_path(store_path, &lane.plan).is_file()
-    {
-        return Ok(false);
-    }
-    update_state(store_path, &lane.plan, |state| {
-        let Some(phase) = state.phases.iter_mut().find(|p| p.id == lane.phase) else {
-            return Ok(false);
-        };
-        if phase.status != PhaseStatus::Running && phase.status != PhaseStatus::Checking {
-            return Ok(false);
-        }
-        phase.status = PhaseStatus::Stale;
-        phase.error = Some(ErrorInfo {
-            error_type: ErrorType::Timeout,
-            message: "phase was running when conductor stopped; lane heartbeat expired with no \
-                      terminal record (edda fleet watch)"
-                .to_string(),
-            retryable: true,
-            check_index: None,
-            timestamp: now_rfc3339(),
-        });
-        edda_conductor::state::derive::update_plan_status(state);
-        Ok(true)
-    })
-}
-
-/// Step 2 — release the dead session's claim, if one is on the board. A
-/// session that never claimed is a no-op, so a second run writes nothing.
-fn release_claim(lane: &Lane) -> bool {
-    let Ok(claims) = crate::cmd_claim::read_active_claims(&lane.project_id) else {
-        eprintln!(
-            "⚠ fleet watch: board unreadable for project {}; claim not released",
-            lane.project_id
-        );
-        return false;
-    };
-    if !claims.iter().any(|c| c.session_id == lane.session_id) {
-        return false;
-    }
-    peers::write_unclaim(&lane.project_id, &lane.session_id);
-    true
-}
-
-/// Prior redispatches this verb recorded for (plan, phase), read back from the
-/// ledger notes themselves — the cap needs no side file.
-fn prior_redispatches(lane: &Lane) -> u32 {
-    let mut count = 0;
-    for store_path in &lane.stores {
-        let Ok(Some(ledger)) = store_ledger(store_path) else {
-            continue;
-        };
-        let Ok(events) = ledger.iter_events() else {
-            continue;
-        };
-        for event in events {
-            let Some(fw) = event.payload.get(PAYLOAD_KEY) else {
-                continue;
-            };
-            if fw.get("action").and_then(|v| v.as_str()) == Some("redispatch")
-                && fw.get("plan").and_then(|v| v.as_str()) == Some(lane.plan.as_str())
-                && fw.get("phase").and_then(|v| v.as_str()) == Some(lane.phase.as_str())
-            {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-/// Step 3a — record the redispatch and re-arm the conductor phase through the
-/// existing retry transition (Running/Checking → Stale → Pending), so the
-/// existing `edda conduct run <plan_file> --cwd <store>` resume re-runs it.
-/// Returns the resume hint, or `None` when there is no plan state to re-arm
-/// (a stateless dispatch lane), which the caller records as a stop-loss.
-fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> {
-    if !state_path(store_path, &lane.plan).is_file() {
-        return Ok(None);
-    }
-    let plan_file = update_state(store_path, &lane.plan, |state| {
-        let plan_file = state.plan_file.clone();
-        let Some(current) = state
-            .phases
-            .iter()
-            .find(|p| p.id == lane.phase)
-            .map(|p| p.status)
-        else {
-            return Ok(None);
-        };
-        // Through the state machine's own retry edges (`Stale → Pending`,
-        // `Failed → Pending`), exactly as `edda conduct retry` does: that is
-        // what clears the transient gate/verdict state and bumps the state
-        // version the runner reconciles against. A phase that is not on one of
-        // those edges (e.g. already Pending after a previous stop-loss) is
-        // left alone rather than forced.
-        if current != PhaseStatus::Stale && current != PhaseStatus::Failed {
-            return Ok(None);
-        }
-        edda_conductor::state::machine::transition(
-            state,
-            &lane.phase,
-            current,
-            PhaseStatus::Pending,
-            None,
-        )?;
-        edda_conductor::state::derive::update_plan_status(state);
-        Ok(Some(plan_file))
-    })?;
-    let Some(plan_file) = plan_file else {
-        return Ok(None);
-    };
-
-    let ledger = Ledger::open(store_path)?;
-    let text = format!(
-        "fleet watch: redispatch lane \"{}\" ({}/{}) — the phase was re-armed to Pending; \
-         read the worktree's current state and continue on top of it, do not redo it",
-        lane.session_id, lane.plan, lane.phase
-    );
-    append_fleet_note(
-        &ledger,
-        &text,
-        &["fleet_watch".to_string(), "redispatch".to_string()],
-        fleet_payload("redispatch", lane, None),
-    )?;
-
-    let plan = if plan_file.is_empty() || !Path::new(&plan_file).is_absolute() {
-        "<plan.yaml>".to_string()
-    } else {
-        plan_file
-    };
-    Ok(Some(format!(
-        "edda conduct run {plan} --cwd {}",
-        store_path.display()
-    )))
-}
-
-/// Step 3b — record why the ladder stopped.
-fn record_stop_loss(store_path: &Path, lane: &Lane, reason: &str) -> anyhow::Result<()> {
-    let ledger = Ledger::open(store_path)?;
-    let text = format!(
-        "fleet watch: stop-loss for lane \"{}\" ({}/{}): {reason}",
-        lane.session_id, lane.plan, lane.phase
-    );
-    append_fleet_note(
-        &ledger,
-        &text,
-        &["fleet_watch".to_string(), "stop_loss".to_string()],
-        fleet_payload("stop_loss", lane, Some(reason)),
-    )
-}
-
-/// Apply the planned steps to one orphan.
-fn recover(lane: &Lane, steps: &[RecoveryStep], cap: u32) -> anyhow::Result<Recovered> {
-    let mut out = Recovered {
-        session_id: lane.session_id.clone(),
-        plan: lane.plan.clone(),
-        phase: lane.phase.clone(),
-        steps: steps.to_vec(),
-        reason: None,
-        resume: None,
-        terminal_recorded: false,
-        claim_released: false,
-        redispatch_recorded: false,
-        stop_loss_recorded: false,
-    };
-    let Some(store_path) = writable_store(lane) else {
-        out.reason = Some(format!(
-            "no edda workspace among {} to record into",
-            lane.stores
-                .iter()
-                .map(|s| s.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        return Ok(out);
-    };
-    if steps.contains(&RecoveryStep::WriteTerminal) {
-        write_terminal(store_path, lane)?;
-        out.terminal_recorded = true;
-    }
-    if steps.contains(&RecoveryStep::ReleaseClaim) {
-        out.claim_released = release_claim(lane);
-    }
-    match steps.last() {
-        Some(RecoveryStep::Redispatch) => match redispatch(store_path, lane)? {
-            Some(resume) => {
-                out.redispatch_recorded = true;
-                out.resume = Some(resume);
-            }
-            None => {
-                let reason = format!(
-                    "no recorded plan/brief for {}/{}; redispatch belongs to the caller",
-                    lane.plan, lane.phase
-                );
-                record_stop_loss(store_path, lane, &reason)?;
-                out.stop_loss_recorded = true;
-                out.reason = Some(reason);
-            }
-        },
-        Some(RecoveryStep::StopLoss) => {
-            let reason = format!(
-                "redispatch cap reached ({cap} prior redispatch(es) for {}/{})",
-                lane.plan, lane.phase
-            );
-            record_stop_loss(store_path, lane, &reason)?;
-            out.stop_loss_recorded = true;
-            out.reason = Some(reason);
-        }
-        _ => {}
-    }
-    Ok(out)
-}
+mod recover;
+use recover::{prior_redispatches, recover, Recovered};
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -808,18 +512,24 @@ fn build_report(args: &WatchArgs, repo_root: &Path) -> anyhow::Result<WatchRepor
     let now = peers::liveness::now_epoch();
     let lanes = collect_lanes(repo_root);
 
-    let mut claims_by_project: BTreeMap<String, Vec<peers::ClaimEntry>> = BTreeMap::new();
+    // `None` records "this board could not be read", which is a different fact
+    // from "the board is empty": an unreadable board must not read as "nobody
+    // holds it" (the contract `read_active_claims` documents).
+    let mut claims_by_project: BTreeMap<String, Option<Vec<peers::ClaimEntry>>> = BTreeMap::new();
     for lane in &lanes {
         if claims_by_project.contains_key(&lane.project_id) {
             continue;
         }
-        let claims = crate::cmd_claim::read_active_claims(&lane.project_id).unwrap_or_else(|e| {
-            eprintln!(
-                "⚠ fleet watch: board unreadable for project {}: {e:#}",
-                lane.project_id
-            );
-            Vec::new()
-        });
+        let claims = match crate::cmd_claim::read_active_claims(&lane.project_id) {
+            Ok(claims) => Some(claims),
+            Err(e) => {
+                eprintln!(
+                    "⚠ fleet watch: board unreadable for project {}; its lanes are not judged: {e:#}",
+                    lane.project_id
+                );
+                None
+            }
+        };
         claims_by_project.insert(lane.project_id.clone(), claims);
     }
 
@@ -829,9 +539,10 @@ fn build_report(args: &WatchArgs, repo_root: &Path) -> anyhow::Result<WatchRepor
     for lane in lanes {
         let claims = claims_by_project
             .get(&lane.project_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let claimed = lane_claimed(&lane, claims, now);
+            .expect("claims were collected for every lane's project");
+        let claimed = claims
+            .as_ref()
+            .map(|claims| lane_claimed(&lane, claims, now));
         let terminal = terminal_record(&lane);
         let judged = verdict(lane.stale, terminal, claimed);
         if judged == LaneVerdict::Orphan {

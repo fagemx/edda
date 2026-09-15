@@ -58,11 +58,97 @@ fn fleet_note_total(repo: &Path) -> usize {
         .count()
 }
 
+fn fleet_note_payload(repo: &Path, action: &str) -> Option<serde_json::Value> {
+    let ledger = Ledger::open_or_init(repo).unwrap();
+    ledger.iter_events().unwrap().into_iter().find_map(|e| {
+        e.payload
+            .get(PAYLOAD_KEY)
+            .filter(|fw| fw.get("action").and_then(|a| a.as_str()) == Some(action))
+            .cloned()
+    })
+}
+
+/// Append a conductor `conductor_phase` note, the shape the runner writes on a
+/// terminal phase transition.
+fn conductor_note(repo: &Path, plan: &str, phase: &str, status: &str) {
+    let ledger = Ledger::open_or_init(repo).unwrap();
+    let branch = ledger.head_branch().unwrap();
+    let parent = ledger.last_event_hash().unwrap();
+    let tags = vec!["conductor".to_string(), format!("phase:{phase}")];
+    let mut event = edda_core::event::new_note_event(
+        &branch,
+        parent.as_deref(),
+        "conductor",
+        "phase note",
+        &tags,
+    )
+    .unwrap();
+    event.payload["conductor_phase"] = serde_json::json!({
+        "plan_id": plan,
+        "phase_id": phase,
+        "status": status,
+    });
+    edda_core::event::finalize_event(&mut event).unwrap();
+    ledger.append_event(&event).unwrap();
+}
+
+/// A coordination board that `read_active_claims` refuses to fold (an unknown
+/// event type), i.e. "unreadable", which is a different fact from "empty".
+fn write_damaged_board(project_id: &str) {
+    let _ = edda_store::ensure_dirs(project_id);
+    let dir = edda_store::project_dir(project_id).join("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("coordination.jsonl"),
+        "{\"ts\":\"2026-09-15T00:00:00Z\",\"session_id\":\"x\",\"event_type\":\"bogus\",\"payload\":{}}\n",
+    )
+    .unwrap();
+}
+
 fn repo_dir() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     tmp
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A main checkout plus one git worktree of it, the shape a conductor plan is
+/// launched from.
+fn repo_with_worktree(root: &Path) -> (PathBuf, PathBuf) {
+    let main = root.join("main");
+    let wt = root.join("wt");
+    std::fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-q"]);
+    git(&main, &["config", "user.email", "t@example.invalid"]);
+    git(&main, &["config", "user.name", "Test"]);
+    std::fs::write(main.join("README"), "seed\n").unwrap();
+    git(&main, &["add", "README"]);
+    git(&main, &["commit", "-qm", "seed"]);
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "wtbranch",
+        ],
+    );
+    (main, wt)
 }
 
 fn phase_status(repo: &Path, plan: &str, phase: &str) -> PhaseStatus {
@@ -80,12 +166,20 @@ fn phase_status(repo: &Path, plan: &str, phase: &str) -> PhaseStatus {
 
 #[test]
 fn verdict_never_infers_death_from_the_heartbeat_alone() {
-    assert_eq!(verdict(false, None, false), LaneVerdict::Live);
-    assert_eq!(verdict(false, Some(false), false), LaneVerdict::Live);
-    assert_eq!(verdict(true, Some(true), false), LaneVerdict::Finished);
-    assert_eq!(verdict(true, Some(false), true), LaneVerdict::Claimed);
-    assert_eq!(verdict(true, Some(false), false), LaneVerdict::Orphan);
-    assert_eq!(verdict(true, None, false), LaneVerdict::Unjudged);
+    assert_eq!(verdict(false, None, None), LaneVerdict::Live);
+    assert_eq!(verdict(false, Some(false), Some(false)), LaneVerdict::Live);
+    assert_eq!(
+        verdict(true, Some(true), Some(false)),
+        LaneVerdict::Finished
+    );
+    assert_eq!(verdict(true, Some(false), Some(true)), LaneVerdict::Claimed);
+    assert_eq!(verdict(true, Some(false), Some(false)), LaneVerdict::Orphan);
+    assert_eq!(verdict(true, None, Some(false)), LaneVerdict::Unjudged);
+    // An unreadable board never becomes a death verdict, and a standing claim
+    // is respected even when the terminal record is unreadable.
+    assert_eq!(verdict(true, Some(false), None), LaneVerdict::Unjudged);
+    assert_eq!(verdict(true, None, None), LaneVerdict::Unjudged);
+    assert_eq!(verdict(true, None, Some(true)), LaneVerdict::Claimed);
 }
 
 #[test]
@@ -166,6 +260,15 @@ fn watch_recovers_an_orphan_lane_and_is_idempotent() {
     .unwrap();
     assert_eq!(fleet_notes(&repo, "terminal"), 1);
     assert_eq!(fleet_notes(&repo, "redispatch"), 1);
+    // The takeover hand-off carries the worktree state it read (doneWhen 3),
+    // captured before the redispatch was recorded.
+    let redispatch = fleet_note_payload(&repo, "redispatch").expect("redispatch note");
+    assert!(
+        redispatch.get("worktree").is_some(),
+        "redispatch payload must carry the worktree state, got: {redispatch}"
+    );
+    assert_eq!(redispatch["worktree"]["dirty_files"], 0);
+    assert_eq!(redispatch["worktree"]["unpushed_commits"], 0);
     assert!(!crate::cmd_claim::read_active_claims(&project_id)
         .unwrap()
         .iter()
@@ -192,6 +295,136 @@ fn watch_recovers_an_orphan_lane_and_is_idempotent() {
         .expect("lane must be reported");
     assert_eq!(lane.verdict, LaneVerdict::Finished);
     assert_eq!(report.orphan_count, 0);
+}
+
+#[test]
+fn watch_does_not_recover_when_the_board_is_unreadable() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let project_id = edda_store::project_id(&repo);
+    let _ = Ledger::open_or_init(&repo).unwrap();
+    save_state(
+        &repo,
+        &fabricated_state("wave-board", "p1", PhaseStatus::Running),
+    )
+    .unwrap();
+    lane_heartbeat(
+        &repo,
+        "lane-board",
+        "wave-board",
+        "p1",
+        peers::stale_secs() * 10,
+        888,
+    );
+    write_damaged_board(&project_id);
+
+    let report = build_report(
+        &WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+    assert_eq!(fleet_note_total(&repo), 0);
+    assert_eq!(
+        phase_status(&repo, "wave-board", "p1"),
+        PhaseStatus::Running
+    );
+    let lane = report
+        .lanes
+        .iter()
+        .find(|l| l.session_id == "lane-board")
+        .expect("lane must be reported");
+    assert_eq!(lane.verdict, LaneVerdict::Unjudged);
+    assert_eq!(report.orphan_count, 0);
+}
+
+#[test]
+fn watch_treats_a_conductor_note_as_a_terminal_record_whatever_the_outcome() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let _ = Ledger::open_or_init(&repo).unwrap();
+    lane_heartbeat(
+        &repo,
+        "lane-note",
+        "wave-note",
+        "p1",
+        peers::stale_secs() * 10,
+        999,
+    );
+    // The conductor writes a `conductor_phase` note only on a terminal
+    // transition; `stale` is one of those records, so the work is recorded and
+    // this observer must not take it over.
+    conductor_note(&repo, "wave-note", "p1", "stale");
+
+    let report = build_report(
+        &WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+    assert_eq!(fleet_note_total(&repo), 0);
+    assert_eq!(report.orphan_count, 0);
+    let lane = report
+        .lanes
+        .iter()
+        .find(|l| l.session_id == "lane-note")
+        .expect("lane must be reported");
+    assert_eq!(lane.verdict, LaneVerdict::Finished);
+}
+
+#[test]
+fn watch_recovers_into_the_store_that_holds_the_worktree_plan_state() {
+    let _store = isolated_store();
+    let tmp = tempfile::tempdir().unwrap();
+    let (main, wt) = repo_with_worktree(tmp.path());
+    // The plan's store is an initialized workspace before the plan state is
+    // written into it, exactly as the conductor's runner leaves it.
+    let _ = Ledger::open_or_init(&main).unwrap();
+    let _ = Ledger::open_or_init(&wt).unwrap();
+    save_state(
+        &wt,
+        &fabricated_state("wave-wt", "p1", PhaseStatus::Running),
+    )
+    .unwrap();
+    // Every worktree of a repository shares one project id, so the lane's
+    // heartbeat lands in the shared project dir and BOTH stores are recovery
+    // candidates — the invocation root comes first in `candidate_stores`.
+    assert_eq!(edda_store::project_id(&main), edda_store::project_id(&wt));
+    lane_heartbeat(
+        &main,
+        "lane-wt",
+        "wave-wt",
+        "p1",
+        peers::stale_secs() * 10,
+        4321,
+    );
+
+    run(
+        WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &main,
+    )
+    .unwrap();
+
+    // The phase transition and the terminal record must land in the store that
+    // owns the plan state, not in whichever candidate store came first: a
+    // record in the invocation root would read the lane `finished` forever
+    // while the worktree phase stayed Running.
+    assert_eq!(fleet_notes(&wt, "terminal"), 1);
+    assert_eq!(fleet_notes(&wt, "redispatch"), 1);
+    assert_eq!(fleet_note_total(&main), 0);
+    assert_eq!(phase_status(&wt, "wave-wt", "p1"), PhaseStatus::Pending);
 }
 
 #[test]
