@@ -526,6 +526,20 @@ edda peers [--json]
 |--------|-------------|
 | `--json` | Output sessions, claims, requests, and acknowledgements as JSON |
 
+With `--json`, each entry in `claims` carries three fields that answer two
+different questions:
+
+| Field | Question it answers |
+|-------|---------------------|
+| `age_secs` | How long ago the claim was recorded. |
+| `stale` | Is the claim older than the **heartbeat** window (`EDDA_PEER_STALE_SECS`, 120 s)? This is a freshness flag, not a takeability flag. |
+| `blocks` | Does the claim still refuse a writer? Same claim-standing rule as `edda claim check` and `edda dispatch --owns`: `true` while the claimant's heartbeat is fresh, or while a bare `cli-*` claim is younger than `EDDA_CLAIM_TTL_SECS` (24 h); `false` once neither arm holds. Both arms are spelled out in the `### edda claim` section above. |
+
+`stale: true` with `blocks: true` is normal: a claim is written once and is not
+refreshed like a heartbeat, so between two minutes and twenty-four hours it is
+no longer fresh while it still holds its surface. Read `blocks`, not `stale`,
+to decide whether a surface is takeable (GH-1069).
+
 ```bash
 edda peers
 ```

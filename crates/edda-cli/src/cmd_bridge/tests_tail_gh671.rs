@@ -37,3 +37,10 @@ fn peer_display_label_carries_the_machine_suffix() {
         "the unidentified marker never gains a machine suffix"
     );
 }
+
+// GH-1069's test belongs beside the claim-field tests but `tests.rs` already
+// sits at its GH-779 file-length ceiling, so it is wired from this tail module
+// (which `tests.rs` already includes) rather than growing `tests.rs` by the
+// declaration a top-level include would need.
+#[path = "tests_tail_gh1069.rs"]
+mod tests_tail_gh1069;
