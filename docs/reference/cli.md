@@ -1076,14 +1076,13 @@ edda conduct abort <PLAN>        # abort a running plan
 ```
 
 `status` is a read-only view (GH-567). Alongside the plan phases it lists the
-in-flight conductor lanes observed through the shared session heartbeat — the
-same surface `edda peers` reads, so `edda dispatch`'s single-turn lane (which
-has no plan state of its own) appears with its phase, heartbeat age and pid. A
-lane whose heartbeat has aged past the shared staleness threshold while its
-plan still records the phase as active is marked `stale (no heartbeat for Xs)`;
-it is never hidden and never declared dead. Lanes are bounded to live work (a
-stale dispatch lane is a finished observation; reclamation is a separate
-concern), so the view does not grow without bound.
+conductor lanes observed through the shared session heartbeat — the same
+surface `edda peers` reads, so `edda dispatch`'s single-turn lane (which has no
+plan state of its own) appears with its phase, heartbeat age and pid. A lane
+whose heartbeat has aged past the shared staleness threshold is marked
+`stale (no heartbeat for Xs)`; it is never hidden and never declared dead.
+Reclaiming stale lane observations is a separate concern (#573); this view
+keeps them visible in the meantime.
 
 `--json` carries the same facts. Without a plan name the top-level array keeps
 its original plan rows and appends one row per lane, tagged `"kind": "lane"`

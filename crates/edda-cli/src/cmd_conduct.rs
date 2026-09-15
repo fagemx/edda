@@ -14,7 +14,6 @@ use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, update_state};
 use edda_conductor::tmux::TmuxSession;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -399,18 +398,7 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
         }
     }
 
-    // Phases the plan still records as active. A lane heartbeat that aged out
-    // for one of these is the honest "state says alive, heartbeat says else"
-    // case: show it marked stale rather than hide it or call it dead.
-    let mut active: HashSet<(String, String)> = HashSet::new();
-    for (_, _, state) in &loaded {
-        for ps in &state.phases {
-            if lane_phase_is_active(ps.status) {
-                active.insert((state.plan_name.clone(), ps.id.clone()));
-            }
-        }
-    }
-    let lanes = in_flight_lanes(repo_root, &active, plan_name);
+    let lanes = in_flight_lanes(repo_root, &plans, plan_name);
 
     if json {
         // Every machine-readable object carries `store` so same-named plans
@@ -494,17 +482,6 @@ fn store_label(store: &Path, repo_root: &Path) -> String {
     }
 }
 
-/// Phase statuses for which the plan still asserts the phase is running.
-fn lane_phase_is_active(status: PhaseStatus) -> bool {
-    matches!(
-        status,
-        PhaseStatus::Running
-            | PhaseStatus::Checking
-            | PhaseStatus::AwaitingVerdict
-            | PhaseStatus::GateTimedOut
-    )
-}
-
 /// One conductor lane's live observation (GH-567).
 struct LaneEntry {
     session_id: String,
@@ -557,27 +534,31 @@ impl<'a> From<&'a LaneEntry> for LaneJson<'a> {
     }
 }
 
-/// Collect the conductor-lane heartbeats `status` should show (GH-567).
+/// Collect the conductor-lane heartbeats `status` shows (GH-567).
 ///
 /// Read-only: enumerates the shared `SessionHeartbeat` surface (the one
-/// `edda peers` reads — one liveness format, no new store) under the same
-/// candidate store roots the plan verbs resolve, and keeps only the entries
-/// the conductor runner stamps (`plan` set; a hook-only Claude session leaves
-/// it empty). A lane is *in flight* when its heartbeat is live, or — for a
-/// conduct lane — while its plan still records the phase as active (then it
-/// is marked stale, never declared dead). A stale dispatch lane has no plan
-/// state to keep it in flight: dispatch is single-turn and stateless by
-/// recorded decision, so its aged-out heartbeat is a finished observation,
-/// and orphan reclamation is the separate concern #573 this read model must
-/// not absorb.
+/// `edda peers` reads — one liveness format, no new store) under every store
+/// root a plan may live in — the candidate stores the plan verbs resolve plus
+/// every registry-referenced store `discover_plans` followed — and keeps only
+/// the entries the conductor runner stamps (`plan` set; a hook-only Claude
+/// session leaves it empty).
+///
+/// Every such lane is shown. A live one, or one whose heartbeat aged past the
+/// shared threshold, marked `stale`. An expired lane is never dropped: the
+/// issue's whole point is that a lane which looks alive but is not stays
+/// visible as *stale*, neither hidden nor declared dead. Reclaiming the stale
+/// observations is the separate concern #573; this read model keeps them
+/// honest in the meantime.
 fn in_flight_lanes(
     repo_root: &Path,
-    active: &HashSet<(String, String)>,
+    plans: &[(String, PathBuf)],
     plan_filter: Option<&str>,
 ) -> Vec<LaneEntry> {
     let now = edda_bridge_claude::peers::liveness::now_epoch();
     let mut project_ids: Vec<String> = Vec::new();
-    for store_dir in store::candidate_stores(repo_root) {
+    let mut stores = store::candidate_stores(repo_root);
+    stores.extend(plans.iter().map(|(_, store)| store.clone()));
+    for store_dir in stores {
         let project_id = edda_store::project_id(&store_dir);
         if !project_ids.contains(&project_id) {
             project_ids.push(project_id);
@@ -612,16 +593,24 @@ fn in_flight_lanes(
             if plan_filter.is_some_and(|filter| filter != plan.as_str()) {
                 continue;
             }
+            // A heartbeat with no parseable clock is not evidence either way:
+            // do not dress a corrupt timestamp up as an expiry.
+            if time::OffsetDateTime::parse(
+                &hb.last_heartbeat,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .is_err()
+            {
+                continue;
+            }
             let phase = hb.phase.clone().unwrap_or_default();
             let (age_secs, stale) = match liveness_from_heartbeat(&hb, now) {
                 SessionLiveness::Live { age_secs } => (age_secs, false),
                 SessionLiveness::Stale { age_secs } => (age_secs, true),
-                // No timestamp to judge: not evidence of life or death.
+                // `liveness_from_heartbeat` is total over Live/Stale; this arm
+                // belongs to the file-level classifier, which we never call.
                 SessionLiveness::NoHeartbeat => continue,
             };
-            if stale && !(plan != "dispatch" && active.contains(&(plan.clone(), phase.clone()))) {
-                continue;
-            }
             lanes.push(LaneEntry {
                 session_id: hb.session_id,
                 label: hb.label,
@@ -648,7 +637,7 @@ fn render_lanes_text(lanes: &[LaneEntry]) -> String {
     if lanes.is_empty() {
         return String::new();
     }
-    let mut out = format!("\nLanes ({} in flight):\n", lanes.len());
+    let mut out = format!("\nLanes ({}):\n", lanes.len());
     for lane in lanes {
         let icon = if lane.stale { "\u{23F0}" } else { "\u{25B6}" };
         let stage = lane.stage.as_deref().unwrap_or("?");

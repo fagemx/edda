@@ -580,13 +580,12 @@ fn status_json_includes_lane_entries_with_age_and_pid() {
 }
 
 /// GH-567 bound: a dispatch lane is in flight only while its heartbeat is
-/// live. Once it ages out there is no plan state to keep it in flight
-/// (dispatch is single-turn and stateless by decision), so it is a finished
-/// observation — not resurrected on every `status` — and reclamation is the
-/// separate concern #573. A long-lived machine must not accumulate an
-/// unbounded stale lane wall.
+/// live. Once it ages out there is no plan state to keep it in flight, but the
+/// issue is explicit that an expired lane is *marked* stale rather than
+/// hidden — `discovery.rs`-style silent filtering is exactly the failure mode
+/// #567 exists to remove. Reclamation is the separate concern #573.
 #[test]
-fn status_does_not_resurrect_a_stale_dispatch_lane_with_no_plan_state() {
+fn status_shows_a_stale_dispatch_lane_marked_stale_not_hidden() {
     let _store = crate::test_support::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
@@ -595,5 +594,44 @@ fn status_does_not_resurrect_a_stale_dispatch_lane_with_no_plan_state() {
     write_lane_heartbeat(&repo, "dispatch-old", "dispatch", "setup", stale * 10, 111);
 
     let text = status_impl(&repo, None, false).unwrap();
-    assert_eq!(text.trim(), "No plans found.", "got: {text}");
+    assert!(
+        text.contains("dispatch/setup"),
+        "lane must appear, got: {text}"
+    );
+    assert!(
+        text.contains("stale (no heartbeat for"),
+        "expired lane must be marked stale, got: {text}"
+    );
+    assert!(
+        !text.to_lowercase().contains("dead"),
+        "the read model must not declare death, got: {text}"
+    );
+}
+
+/// GH-567: a named-plan `--json` query carries the same lane facts in its
+/// additive `lane_heartbeats` field, so the machine-readable contract is
+/// proven on both shapes (array and plan object).
+#[test]
+fn named_plan_json_carries_lane_heartbeats() {
+    let _store = crate::test_support::isolated_store();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    save_state(
+        &repo,
+        &fabricated_state("wave-x", "p1", PhaseStatus::Running),
+    )
+    .unwrap();
+    write_lane_heartbeat(&repo, "lane-live", "wave-x", "p1", 3, 8888);
+
+    let text = status_impl(&repo, Some("wave-x"), true).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["plan_name"], "wave-x");
+    let lanes = parsed["lane_heartbeats"]
+        .as_array()
+        .expect("lane_heartbeats array");
+    assert_eq!(lanes.len(), 1, "got: {text}");
+    assert_eq!(lanes[0]["pid"], 8888);
+    assert_eq!(lanes[0]["plan"], "wave-x");
+    assert_eq!(lanes[0]["stale"], false);
 }
