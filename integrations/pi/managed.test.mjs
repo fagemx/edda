@@ -223,6 +223,25 @@ test('run-resume waits out a just-stopped owned child instead of refusing', asyn
   assert.equal(resumed.live, true, JSON.stringify(resumed).slice(0, 240));
 });
 
+test('run-resume refuses while a prior owned child is genuinely alive', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
+  await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
+  await stopManaged(f.registry, f.runId);
+  const dir = managedDir(f.registry, f.runId);
+  const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  child.unref();
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ ...state, childPid: child.pid }));
+  try {
+    await assert.rejects(resumeManaged(f.registry, f.runId), /Previous Pi may still be alive/);
+  } finally {
+    // Restore the owned state so the fixture cleanup does not wait on this synthetic PID.
+    await writeFile(join(dir, 'state.json'), JSON.stringify(state));
+    try { child.kill(); } catch { /* already exited */ }
+  }
+});
+
 test('run-resume --runtime current re-pins a run but the default keeps the pinned runtime', async (t) => {
   const f = await fixture(t);
   await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });

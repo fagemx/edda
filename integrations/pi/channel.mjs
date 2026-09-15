@@ -134,11 +134,14 @@ export async function startChannel({ root, sessionId, cwd, label = '', deliver, 
           writeJson(join(dir, 'dependencies.json'), { ...sessionRecord, ownerRef: ref, holderSession: sessionId, sessionId,
             enabled: enrollment?.enabled === true, scope,
             scopeDigest: typeof scope === 'string' ? digest(scope) : sessionRecord.scopeDigest });
-          // Drop the migrated session snapshot so a later switch to another owner
-          // cannot re-migrate a stale baseline; the live state is the owner store.
-          rmSync(join(store.dir, 'dependencies.json'), { force: true });
         }
       }
+      // Best-effort and unconditional: drop any leftover session snapshot so a
+      // later switch to another owner cannot re-migrate a stale baseline. A
+      // transient delete failure must not abort the rebind; the next adopt
+      // retries it.
+      try { rmSync(join(store.dir, 'dependencies.json'), { force: true }); }
+      catch { /* retried on the next adopt */ }
       const prior = dependencies;
       dependencies = buildDependencies(dir, ref);
       ownerSubscription = dir; dependencyOwnerRef = ref;

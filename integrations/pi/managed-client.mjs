@@ -86,9 +86,8 @@ export async function stopManaged(root, id, { abort = false } = {}) {
   id = validateId(id);
   const { dir } = runConfig(root, id), owner = readJson(join(dir, 'owner.json'));
   const result = await runnerRequest(root, id, 'stop', { abort });
-  const deadline = Date.now() + 5000;
-  while (alive(owner?.pid) && Date.now() < deadline) await delay(50);
-  return alive(owner?.pid) ? { ...result, status: 'stop_pending', nextAction: 'Query run-status before resume; the runner is still exiting.' } : result;
+  return await previousProcessLingering(owner?.pid)
+    ? { ...result, status: 'stop_pending', nextAction: 'Query run-status before resume; the runner is still exiting.' } : result;
 }
 
 function startRunner(root, dir, config, resume) {
