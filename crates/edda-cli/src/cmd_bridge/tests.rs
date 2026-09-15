@@ -1131,7 +1131,7 @@ fn peers_json_claims_carry_staleness() {
     let _ = edda_store::ensure_dirs(&pid);
     edda_bridge_claude::peers::write_claim(&pid, "s1", "auth", &["src/auth.rs".into()]);
 
-    let json = peers_json(&pid);
+    let json = peers_json(&pid, &edda_store::project_root(repo.path()));
     let claim = &json["claims"][0];
     assert!(
         claim["age_secs"].is_u64(),
@@ -1151,7 +1151,7 @@ fn peers_json_includes_sessions_and_full_board() {
     edda_bridge_claude::peers::write_request(&pid, "s2", "billing", "auth", "need auth");
     edda_bridge_claude::peers::write_request_ack(&pid, "s1", "billing");
 
-    let json = peers_json(&pid);
+    let json = peers_json(&pid, &edda_store::project_root(repo.path()));
     assert_eq!(json["sessions"][0]["session_id"], "s1");
     assert_eq!(json["claims"][0]["label"], "auth");
     assert_eq!(json["requests"][0]["message"], "need auth");

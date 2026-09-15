@@ -151,7 +151,9 @@ pub fn unclaim(
     cli_session: Option<&str>,
     if_claimed: bool,
 ) -> anyhow::Result<()> {
-    let project_id = edda_store::project_id(repo_root);
+    let root = edda_store::project_root(repo_root);
+    let project_id = edda_store::project_id_for_root(&root);
+    let board_line = super::board_provenance_line(&project_id, &root);
     let board = edda_bridge_claude::peers::compute_board_state(&project_id);
     let session_id = match resolve_unclaim_target(cli_session, &project_id, &board.claims) {
         Ok(sid) => sid,
@@ -162,6 +164,7 @@ pub fn unclaim(
         // releases that did not happen.
         Err(e) if if_claimed => {
             println!("Released nothing: {e}");
+            println!("{board_line}");
             return Ok(());
         }
         Err(e) => return Err(e),
@@ -175,11 +178,12 @@ pub fn unclaim(
     if held.is_empty() {
         if if_claimed {
             println!("Nothing to unclaim for session {session_id}");
+            println!("{board_line}");
             return Ok(());
         }
         anyhow::bail!(
             "session {session_id} holds no claim; nothing was released.\n\
-             Pass --session with one of the ids below.\n{}",
+             Pass --session with one of the ids below.\n{}\n{board_line}",
             describe_claims(&board.claims)
         );
     }
@@ -190,6 +194,7 @@ pub fn unclaim(
         "Unclaimed scope for session: {session_id} ({})",
         labels.join(", ")
     );
+    println!("{board_line}");
     Ok(())
 }
 
