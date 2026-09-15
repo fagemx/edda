@@ -170,6 +170,33 @@ exit $LASTEXITCODE
   Assert-True ($statusOut2 -match 'delivery=complete') "lane-status reports the ordinary lane complete; output:`n$statusOut2"
   Assert-True ($statusOut2 -match 'OK') 'lane-status names the OK scheduler result'
 
+  # A lane that delivered cleanly is not retroactively slandered by an edit
+  # made in its worktree after the wrapper finished: the recorded verdict wins
+  # (review P2). A dirty tree with no checkpoint is still UNDELIVERED (case 3).
+  Set-Content -LiteralPath (Join-Path $repo2 'post-exit.txt') -Value 'edit after the lane exited'
+  $statusOut2Dirt = Invoke-LaneStatus -Name 'gh748-clean' -Wrapper $r2.Wrapper -Repo $repo2 -LogDir $logDir2 -Result 0 -State 'Ready'
+  Assert-True ($statusOut2Dirt -match 'delivery=complete') "a recorded COMPLETE checkpoint is not overridden by post-exit dirt; output:`n$statusOut2Dirt"
+
+  # --- case 2b: a failed lane that produced nothing is not "complete" -------
+  # The checkpoint exists, so a reader that checked only for its presence would
+  # collapse "exited nonzero with a clean tree" (EMPTY) into complete — the
+  # exact ambiguity GH-748 targets. The verdict, not the file, is the signal.
+  "=== case 2b: a nonzero exit with an EMPTY checkpoint is undelivered ==="
+  $repo2b = New-LaneRepo 'lane-empty'
+  $logDir2b = Join-Path $scratch 'log-empty'
+  $stub2b = Join-Path $scratch 'stub-empty'; New-Item -ItemType Directory -Force -Path $stub2b | Out-Null
+  Set-Content -LiteralPath (Join-Path $stub2b 'edda.cmd') -Encoding ascii -Value @(
+    '@echo off'
+    'echo STUB-EDDA-748'
+    'exit /b 1'
+  )
+  $r2b = Invoke-LaneLaunch -Name 'gh748-empty' -Repo $repo2b -LogDir $logDir2b -StubDir $stub2b
+  $evidence2bPath = Join-Path $logDir2b 'gh748-empty.evidence'
+  $evidence2b = if (Test-Path -LiteralPath $evidence2bPath) { Get-Content -LiteralPath $evidence2bPath -Raw } else { '' }
+  Assert-True ($evidence2b -match '(?m)^delivery=EMPTY$') "a failed clean lane records EMPTY; evidence:`n$evidence2b"
+  $statusOut2b = Invoke-LaneStatus -Name 'gh748-empty' -Wrapper $r2b.Wrapper -Repo $repo2b -LogDir $logDir2b -Result 0 -State 'Ready'
+  Assert-True ($statusOut2b -match 'delivery=UNDELIVERED') "an EMPTY checkpoint is reported undelivered, never complete; output:`n$statusOut2b"
+
   # --- case 3: a host-process kill never reaches the wrapper's finally ------
   # Two lanes died this way on 2026-09-09 with edits on disk and no commit.
   # Nothing in the lane ran its teardown, so only the worktree it left can
@@ -225,6 +252,12 @@ exit $LASTEXITCODE
   $statusOut4 = Invoke-LaneStatus -Name 'gh748-run-killed' -Wrapper $r4.Wrapper -Repo $repo4 -LogDir $logDir4 -Result 267014 -State 'Ready'
   Assert-True ($statusOut4 -match 'delivery=UNDELIVERED') "lane-status reports the killed lane undelivered; output:`n$statusOut4"
 } finally {
+  # The GH748_* variables are process-wide; clear them so a caller that dot-
+  # sources this fixture (or a later test in the same session) never inherits
+  # a stale lane path.
+  foreach ($v in @('GH748_LAUNCH','GH748_NAME','GH748_BRIEF','GH748_REPO','GH748_LOG','GH748_WRAPPER','GH748_STATUS','GH748_TASK','GH748_STATE','GH748_RESULT','GH748_LANE')) {
+    Remove-Item -Path "Env:$v" -ErrorAction SilentlyContinue
+  }
   Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
 if ($failures.Count) { "RESULT: FAIL ($($failures.Count))"; exit 1 }

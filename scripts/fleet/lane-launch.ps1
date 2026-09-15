@@ -77,7 +77,7 @@
 # real process (Start-Sleep 20) in place of the agent, proves the task
 # process's parent is the Task Scheduler service (svchost.exe, doneWhen 3),
 # then unregisters. No agent spend. Every dry-run artifact is named
-# `$Name.dryrun*` inside -LogDir (log, done-file, wrapper, brief) — the real
+# `$Name.dryrun*` inside -LogDir (log, done-file, wrapper, brief, evidence) — the real
 # lane's `$Name.log` and `$Name.done` are never touched, so a real launch
 # after a dry run starts with a clean log and no stale done-file. That
 # namespace is why any -Name containing the dryrun segment is rejected by

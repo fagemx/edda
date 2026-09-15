@@ -20,12 +20,14 @@
 # log can be empty. `done=False lastTaskResult=267014` then read exactly like
 # a lane still working, and three lanes that had run every gate were read as
 # never having run. The field is derived from the worktree the lane owned:
-#   complete     — a terminal receipt exists and no work is unpushed or dirty
+#   complete     — an evidence checkpoint recorded COMPLETE, or (legacy) a
+#                  terminal receipt exists with no unpushed or dirty work
 #   pending      — the task is still Running
 #   not-started  — registered, never run (SCHED_S_TASK_HAS_NOT_RUN)
-#   UNDELIVERED  — the lane ended (or its registration is dead) with an
-#                  unpushed commit or a dirty worktree, or with no receipt:
-#                  whatever it did was never handed over
+#   UNDELIVERED  — the checkpoint recorded anything else (UNDELIVERED/EMPTY),
+#                  or there is no checkpoint and the registration is dead with
+#                  an unpushed commit, a dirty worktree, or no receipt:
+#                  whatever the lane did was never handed over
 # The evidence checkpoint the wrapper writes ($LogDir/<lane>.evidence) is
 # reported as `evidence=` so the failure is diagnosable after the task is
 # unregistered; the raw scheduler code is named, not left bare.
@@ -189,10 +191,23 @@ foreach ($t in $tasks) {
   $resultCode = [long]$info.LastTaskResult
   $resultName = TaskResultName $resultCode
   $resultText = if ($resultName) { "$resultCode($resultName)" } else { "$resultCode" }
+  # The checkpoint records what the lane's own teardown saw, so trust it over
+  # the live worktree: a lane that delivered cleanly and was dirtied afterwards
+  # is still delivered, and a lane whose checkpoint recorded EMPTY (nonzero
+  # exit, clean tree) must not collapse into complete just because the
+  # checkpoint exists (GH-748 review P1).
+  $evidenceVerdict = ''
+  if ($evidenceExists) {
+    $verdictMatch = Select-String -LiteralPath $evidence -Pattern '^delivery=(\S+)\s*$' | Select-Object -First 1
+    if ($verdictMatch) { $evidenceVerdict = $verdictMatch.Matches[0].Groups[1].Value }
+  }
   $delivery = 'unknown'
   if ($t.State -eq 'Running') { $delivery = 'pending' }
+  elseif ($evidenceVerdict) {
+    if ($evidenceVerdict -eq 'COMPLETE') { $delivery = 'complete' } else { $delivery = 'UNDELIVERED' }
+  }
   elseif ($dirty -gt 0 -or $unpushed -gt 0) { $delivery = 'UNDELIVERED' }
-  elseif ($doneExists -or $evidenceExists) { $delivery = 'complete' }
+  elseif ($doneExists) { $delivery = 'complete' }
   elseif ($resultCode -eq 267011) { $delivery = 'not-started' }
   elseif ($resultCode -eq 267009) { $delivery = 'pending' }
   elseif ($resultName) { $delivery = "UNDELIVERED($resultName)" }
