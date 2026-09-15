@@ -1069,11 +1069,31 @@ Multi-phase AI plan conductor.
 
 ```bash
 edda conduct run <PLAN.yaml>     # run a plan
-edda conduct status              # show running/completed plans
+edda conduct status              # show plans and conductor lanes
 edda conduct retry <PLAN>        # reset a failed phase
 edda conduct skip <PLAN>         # skip a phase
 edda conduct abort <PLAN>        # abort a running plan
 ```
+
+`status` is a read-only view (GH-567). Alongside the plan phases it lists the
+conductor lanes observed through the shared session heartbeat — the same
+surface `edda peers` reads, so `edda dispatch`'s single-turn lane (which has no
+plan state of its own) appears with its phase, heartbeat age and pid. A lane
+whose heartbeat has aged past the shared staleness threshold is marked
+`stale (no heartbeat for Xs)` and is never hidden. When the lane's plan records
+that phase's status the stale line names it (e.g. `stale (phase Passed; ...)`),
+so a finished phase is distinguishable from a lane with no terminal state — the
+issue's suspected-death case. The text line prints the status in Rust `Debug`
+form (`Passed`); the JSON field carries the serde `snake_case` value (`passed`). Reclaiming stale lane observations is a separate
+concern (#573); this view keeps them visible in the meantime.
+
+`--json` carries the same facts. Without a plan name the top-level array keeps
+its original plan rows and appends one row per lane, tagged `"kind": "lane"`
+(`session_id`, `label`, `plan`, `phase`, `phase_status` (snake_case, omitted
+when no plan records that phase or two same-named plans disagree), `stage`,
+`attempt`, `pid`, `age_secs`, `stale`, `last_heartbeat`). With a plan name the
+plan object gains an additive
+`lane_heartbeats` array; every pre-existing field path is unchanged.
 
 ### `edda return`
 
