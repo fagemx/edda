@@ -16,6 +16,9 @@ use clap::Subcommand;
 use serde::Deserialize;
 use std::path::Path;
 
+#[path = "cmd_fleet_reclaim.rs"]
+pub mod reclaim;
+
 /// Server-side caps on the `gh` list queries.
 const PR_CAP: u64 = 200;
 const ISSUE_CAP: u64 = 300;
@@ -43,6 +46,10 @@ pub enum FleetCmd {
         #[command(flatten)]
         args: crate::cmd_fleet_order::OrderArgs,
     },
+    /// Reclaim merged, clean worktrees and branches, fail-closed (GH-1093)
+    ///
+    /// Exit: 0 ran; 2 usage; 3 PR table unreadable; 4 post-delete re-read unverified.
+    Reclaim(reclaim::ReclaimArgs),
 }
 
 /// Path class assigned by `classify_path` / `classify_paths`.
@@ -584,6 +591,7 @@ pub fn run(cmd: FleetCmd, repo_root: &Path) -> anyhow::Result<()> {
     match cmd {
         FleetCmd::Health { window, json, line } => run_health(window, json, line, repo_root),
         FleetCmd::Order { args } => crate::cmd_fleet_order::run(args, repo_root),
+        FleetCmd::Reclaim(args) => reclaim::run(args, repo_root),
     }
 }
 
