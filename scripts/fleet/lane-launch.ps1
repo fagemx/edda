@@ -587,7 +587,14 @@ $wrapperText = $wrapperText.Replace('__IDENTITY_ENV__', $identityEnv)
 $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)).Replace('__EVIDENCE__', (PsQuote $Evidence)) |
   Set-Content -LiteralPath $Wrapper -Encoding utf8
 
-Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
+# A relaunch under the same name must not inherit the previous run's terminal
+# artifacts (GH-748 review P1): a stale .evidence recorded COMPLETE would
+# otherwise outrank the new run's dirty worktree in lane-status, and a stale
+# log's '=== EXIT' would contradict the LANE_START-without-EXIT killed
+# convention that a killed run is meant to leave.
+Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $Evidence -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $Log -ErrorAction SilentlyContinue
 $registered = $false
 $scheduledActionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`""
 $registrationDescription = "edda lane registration $([guid]::NewGuid().ToString('N'))"

@@ -234,9 +234,16 @@ exit $LASTEXITCODE
       -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $r4.Wrapper) `
       -PassThru -WindowStyle Hidden
     Start-Sleep -Seconds 6
+    # Seed the closure from processes whose command line names this wrapper —
+    # the same evidence lane-status uses — rather than trusting the
+    # Start-Process handle's PID, which a busy runner may have recycled
+    # (review P2). Descend from confirmed seeds only.
     $procs = @(Get-CimInstance Win32_Process)
     $tree = [System.Collections.Generic.List[int]]::new()
-    [void]$tree.Add([int]$proc.Id)
+    foreach ($seedProc in @($procs | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($r4.Wrapper) })) {
+      [void]$tree.Add([int]$seedProc.ProcessId)
+    }
+    if ($tree.Count -eq 0 -and $proc) { [void]$tree.Add([int]$proc.Id) }
     for ($i = 0; $i -lt $tree.Count; $i++) {
       foreach ($p in $procs) {
         if ([int]$p.ParentProcessId -eq $tree[$i] -and -not $tree.Contains([int]$p.ProcessId)) { [void]$tree.Add([int]$p.ProcessId) }
@@ -251,6 +258,52 @@ exit $LASTEXITCODE
   Assert-True ($killedLog -notmatch '=== EXIT') 'the kill happened before the terminal receipt, as the fixture intends'
   $statusOut4 = Invoke-LaneStatus -Name 'gh748-run-killed' -Wrapper $r4.Wrapper -Repo $repo4 -LogDir $logDir4 -Result 267014 -State 'Ready'
   Assert-True ($statusOut4 -match 'delivery=UNDELIVERED') "lane-status reports the killed lane undelivered; output:`n$statusOut4"
+
+  # --- case 5: a relaunch does not inherit the previous run's verdict -------
+  # A stale .evidence recording COMPLETE would otherwise outrank the new run's
+  # dirty worktree in lane-status and report a killed relaunch as delivered
+  # (review P1). The real launch must clear the terminal artifacts first.
+  "=== case 5: a relaunch clears the previous run's evidence ==="
+  $repo5 = New-LaneRepo 'lane-relaunch'
+  $logDir5 = Join-Path $scratch 'log-relaunch'
+  $stub5ok = Join-Path $scratch 'stub-relaunch-ok'; New-Item -ItemType Directory -Force -Path $stub5ok | Out-Null
+  Set-Content -LiteralPath (Join-Path $stub5ok 'edda.cmd') -Encoding ascii -Value @('@echo off', 'echo STUB-EDDA-748', 'exit /b 0')
+  $r5a = Invoke-LaneLaunch -Name 'gh748-relaunch' -Repo $repo5 -LogDir $logDir5 -StubDir $stub5ok
+  $evidence5 = Join-Path $logDir5 'gh748-relaunch.evidence'
+  Assert-True ((Test-Path -LiteralPath $evidence5) -and ((Get-Content -LiteralPath $evidence5 -Raw) -match '(?m)^delivery=COMPLETE$')) 'the first run records a COMPLETE checkpoint'
+  # Relaunch the SAME name with a dirtying, sleeping stub, then kill it before
+  # its finally block: no new checkpoint is written, so only the stale one
+  # could lie.
+  $stub5kill = Join-Path $scratch 'stub-relaunch-kill'; New-Item -ItemType Directory -Force -Path $stub5kill | Out-Null
+  Set-Content -LiteralPath (Join-Path $stub5kill 'edda.cmd') -Encoding ascii -Value @(
+    '@echo off'
+    'echo STUB-EDDA-748-RUNNING'
+    'echo leftover>dirty.txt'
+    'ping -n 60 127.0.0.1 >nul'
+  )
+  $r5b = Invoke-LaneLaunch -Name 'gh748-relaunch' -Repo $repo5 -LogDir $logDir5 -StubDir $stub5kill -GenerateOnly
+  Assert-True (-not (Test-Path -LiteralPath $evidence5)) 'the relaunch removes the previous run evidence before starting'
+  $oldPath5 = $env:PATH
+  $env:PATH = "$stub5kill;$env:PATH"
+  try {
+    $proc5 = Start-Process -FilePath (Get-Command pwsh.exe).Source `
+      -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $r5b.Wrapper) `
+      -PassThru -WindowStyle Hidden
+    Start-Sleep -Seconds 6
+    $procs5 = @(Get-CimInstance Win32_Process)
+    $tree5 = [System.Collections.Generic.List[int]]::new()
+    foreach ($seedProc5 in @($procs5 | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($r5b.Wrapper) })) { [void]$tree5.Add([int]$seedProc5.ProcessId) }
+    if ($tree5.Count -eq 0 -and $proc5) { [void]$tree5.Add([int]$proc5.Id) }
+    for ($i = 0; $i -lt $tree5.Count; $i++) {
+      foreach ($p in $procs5) {
+        if ([int]$p.ParentProcessId -eq $tree5[$i] -and -not $tree5.Contains([int]$p.ProcessId)) { [void]$tree5.Add([int]$p.ProcessId) }
+      }
+    }
+    foreach ($killedId5 in $tree5) { Stop-Process -Id $killedId5 -Force -ErrorAction SilentlyContinue }
+  } finally { $env:PATH = $oldPath5 }
+  Start-Sleep -Seconds 1
+  $statusOut5 = Invoke-LaneStatus -Name 'gh748-relaunch' -Wrapper $r5b.Wrapper -Repo $repo5 -LogDir $logDir5 -Result 267014 -State 'Ready'
+  Assert-True ($statusOut5 -match 'delivery=UNDELIVERED') "a killed relaunch with a dirty worktree is undelivered, not complete; output:`n$statusOut5"
 } finally {
   # The GH748_* variables are process-wide; clear them so a caller that dot-
   # sources this fixture (or a later test in the same session) never inherits
