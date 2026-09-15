@@ -13,11 +13,42 @@
 # gone/reused flag a registration whose wrapper can never run its completion
 # unregister — a stale registration the reaper (scripts/fleet/lane-reap.ps1)
 # can collect.
+#
+# `delivery` answers the one question the raw fields cannot (GH-748): a lane
+# that was killed at its timeout, or whose host process exited, never reached
+# its wrapper's finally block, so it published no terminal receipt and the
+# log can be empty. `done=False lastTaskResult=267014` then read exactly like
+# a lane still working, and three lanes that had run every gate were read as
+# never having run. The field is derived from the worktree the lane owned:
+#   complete     — a terminal receipt exists and no work is unpushed or dirty
+#   pending      — the task is still Running
+#   not-started  — registered, never run (SCHED_S_TASK_HAS_NOT_RUN)
+#   UNDELIVERED  — the lane ended (or its registration is dead) with an
+#                  unpushed commit or a dirty worktree, or with no receipt:
+#                  whatever it did was never handed over
+# The evidence checkpoint the wrapper writes ($LogDir/<lane>.evidence) is
+# reported as `evidence=` so the failure is diagnosable after the task is
+# unregistered; the raw scheduler code is named, not left bare.
 # Exit codes: 0 = reported (found at least one lane), 1 = no matching task.
 param(
   [string]$Name = '',
   [string]$LogDir = "$env:TEMP\edda-lanes"
 )
+
+# The scheduler result codes a fleet lane meets. A bare 267014 is unreadable:
+# the name is the difference between "still working" and "killed without
+# delivering" (GH-748). [long] because LastTaskResult is a CIM System.UInt32
+# and ERROR_FILE_NOT_FOUND (2147942402) overflows Int32.
+function TaskResultName([long]$Code) {
+  switch ($Code) {
+    0          { 'OK' }
+    267009     { 'SCHED_S_TASK_RUNNING' }
+    267011     { 'SCHED_S_TASK_HAS_NOT_RUN' }
+    267014     { 'SCHED_S_TASK_TERMINATED' }
+    2147942402 { 'ERROR_FILE_NOT_FOUND' }
+    default    { '' }
+  }
+}
 
 $tasks = if ($Name) {
   $cand = @("edda-$Name", "edda-lane-$Name", $Name)
@@ -71,19 +102,35 @@ foreach ($t in $tasks) {
     $cleanBase = $base -replace '-lane$', ''
     $log = if (Test-Path -LiteralPath "$cleanBase.log") { "$cleanBase.log" } elseif (Test-Path -LiteralPath "$base.log") { "$base.log" } else { "$cleanBase.log" }
     $done = if (Test-Path -LiteralPath "$cleanBase.done") { "$cleanBase.done" } elseif (Test-Path -LiteralPath "$base.done") { "$base.done" } else { "$cleanBase.done" }
+    $evidence = if (Test-Path -LiteralPath "$cleanBase.evidence") { "$cleanBase.evidence" } elseif (Test-Path -LiteralPath "$base.evidence") { "$base.evidence" } else { "$cleanBase.evidence" }
   } else {
     $lane = $t.TaskName -replace '^edda-lane-', '' -replace '^edda-', ''
     $log = Join-Path $LogDir "$lane.log"
     $done = Join-Path $LogDir "$lane.done"
+    $evidence = Join-Path $LogDir "$lane.evidence"
   }
 
   $logBytes = if ($log -and (Test-Path -LiteralPath $log)) { (Get-Item -LiteralPath $log).Length } else { 0 }
   $doneExists = if ($done) { Test-Path -LiteralPath $done } else { $false }
+  $evidenceExists = if ($evidence) { Test-Path -LiteralPath $evidence } else { $false }
   $cwd = if ($t.Actions -and $t.Actions.Count -gt 0) { $t.Actions[0].WorkingDirectory } else { '' }
   $head = '-'
+  $dirty = 0
+  $unpushed = 0
   if ($cwd -and (Test-Path -LiteralPath $cwd)) {
     $h = & git -C $cwd rev-parse --short HEAD 2>$null
     if ($LASTEXITCODE -eq 0 -and $h) { $head = $h }
+    # GH-748: the worktree itself is the evidence. A lane whose process died
+    # before any teardown still left its edits on disk; report them as
+    # undelivered instead of "done=False".
+    $dirty = @(& git -C $cwd status --porcelain=v1 --untracked-files=all 2>$null).Count
+    $branch = & git -C $cwd rev-parse --abbrev-ref HEAD 2>$null
+    if ($branch -and $branch -ne 'HEAD') {
+      $upstream = & git -C $cwd rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null
+      if (-not $upstream -and (& git -C $cwd rev-parse --verify --quiet "origin/$branch" 2>$null)) { $upstream = "origin/$branch" }
+      if ($upstream) { $unpushed = [int](& git -C $cwd rev-list --count "$upstream..HEAD" 2>$null) }
+      else { $unpushed = [int](& git -C $cwd rev-list --count 'origin/main..HEAD' 2>$null) }
+    }
   }
 
   # Live process count: traverse wrapper, brief, and their full descendant trees (GH-712 P1-3)
@@ -139,7 +186,19 @@ foreach ($t in $tasks) {
     $liveProcs = $liveSet.Count
   }
 
-  "{0} state={1} lastTaskResult={2} logBytes={3} done={4} head={5} cwd={6} liveProcs={7} controller={8}" -f `
-    $t.TaskName, $t.State, $info.LastTaskResult, $logBytes, $doneExists, $head, $cwd, $liveProcs, $controller
+  $resultCode = [long]$info.LastTaskResult
+  $resultName = TaskResultName $resultCode
+  $resultText = if ($resultName) { "$resultCode($resultName)" } else { "$resultCode" }
+  $delivery = 'unknown'
+  if ($t.State -eq 'Running') { $delivery = 'pending' }
+  elseif ($dirty -gt 0 -or $unpushed -gt 0) { $delivery = 'UNDELIVERED' }
+  elseif ($doneExists -or $evidenceExists) { $delivery = 'complete' }
+  elseif ($resultCode -eq 267011) { $delivery = 'not-started' }
+  elseif ($resultCode -eq 267009) { $delivery = 'pending' }
+  elseif ($resultName) { $delivery = "UNDELIVERED($resultName)" }
+  else { $delivery = "UNDELIVERED(result=$resultCode)" }
+
+  "{0} state={1} lastTaskResult={2} logBytes={3} done={4} delivery={5} evidence={6} head={7} cwd={8} liveProcs={9} controller={10}" -f `
+    $t.TaskName, $t.State, $resultText, $logBytes, $doneExists, $delivery, $evidenceExists, $head, $cwd, $liveProcs, $controller
 }
 exit 0
