@@ -580,7 +580,10 @@ fn unreadable_liveness_fails_closed() {
         err.contains("live peer state unavailable"),
         "missing warning: {err}"
     );
-    assert!(!text.contains("\tRECLAIM\t"), "a RECLAIM survived: {text}");
+    assert!(
+        !text.lines().any(|line| line.starts_with("RECLAIM\t")),
+        "a RECLAIM survived: {text}"
+    );
 
     let applied = f.run_cfg(&["--apply"], &f.prs, &f.empty_peers, "1", None);
     assert_eq!(code_of(&applied), 0, "stderr: {}", stderr_of(&applied));
@@ -605,7 +608,10 @@ fn unparseable_liveness_fails_closed() {
         "KEEP",
         "liveness-unreadable",
     );
-    assert!(!text.contains("\tRECLAIM\t"), "a RECLAIM survived: {text}");
+    assert!(
+        !text.lines().any(|line| line.starts_with("RECLAIM\t")),
+        "a RECLAIM survived: {text}"
+    );
 
     let applied = f.run_cfg(&["--apply"], &f.prs, &garbage, "0", None);
     assert_eq!(code_of(&applied), 0);
@@ -685,7 +691,9 @@ fn apply_removes_exactly_the_reclaim_set_then_is_a_noop() {
     let second_text = stdout_of(&second);
     assert_eq!(code_of(&second), 0, "stderr: {}", stderr_of(&second));
     assert!(
-        !second_text.contains("\tRECLAIM\t"),
+        !second_text
+            .lines()
+            .any(|line| line.starts_with("RECLAIM\t")),
         "second pass found candidates:\n{second_text}"
     );
     assert!(f.wpath("wt-merged-dirty").is_dir() && f.wpath("wt-open").is_dir());
@@ -815,5 +823,52 @@ exec "$REAL_GIT" "$@"
     assert!(
         err.contains("KEPT remote branch\torigin/verify-fail\tunverified"),
         "no unverified/KEPT line: {err}"
+    );
+}
+
+#[test]
+fn failed_local_ref_read_aborts_before_branch_deletion() {
+    // The shell ran `git for-each-ref` as a direct command, so `set -e` aborted
+    // the run there; the typed verb matches that abort instead of continuing
+    // with an empty local table. Branch deletion never starts, so no local or
+    // remote receipt is printed.
+    let f = Fixture::new();
+    let shim_dir = f.base.join("git-shim-ref");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let shim_git = stub(
+        &shim_dir,
+        "git",
+        r#"@echo off
+if not "%~1"=="for-each-ref" goto passthrough
+echo git shim: for-each-ref failed 1>&2
+exit /b 128
+:passthrough
+"%REAL_GIT%" %*
+exit /b %ERRORLEVEL%
+"#,
+        r#"#!/bin/sh
+if [ "$1" = for-each-ref ]; then
+  echo 'git shim: for-each-ref failed' >&2
+  exit 128
+fi
+exec "$REAL_GIT" "$@"
+"#,
+    );
+
+    let out = f.run_cfg(&["--apply"], &f.prs, &f.empty_peers, "0", Some(&shim_git));
+    let text = stdout_of(&out);
+    let err = stderr_of(&out);
+    assert_ne!(code_of(&out), 0, "expected a non-zero abort: {text}");
+    assert!(
+        has_local(&f.repo, "merged-clean") && has_remote(&f.repo, "merged-clean"),
+        "a ref was deleted despite an unreadable local table:\n{text}"
+    );
+    assert!(
+        !text.contains("reclaimed local branch") && !text.contains("reclaimed remote branch"),
+        "a deletion receipt was printed despite an unreadable local table:\n{text}"
+    );
+    assert!(
+        err.contains("for-each-ref failed"),
+        "no abort reason on stderr: {err}"
     );
 }

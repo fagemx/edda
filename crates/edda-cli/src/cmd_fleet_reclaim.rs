@@ -182,10 +182,13 @@ impl PrIndex {
     }
 
     pub fn lookup(&self, branch: &str) -> PrLookup<'_> {
-        match self.count(branch) {
-            0 => PrLookup::NoPr,
-            1 => PrLookup::Single(self.first.get(branch).expect("counted row")),
-            _ => PrLookup::Ambiguous,
+        // `first` is the source of truth for "a row was recorded"; the count
+        // only distinguishes a unique row from a reused name. Reading it this
+        // way keeps the function panic-free without an unreachable branch.
+        match self.first.get(branch) {
+            None => PrLookup::NoPr,
+            Some(row) if self.count(branch) == 1 => PrLookup::Single(row),
+            Some(_) => PrLookup::Ambiguous,
         }
     }
 }
@@ -698,7 +701,12 @@ impl Ctx<'_> {
     }
 
     fn branch_pass(&self, reclaimed_worktrees: &[WtReclaim]) -> (Vec<BrReclaim>, Vec<BrReclaim>) {
-        let mut checked_out: HashSet<String> = parse_worktrees(&worktree_list_raw(self.root))
+        // The shell read this set through a pipeline (`git worktree list | sed`),
+        // so a failed read was tolerated there — keep that tolerance, unlike the
+        // first read in `run`, which the shell's `set -e` aborted on.
+        let mut checked_out: HashSet<String> = worktree_list_raw(self.root)
+            .map(|bytes| parse_worktrees(&bytes))
+            .unwrap_or_default()
             .into_iter()
             .filter_map(|entry| entry.branch)
             .collect();
@@ -706,8 +714,18 @@ impl Ctx<'_> {
             checked_out.remove(&reclaim.branch);
         }
 
+        // `git for-each-ref` was a direct command in the shell: `set -e` aborts
+        // the whole run when it fails, so branch deletion never starts. Mirror
+        // that abort rather than continuing with an empty local table.
+        let local = match collect_local_refs(self.root) {
+            Ok(rows) => rows,
+            Err(detail) => {
+                eprintln!("reclaim-merged: git for-each-ref failed — {detail}");
+                std::process::exit(1);
+            }
+        };
         let mut union: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
-        for (name, tip) in collect_local_refs(self.root) {
+        for (name, tip) in local {
             union.entry(name).or_default().0 = Some(tip);
         }
         for (name, sha) in self.remote {
@@ -808,33 +826,37 @@ fn tree_state(path: &str, root: &Path) -> TreeState {
     }
 }
 
-fn worktree_list_raw(root: &Path) -> Vec<u8> {
-    Command::new(git_binary())
+fn worktree_list_raw(root: &Path) -> Result<Vec<u8>, String> {
+    let out = Command::new(git_binary())
         .args(["worktree", "list", "--porcelain"])
         .current_dir(root)
         .output()
-        .map(|out| out.stdout)
-        .unwrap_or_default()
+        .map_err(|err| err.to_string())?;
+    if !out.status.success() {
+        return Err(first_line(&out.stderr));
+    }
+    Ok(out.stdout)
 }
 
-fn collect_local_refs(root: &Path) -> Vec<(String, String)> {
+fn collect_local_refs(root: &Path) -> Result<Vec<(String, String)>, String> {
     let format = "%(refname:short)\t%(objectname)".to_string();
-    match Command::new(git_binary())
+    let out = Command::new(git_binary())
         .args(["for-each-ref", &format!("--format={format}"), "refs/heads"])
         .current_dir(root)
         .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split('\t');
-                let name = fields.next()?;
-                let tip = fields.next()?;
-                Some((name.to_string(), tip.to_string()))
-            })
-            .collect(),
-        _ => Vec::new(),
+        .map_err(|err| err.to_string())?;
+    if !out.status.success() {
+        return Err(first_line(&out.stderr));
     }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let name = fields.next()?;
+            let tip = fields.next()?;
+            Some((name.to_string(), tip.to_string()))
+        })
+        .collect())
 }
 
 fn default_branch(root: &Path) -> String {
@@ -1054,7 +1076,16 @@ pub fn run(args: ReclaimArgs, repo_root: &Path) -> anyhow::Result<()> {
             .current_dir(&root)
             .output(),
     );
-    let worktrees = parse_worktrees(&worktree_list_raw(&root));
+    // The shell ran `git worktree list --porcelain >...` directly, so `set -e`
+    // aborted the run when it failed. An unreadable worktree table means the
+    // checkout state is unknown; aborting reclaims nothing, like the shell.
+    let worktrees = match worktree_list_raw(&root) {
+        Ok(bytes) => parse_worktrees(&bytes),
+        Err(detail) => {
+            eprintln!("reclaim-merged: git worktree list failed — {detail}");
+            std::process::exit(1);
+        }
+    };
     let live = interpret_peers(
         Command::new(peers_binary())
             .args(["peers", "--json"])
