@@ -66,6 +66,7 @@ mod cmd_watch;
 mod control_effect_pipeline_tests;
 mod detached_dispatch;
 mod dispatch_claim;
+mod env;
 mod fleet;
 mod pipeline_templates;
 #[cfg(test)]

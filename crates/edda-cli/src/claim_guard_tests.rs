@@ -205,3 +205,21 @@ fn fetch_fails_closed_when_gh_is_missing() {
     }
     assert!(result.is_err());
 }
+
+#[test]
+fn resolve_machine_prefers_the_explicit_flag_over_the_env_seam() {
+    let _env = crate::env::test_config_guard(&[("EDDA_MACHINE", Some("gh1126-env"))]);
+    assert_eq!(resolve_machine(Some("4090/worker-1")), "4090/worker-1");
+}
+
+#[test]
+fn resolve_machine_falls_back_to_the_env_seam() {
+    let _env = crate::env::test_config_guard(&[("EDDA_MACHINE", Some("gh1126-env"))]);
+    assert_eq!(resolve_machine(None), "gh1126-env");
+}
+
+#[test]
+fn resolve_machine_is_empty_when_absent() {
+    let _env = crate::env::test_config_guard(&[("EDDA_MACHINE", None)]);
+    assert_eq!(resolve_machine(None), "");
+}
