@@ -228,6 +228,27 @@ pub enum BackoffStrategy {
     Exponential,
 }
 
+/// GH-994: hard ceiling on the plan-authored attempt ladder.
+///
+/// `max_attempts` is plan-authored, and the D6 verdict-gate budget
+/// (`runner::gate::MAX_GATE_REDISPATCHES`, 3) is PER ATTEMPT because
+/// `PhaseState::begin_attempt` clears `gate_redispatches` on every
+/// auto-retry into a new dispatch, not only on a deliberate `conduct retry`.
+/// The phase-lifetime redispatch total is therefore a *product* — 3 per
+/// gate-reaching dispatch, for `max_attempts` plus the environmental-retry
+/// budget — so without a ceiling the plan file could re-open the loop the
+/// bound exists to kill: `max_attempts: 99` reaches 294 redispatch cycles,
+/// above the 176-cycle D6 loop measured on `main`.
+///
+/// `plan::parser::validate_plan` rejects a plan or phase whose `max_attempts`
+/// exceeds this, so the product stays bounded by a constant the plan cannot
+/// move. This is a validated worst-case bound, not a doc comment: the GH-994
+/// audit found the previous "cannot be re-opened from the plan file"
+/// justification was false. Operator action (`conduct retry`) is deliberately
+/// outside the bound — a human reopening a failed phase is not a
+/// plan-authored budget.
+pub const MAX_ATTEMPTS_CEILING: u32 = 16;
+
 fn default_max_attempts() -> u32 {
     3
 }

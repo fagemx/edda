@@ -114,7 +114,34 @@ impl ReadErrorTracker {
 /// ATTEMPT — a scope claim that was false until GH-752, since nothing reset
 /// the counter; `PhaseState::begin_attempt` now does, and its doc carries the
 /// cost of the old per-lifetime budget and the GH-540 refund ruling.
+///
+/// GH-994: because the counter is per attempt, the phase-lifetime total is a
+/// PRODUCT, not this constant. The dispatches that can reach the gate are
+/// bounded by the validated `MAX_ATTEMPTS_CEILING` (see `plan::parser`)
+/// plus the environmental-retry budget (`runner::outcome::MAX_ENV_RETRIES`);
+/// the checked product is `MAX_PHASE_REDISPATCHES` below. Before that
+/// ceiling, a plan-authored `max_attempts: 99` reached 294 redispatch
+/// cycles — above the 176-cycle loop this constant exists to kill.
 pub(super) const MAX_GATE_REDISPATCHES: u32 = 3;
+
+/// The measured D6 runaway: the unbounded `(subject, gate_sha)` re-approval
+/// loop reached this many redispatch cycles before D6 killed it. The
+/// validated ceiling keeps `MAX_PHASE_REDISPATCHES` below it.
+pub(super) const D6_MEASURED_LOOP_CYCLES: u32 = 176;
+
+/// GH-994: worst-case verdict-gate redispatch cycles one phase can accumulate
+/// without operator action — `MAX_GATE_REDISPATCHES` per gate-reaching
+/// dispatch, where the dispatch count is the validated `max_attempts`
+/// ceiling plus the environmental retries. `plan::parser::validate_plan`
+/// keeps a plan from authoring more; the const assertion keeps the constant
+/// below `D6_MEASURED_LOOP_CYCLES`.
+pub(crate) const MAX_PHASE_REDISPATCHES: u32 = MAX_GATE_REDISPATCHES
+    * (crate::plan::schema::MAX_ATTEMPTS_CEILING + super::outcome::MAX_ENV_RETRIES + 1);
+
+const _: () = assert!(
+    MAX_PHASE_REDISPATCHES < D6_MEASURED_LOOP_CYCLES,
+    "the validated phase-lifetime redispatch bound must stay below the measured D6 runaway"
+);
 
 /// `<plan-name>/<phase-id>` — the subject an `edda verdict` targets (D1/D3).
 pub(super) fn gate_subject(plan_name: &str, phase_id: &str) -> String {
@@ -1017,4 +1044,34 @@ pub(super) async fn settle_gated_phase(
     event_log::write_runner_status(cwd, state, Some(&gated_id));
     write_brief(cwd, state, None);
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::schema::MAX_ATTEMPTS_CEILING;
+    use crate::runner::outcome::MAX_ENV_RETRIES;
+
+    /// GH-994: the phase-lifetime redispatch total is a product, not the
+    /// per-attempt 3. The parser rejects a `max_attempts` above the ceiling
+    /// (`plan::parser::tests`), so this product is the worst case, and it
+    /// must stay below the measured D6 runaway. Deterministic, no model run.
+    #[test]
+    fn phase_lifetime_redispatch_product_stays_below_the_d6_runaway() {
+        // Bound to locals so this stays a runtime assertion (the compile-time
+        // `const _` check in the parent module is the hard gate; this test is
+        // the observable evidence) without tripping clippy on constants.
+        let product = MAX_PHASE_REDISPATCHES;
+        let runaway = D6_MEASURED_LOOP_CYCLES;
+        assert_eq!(
+            product,
+            MAX_GATE_REDISPATCHES * (MAX_ATTEMPTS_CEILING + MAX_ENV_RETRIES + 1),
+            "the bound must be the full product"
+        );
+        assert!(
+            product < runaway,
+            "GH-994: {product} redispatch cycles must stay below the {runaway}-cycle D6 \
+             runaway a plan used to be able to author"
+        );
+    }
 }
