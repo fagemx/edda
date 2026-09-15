@@ -469,7 +469,9 @@ fn fleet_payload(action: &str, lane: &Lane, reason: Option<&str>) -> serde_json:
 /// (plan, phase, session) — the record that makes this lane terminal for the
 /// next run — and, when the phase is still Running/Checking, the same
 /// transition `detect_stale_phases` applies on resume ("phase was running
-/// when conductor stopped").
+/// when conductor stopped"). That transition is assigned directly for the
+/// same reason `detect_stale_phases` assigns it directly: `Checking → Stale`
+/// has no edge in the state machine, so there is no `transition` call to make.
 fn write_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<bool> {
     let reason = format!(
         "lane {} terminated abnormally: heartbeat stale for {}s with no terminal record",
@@ -568,19 +570,30 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> 
     }
     let plan_file = update_state(store_path, &lane.plan, |state| {
         let plan_file = state.plan_file.clone();
-        let Some(phase) = state.phases.iter_mut().find(|p| p.id == lane.phase) else {
+        let Some(current) = state
+            .phases
+            .iter()
+            .find(|p| p.id == lane.phase)
+            .map(|p| p.status)
+        else {
             return Ok(None);
         };
-        // Only the state machine's own retry edge is used: Stale → Pending.
-        // A phase already Pending (a previous stop-loss) is left alone.
-        if phase.status != PhaseStatus::Stale && phase.status != PhaseStatus::Failed {
+        // Through the state machine's own retry edges (`Stale → Pending`,
+        // `Failed → Pending`), exactly as `edda conduct retry` does: that is
+        // what clears the transient gate/verdict state and bumps the state
+        // version the runner reconciles against. A phase that is not on one of
+        // those edges (e.g. already Pending after a previous stop-loss) is
+        // left alone rather than forced.
+        if current != PhaseStatus::Stale && current != PhaseStatus::Failed {
             return Ok(None);
         }
-        phase.status = PhaseStatus::Pending;
-        // Same semantics as `edda conduct retry`: transitioning to Pending
-        // clears transient terminal state so the retry starts clean.
-        phase.skip_reason = None;
-        phase.error = None;
+        edda_conductor::state::machine::transition(
+            state,
+            &lane.phase,
+            current,
+            PhaseStatus::Pending,
+            None,
+        )?;
         edda_conductor::state::derive::update_plan_status(state);
         Ok(Some(plan_file))
     })?;
