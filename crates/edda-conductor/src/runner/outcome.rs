@@ -20,6 +20,16 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+/// GH-540: bound on environmental retries per phase run. Without it a
+/// persistently broken environment (e.g. antivirus holding every newly
+/// linked .exe) would retry forever; two in a row failing a phase that never
+/// had a product problem is the exact harm the issue describes.
+///
+/// Hoisted to module scope by GH-994 so the phase-lifetime verdict-gate
+/// redispatch bound (`runner::gate::MAX_PHASE_REDISPATCHES`) can name the
+/// environmental leg of the product instead of hand-copying the number.
+pub(super) const MAX_ENV_RETRIES: u32 = 2;
+
 /// Shared tail of a failed check run: transition Checking → Failed, print,
 /// record to edda + event log, then apply the phase's on_fail policy.
 #[allow(clippy::too_many_arguments)]
@@ -616,12 +626,6 @@ pub(super) async fn handle_on_fail(
     notifier: &dyn Notifier,
     event_log: &mut EventLogger,
 ) {
-    /// GH-540: bound on environmental retries per phase run. Without it a
-    /// persistently broken environment (e.g. antivirus holding every newly
-    /// linked .exe) would retry forever; two in a row failing a phase that
-    /// never had a product problem is the exact harm the issue describes.
-    const MAX_ENV_RETRIES: u32 = 2;
-
     let on_fail = phase.on_fail.unwrap_or(plan.on_fail);
 
     match on_fail {

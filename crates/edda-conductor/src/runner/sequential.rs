@@ -692,6 +692,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::agent::launcher::{MockLauncher, PhaseResult};
     use crate::plan::parser::parse_plan;
+    use crate::plan::schema::MAX_ATTEMPTS_CEILING;
     use crate::runner::gate::{
         format_gate_deadline, gate_subject, wait_for_verdict, GateVerdict, ReadErrorTracker,
         GATE_MAX_PERSISTENT_READ_ERRORS, MAX_GATE_REDISPATCHES,
@@ -4067,7 +4068,7 @@ phases:
         let launcher = MockLauncher::new();
         let yaml = r#"
 name: gated
-max_attempts: 99
+max_attempts: 16
 phases:
   - id: a
     prompt: "do it"
@@ -4076,7 +4077,12 @@ phases:
         // No gate_timeout_sec: the wait polls until each verdict lands
         // (record_verdict retries through SQLite busy windows under parallel
         // load); the outer 30s deadline catches a genuine hang.
+        //
+        // 16 = MAX_ATTEMPTS_CEILING (GH-994): high enough that max_attempts is
+        // not the limiter for this test, but within the validated ceiling that
+        // keeps the phase-lifetime redispatch product bounded.
         let plan = parse_plan(yaml).unwrap();
+        assert_eq!(plan.max_attempts, MAX_ATTEMPTS_CEILING);
         let state = PlanState::from_plan(&plan, "test.yaml");
         let handle = spawn_runner(yaml, root.clone(), launcher, state);
 

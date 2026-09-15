@@ -372,11 +372,20 @@ impl PhaseState {
     /// next one starts here, so the cycle it consumed is refunded with the
     /// rest of the budget.
     ///
-    /// The loop bound survives: redispatch cycles are still capped per
-    /// attempt, and attempts are capped by `max_attempts` (environmental
-    /// ones by `MAX_ENV_RETRIES`), so the product is bounded. Exhausting
-    /// the cycle bound fails the phase non-retryably, so only a deliberate
-    /// `conduct retry` opens a fresh budget.
+    /// The loop bound survives as a phase-lifetime PRODUCT: redispatch cycles
+    /// are still capped per attempt, and `plan::parser::validate_plan`
+    /// rejects a `max_attempts` above `MAX_ATTEMPTS_CEILING`, so the total is
+    /// at most `runner::gate::MAX_PHASE_REDISPATCHES` — a constant the plan
+    /// file cannot move. Environmental retries are bounded separately.
+    ///
+    /// Exhausting the cycle bound fails the attempt, and the phase when no
+    /// attempt budget remains. But it is NOT true that only a deliberate
+    /// `conduct retry` opens a fresh budget: `on_fail` defaults to
+    /// `auto_retry`, so an ordinary check failure or an agent crash routes
+    /// `Failed→Pending` and the next dispatch calls this method, which clears
+    /// `gate_redispatches` with no operator action; a `conduct retry` clears
+    /// it the same way. What bounds the loop is the validated ceiling on the
+    /// number of attempts, not who opened the next one.
     pub fn begin_attempt(&mut self) -> u32 {
         // A fresh attempt starts unmeasured; prior cost belongs to its
         // terminal event. Duration has the same boundary — never render

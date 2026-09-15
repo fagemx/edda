@@ -1,4 +1,4 @@
-use crate::plan::schema::{CheckSpec, Plan};
+use crate::plan::schema::{CheckSpec, Plan, MAX_ATTEMPTS_CEILING};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
@@ -246,6 +246,35 @@ fn validate_plan(plan: &Plan) -> Result<()> {
         }
     }
 
+    // Rule 7 (GH-994): bound the plan-authored attempt ladder. The D6
+    // verdict-gate budget is per attempt (`PhaseState::begin_attempt` clears
+    // `gate_redispatches` on every auto-retry, not only on `conduct retry`),
+    // so an unbounded `max_attempts` is an unbounded phase-lifetime
+    // redispatch product. See `MAX_ATTEMPTS_CEILING` for the arithmetic.
+    if plan.max_attempts > MAX_ATTEMPTS_CEILING {
+        bail!(
+            "plan max_attempts {} exceeds the validated ceiling {} — the verdict-gate \
+             redispatch budget is per attempt, so a higher ladder would re-open the D6 \
+             loop from inside the plan file (GH-994)",
+            plan.max_attempts,
+            MAX_ATTEMPTS_CEILING
+        );
+    }
+    for phase in &plan.phases {
+        if let Some(max) = phase.max_attempts {
+            if max > MAX_ATTEMPTS_CEILING {
+                bail!(
+                    "phase \"{}\" max_attempts {} exceeds the validated ceiling {} — the \
+                     verdict-gate redispatch budget is per attempt, so a higher ladder \
+                     would re-open the D6 loop from inside the plan file (GH-994)",
+                    phase.id,
+                    max,
+                    MAX_ATTEMPTS_CEILING
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -275,6 +304,46 @@ fn is_kebab_case(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::plan::schema::OnFail;
+
+    /// GH-994 fail-before/pass-after: a plan-authored `max_attempts` above the
+    /// validated ceiling is rejected, so the phase-lifetime gate-redispatch
+    /// product cannot be re-opened from inside the plan file.
+    #[test]
+    fn plan_rejects_max_attempts_above_the_validated_ceiling() {
+        let yaml = "name: too-many\nmax_attempts: 99\nphases:\n  - id: a\n    prompt: x\n";
+        let err = parse_plan(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("max_attempts"),
+            "error must name the field: {err}"
+        );
+        assert!(
+            err.contains(&MAX_ATTEMPTS_CEILING.to_string()),
+            "error must name the ceiling: {err}"
+        );
+    }
+
+    #[test]
+    fn phase_rejects_max_attempts_above_the_validated_ceiling() {
+        let yaml =
+            "name: too-many-phase\nphases:\n  - id: a\n    prompt: x\n    max_attempts: 99\n";
+        let err = parse_plan(yaml).unwrap_err().to_string();
+        assert!(err.contains("\"a\""), "error must name the phase: {err}");
+        assert!(
+            err.contains(&MAX_ATTEMPTS_CEILING.to_string()),
+            "error must name the ceiling: {err}"
+        );
+    }
+
+    #[test]
+    fn max_attempts_at_the_validated_ceiling_still_parses() {
+        let yaml = format!(
+            "name: at-ceiling\nmax_attempts: {c}\nphases:\n  - id: a\n    prompt: x\n    max_attempts: {c}\n",
+            c = MAX_ATTEMPTS_CEILING
+        );
+        let plan = parse_plan(&yaml).unwrap();
+        assert_eq!(plan.max_attempts, MAX_ATTEMPTS_CEILING);
+        assert_eq!(plan.phases[0].max_attempts, Some(MAX_ATTEMPTS_CEILING));
+    }
 
     #[test]
     fn parse_minimal_plan() {
