@@ -343,7 +343,11 @@ L1 是 exact-head CI，加 verifier 對 Windows CI 未覆蓋 surface 的 focused
    它只動 `fleet.merged-artifact-cleanup` 授權內的東西：PR 已 MERGED、worktree 乾淨、ref 還停在
    被合併的那顆 commit。closed-unmerged、open、dirty、無 PR、同名多 PR、locked、detached、
    主 checkout 與 `.claude/worktrees/` 底下的 agent worktree 一律只列不碰（R7）；任何一項檢查
-   出錯就降級成只列。還在跑的 lane 用 `--protect <worktree 目錄名或分支名>` 保住（可重複）。
+   出錯就降級成只列。**活躍 peer session 的 branch 自動受保**：腳本讀一次 `edda peers --json`，
+   以它發佈的 `stale` 判定（GH-617 的單一存活判準）把該 session 的 branch、其 worktree 與
+   `origin/<branch>` 標成 `live-peer <name>` 而不回收；這張表讀不到（無 `edda`／`jq`、指令非零、
+   回應無法解析或缺 `sessions`）時所有候選一律只列，fail closed。其餘還在跑的 lane 用
+   `--protect <worktree 目錄名或分支名>` 保住（可重複）。
    **lane 不跑這支**——§四第 3 條仍是「不刪分支、不刪 worktree」；回收是控制者的動作。
    這支腳本是過渡載體，產品家在 `edda fleet reclaim`（腳本檔頭載明）。
 10. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
