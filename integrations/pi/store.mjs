@@ -287,17 +287,19 @@ function recoverLocked(dir, sessionId, instanceId, livePidIsOwned) {
   const owner = readJson(path);
   if (!owner || owner.instanceId !== validateId(instanceId)) throw new Error('Owner instance changed or absent');
   if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error('Invalid owner PID');
-  let alive = true;
+  // A bare PID probe can hit an unrelated process that reused the number, and it
+  // can also be un-signalable (EPERM) for another account's process. Only a probe
+  // that proves the owned process is alive refuses; when the caller has proved the
+  // PID is not the owned process (the channel cannot answer), an EPERM/unknown
+  // probe must not block clearing the stale registration.
+  let probe = 'alive';
   try { process.kill(owner.pid, 0); }
-  catch (error) {
-    if (error.code !== 'ESRCH') throw new Error('Cannot prove owner is dead');
-    alive = false;
+  catch (error) { probe = error.code === 'ESRCH' ? 'dead' : 'unknown'; }
+  if (livePidIsOwned !== false) {
+    if (probe === 'alive') throw new Error('Owner process is still alive; recovery refused');
+    if (probe === 'unknown') throw new Error('Cannot prove owner is dead');
   }
-  // A bare PID probe can hit an unrelated process that reused the number. The
-  // caller may prove the live PID is not the owned process (e.g. the channel
-  // cannot answer), in which case this registration is stale and safe to clear.
-  if (alive && livePidIsOwned !== false) throw new Error('Owner process is still alive; recovery refused');
   // No automatic replay: persisted accepted/queued/started receipts remain evidence.
   unlinkSync(path);
-  return { sessionId, instanceId, recovered: true, receiptsPreserved: true, staleCleared: !alive || livePidIsOwned === false };
+  return { sessionId, instanceId, recovered: true, receiptsPreserved: true };
 }
