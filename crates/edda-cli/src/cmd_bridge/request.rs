@@ -43,6 +43,7 @@ pub fn request(
                 force,
             );
         }
+        ensure_configured_peer(&machine, force)?;
         return send_remote(
             repo_root,
             &project_id,
@@ -142,6 +143,31 @@ fn send_local(
             targets.join(", ")
         );
     }
+    Ok(())
+}
+
+/// A `<machine>` target that is not a configured `node.json` peer is a named
+/// error unless `--force` — the same fail-closed rule the local path uses for
+/// an unknown label. With `--force` it is accepted and a warning says nothing
+/// will flush that queue until the peer is configured.
+fn ensure_configured_peer(machine: &str, force: bool) -> anyhow::Result<()> {
+    let configured = edda_ledger::node::load_node_config(&edda_ledger::node::node_config_path())
+        .ok()
+        .map(|config| config.peers.into_iter().any(|peer| peer.alias == machine))
+        .unwrap_or(false);
+    if configured {
+        return Ok(());
+    }
+    if !force {
+        anyhow::bail!(
+            "machine '{machine}' is not a configured node peer in node.json — add it, or pass \
+             --force to queue for a peer that is not configured yet"
+        );
+    }
+    eprintln!(
+        "warning: machine '{machine}' is not a configured node peer; nothing will flush this queue \
+         until it is"
+    );
     Ok(())
 }
 

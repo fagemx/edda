@@ -79,6 +79,7 @@ pub struct PeerQueueStatus {
 }
 
 /// A per-peer durable outbound queue.
+#[derive(Debug)]
 pub struct OutboundQueue {
     peer: String,
     path: PathBuf,
@@ -91,10 +92,27 @@ impl OutboundQueue {
     }
 
     /// Open (or create on first write) the queue for `peer`.
+    ///
+    /// `peer` must be a bare machine label: a name that contains a path
+    /// separator, `..`, `:` or an absolute path is refused before any file is
+    /// touched. Defence in depth: the resolved path's parent must be the queue
+    /// directory, so no wire value can ever name a file elsewhere.
     pub fn open(peer: &str) -> Result<Self> {
+        super::validate_machine_label(peer).with_context(|| {
+            format!("refusing to open an outbound queue for non-label peer '{peer}'")
+        })?;
+        let dir = Self::queue_dir();
+        let path = dir.join(format!("{peer}.jsonl"));
+        if path.parent() != Some(dir.as_path()) {
+            bail!(
+                "refusing to open outbound queue path outside {}: {}",
+                dir.display(),
+                path.display()
+            );
+        }
         Ok(Self {
             peer: peer.to_string(),
-            path: Self::queue_dir().join(format!("{peer}.jsonl")),
+            path,
         })
     }
 
@@ -273,6 +291,11 @@ pub fn find_queue_peer_for_event(event_id: &str) -> Result<Option<String>> {
         let Some(peer) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
+        // A stray file whose stem is not a machine label is skipped, never
+        // opened: the queue directory is not a place a wire value may name.
+        if super::validate_machine_label(peer).is_err() {
+            continue;
+        }
         let queue = OutboundQueue::open(peer)?;
         if queue
             .entries()?
@@ -293,6 +316,8 @@ pub fn record_peer_observation(
     reason: &str,
     observed_at: &str,
 ) -> Result<()> {
+    super::validate_machine_label(peer)
+        .with_context(|| format!("refusing to record an observation for peer '{peer}'"))?;
     let path = super::node_store_dir().join("peers.json");
     let mut map: serde_json::Map<String, serde_json::Value> = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes)

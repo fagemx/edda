@@ -7,8 +7,10 @@
 //!
 //! `status` and `peers` are local observations: the queue counts come from disk
 //! and peer reachability is a bounded TCP probe. An unreachable peer is
-//! reported with an explicit reason, never as a silent zero. The revision is a
-//! local observation (`EDDA_PI_RELEASE_ID` / git HEAD), never a global claim.
+//! reported with an explicit reason, never as a silent zero. The revision is
+//! this binary's own build identity (`EDDA_LONG_VERSION`), else the workspace
+//! git HEAD, with a `revisionOrigin` naming which — never a Pi package release
+//! id and never a global claim (contract §7).
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -19,9 +21,9 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use edda_ledger::node::{
-    load_node_config, local_revision, node_config_path, peer_observations, peer_queue_status,
-    record_peer_observation, resolve_peer_token, validate_config_with_bind_policy, NodeConfig,
-    OutboundQueue, PeerConfig,
+    load_node_config, local_revision_origin, node_config_path, peer_observations,
+    peer_queue_status, record_peer_observation, resolve_peer_token,
+    validate_config_with_bind_policy, NodeConfig, OutboundQueue, PeerConfig,
 };
 use edda_serve::ServeConfig;
 
@@ -264,7 +266,7 @@ fn flush_peer(origin: &str, peer: &PeerConfig, token: Option<&str>) -> Result<()
 
 fn status(repo_root: &Path, args: StatusArgs) -> Result<()> {
     let config = load_validated(&args.config, args.insecure_bind)?;
-    let revision = local_revision(repo_root);
+    let (revision, revision_origin) = status_revision(repo_root);
     let stamp = now();
 
     let mut queues = Vec::new();
@@ -296,6 +298,7 @@ fn status(repo_root: &Path, args: StatusArgs) -> Result<()> {
         "bind": config.node.bind,
         "port": config.node.port,
         "revision": revision,
+        "revisionOrigin": revision_origin,
         "queue": queues,
         "peers": peers,
     });
@@ -313,8 +316,9 @@ fn status(repo_root: &Path, args: StatusArgs) -> Result<()> {
         config.node.port
     );
     println!(
-        "revision: {}",
-        document["revision"].as_str().unwrap_or("null")
+        "revision: {} ({})",
+        document["revision"].as_str().unwrap_or("null"),
+        document["revisionOrigin"].as_str().unwrap_or("none")
     );
     for queue in document["queue"].as_array().into_iter().flatten() {
         println!(
@@ -338,6 +342,43 @@ fn status(repo_root: &Path, args: StatusArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The revision this process reports and where it came from. Prefer this
+/// binary's own build identity (`EDDA_LONG_VERSION`), falling back to the
+/// workspace git HEAD. Never `EDDA_PI_RELEASE_ID`, which is a Pi package
+/// release id and not the edda revision (contract §7).
+fn status_revision(repo_root: &Path) -> (Option<String>, &'static str) {
+    status_revision_from(env!("EDDA_LONG_VERSION"), repo_root)
+}
+
+fn status_revision_from(long_version: &str, repo_root: &Path) -> (Option<String>, &'static str) {
+    if let Some(revision) = build_revision_from(long_version) {
+        return (Some(revision), "build");
+    }
+    let (revision, origin) = local_revision_origin(repo_root);
+    (revision, origin.as_str())
+}
+
+/// Extract the 12-hex revision from `EDDA_LONG_VERSION`, whose format is
+/// `0.6.2 (<12-hex>[-dirty] <date>)`. `0.6.2 (unknown)` yields `None`, so the
+/// caller falls back to the workspace HEAD instead of inventing a revision.
+fn build_revision_from(long_version: &str) -> Option<String> {
+    let open = long_version.find('(')?;
+    let close = long_version.rfind(')')?;
+    if close <= open + 1 {
+        return None;
+    }
+    let identity = &long_version[open + 1..close];
+    let sha = identity
+        .split_whitespace()
+        .next()?
+        .trim_end_matches("-dirty");
+    if sha.len() == 12 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(sha.to_string())
+    } else {
+        None
+    }
 }
 
 /// Bounded TCP probe. `reachable` means the peer's port accepted a connection —
@@ -474,6 +515,37 @@ mod tests {
             "an unreachable peer carries a reason"
         );
         assert!(!peer["lastSeenAt"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_revision_is_extracted_from_the_long_version_not_a_pi_release_id() {
+        assert_eq!(
+            build_revision_from("0.6.2 (7419a701e521 2026-09-13)").as_deref(),
+            Some("7419a701e521")
+        );
+        assert_eq!(
+            build_revision_from("0.6.2 (7419a701e521-dirty 2026-09-13)").as_deref(),
+            Some("7419a701e521")
+        );
+        // No build identity: fall back, never fabricate.
+        assert_eq!(build_revision_from("0.6.2 (unknown)"), None);
+        assert_eq!(build_revision_from("0.6.2"), None);
+        // A Pi release id or session id is never substituted for the edda rev.
+        assert_eq!(build_revision_from("0.6.2 (pi-2026.09)"), None);
+    }
+
+    #[test]
+    fn status_revision_names_its_origin_and_never_fabricates() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            status_revision_from("0.6.2 (7419a701e521 2026-09-13)", dir.path()),
+            (Some("7419a701e521".to_string()), "build")
+        );
+        // No build identity and no git HEAD: `none` pairs with `null`.
+        assert_eq!(
+            status_revision_from("0.6.2 (unknown)", dir.path()),
+            (None, "none")
+        );
     }
 
     #[test]

@@ -30,8 +30,8 @@ pub use envelope::{
     Receipt, WorkTransition, EVENT_KINDS, FORBIDDEN_WIRE_FIELDS,
 };
 pub use import::{
-    import_batch, local_revision, mark_imported, read_handover, read_observations, ImportOutcome,
-    Observation,
+    import_batch, local_revision_origin, mark_imported, read_handover, read_observations,
+    ImportOutcome, Observation, RevisionOrigin,
 };
 pub use queue::{
     peer_observations, peer_queue_status, record_peer_observation, OutboundQueue, PeerQueueStatus,

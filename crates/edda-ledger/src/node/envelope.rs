@@ -427,6 +427,46 @@ pub fn validate_label(what: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A machine-shaped wire field: a bare `<machine>` label
+/// (`^[a-z0-9._-]{1,64}$`), never free text. The reason names the field and the
+/// constraint, so a peer sees exactly what was refused.
+fn validate_machine_field(field: &str, value: &str) -> anyhow::Result<()> {
+    super::config::validate_machine_label(value)
+        .map_err(|error| anyhow::anyhow!("invalid {field}: {error}"))
+}
+
+/// Every machine-shaped value on the wire must be a machine label (contract
+/// §4). A value containing `/`, `\`, `..`, `:` or an absolute path could
+/// otherwise reach a filesystem path once it is stored as transport
+/// provenance (`via_machine`).
+fn validate_machine_shape(body: &NodeEventBody) -> anyhow::Result<()> {
+    match body {
+        NodeEventBody::OwnerReturn(body) => {
+            validate_machine_field("originMachine", &body.origin_machine)
+        }
+        NodeEventBody::DecisionFact(body) => {
+            validate_machine_field("originMachine", &body.origin_machine)
+        }
+        NodeEventBody::WorkTransition(body) => {
+            validate_machine_field("originMachine", &body.origin_machine)
+        }
+        NodeEventBody::Handover(body) => {
+            validate_machine_field("fromMachine", &body.from_machine)?;
+            validate_machine_field("toMachine", &body.to_machine)
+        }
+        NodeEventBody::ActivationObservation(body) => {
+            validate_machine_field("machine", &body.machine)?;
+            validate_machine_field("originMachine", &body.origin_machine)
+        }
+        NodeEventBody::LaneRequest(body) => {
+            validate_machine_field("originMachine", &body.origin_machine)
+        }
+        NodeEventBody::Receipt(body) => {
+            validate_machine_field("originMachine", &body.origin_machine)
+        }
+    }
+}
+
 /// GH-1236 logical identity: `sha256_hex(owner\0work\0status\0result\0
 /// deliverable\0message)`, `""` for absent options.
 ///
@@ -665,6 +705,10 @@ pub fn parse_event(value: &serde_json::Value) -> Result<NodeEvent, EventRefusal>
 
     check_fields(object, allowed)?;
     let body = deserialize_body(kind, object.clone())?;
+
+    // A machine-shaped value is validated before any other shape rule so a
+    // traversal/absolute-path machine is refused with the machine constraint.
+    validate_machine_shape(&body).map_err(|error| EventRefusal::new(error.to_string()))?;
 
     if let NodeEventBody::OwnerReturn(body) = &body {
         validate_owner_return(body).map_err(|error| EventRefusal::new(error.to_string()))?;

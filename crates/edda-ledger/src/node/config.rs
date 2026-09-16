@@ -142,6 +142,10 @@ pub fn is_tailnet_ipv4(addr: &str) -> bool {
 
 /// Lowercase `[a-z0-9._-]`, 1..=64 bytes. The label is a machine `<machine>`
 /// alias, never a session id or a host display name.
+///
+/// `.` and `..` are refused even though the character class admits them: a
+/// label is the only wire value that may ever reach a filename, and those two
+/// are path components, not names (contract §4, rev 4).
 pub fn validate_machine_label(label: &str) -> Result<()> {
     if label.is_empty() || label.len() > 64 {
         bail!("machine label must be 1..=64 bytes");
@@ -150,6 +154,9 @@ pub fn validate_machine_label(label: &str) -> Result<()> {
         byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
     }) {
         bail!("machine label '{label}' must match ^[a-z0-9._-]{{1,64}}$");
+    }
+    if label == "." || label == ".." {
+        bail!("machine label '{label}' must not be a path component");
     }
     Ok(())
 }

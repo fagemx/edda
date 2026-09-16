@@ -183,7 +183,7 @@ fn node_bind_non_tailnet_refused_without_insecure_flag() {
 
 #[test]
 fn config_rejects_bad_alias() {
-    for alias in ["", "Alpha", "a b", "a/b", &"x".repeat(65)] {
+    for alias in ["", "Alpha", "a b", "a/b", ".", "..", &"x".repeat(65)] {
         let mut config = valid_tailnet_config();
         config.node.alias = alias.to_string();
         assert!(
@@ -701,19 +701,39 @@ fn receipt_updates_the_matching_queue_entry_state() {
     assert_eq!(queue.status().unwrap().acked, 1);
     assert_eq!(queue.status().unwrap().pending, 0);
 
-    // A receipt for an unknown ofEventId is recorded as an observation and
-    // refused as a no-op — never a panic and never a queue change.
+    // A receipt for an unknown ofEventId is refused with nothing written:
+    // frozen contract §3, a refused event writes nothing.
     let unknown = receipt_event("beta", &sha("no-such-event"), "owner_return", "acked");
     let outcome = import_batch(env.path(), std::slice::from_ref(&unknown)).expect("import");
     assert_eq!(outcome.refused.len(), 1);
     assert!(outcome.refused[0].reason.contains("unknown ofEventId"));
     let observations = std::fs::read_to_string(node_dir().join("receipts.jsonl")).unwrap();
-    assert!(observations.contains("\"matched\":false"));
+    assert!(
+        !observations.contains("\"matched\":false"),
+        "an unmatched receipt must not append a receipts.jsonl line: {observations}"
+    );
     assert!(observations.contains("\"matched\":true"));
     assert_eq!(
         queue.status().unwrap().acked,
         1,
         "an unknown receipt is a no-op"
+    );
+}
+
+#[test]
+fn refused_receipt_writes_no_file() {
+    let env = TestEnv::new();
+    let unknown = receipt_event("beta", &sha("no-such-event"), "owner_return", "acked");
+    let outcome = import_batch(env.path(), std::slice::from_ref(&unknown)).expect("import");
+    assert_eq!(outcome.refused.len(), 1);
+    assert!(outcome.refused[0].reason.contains("unknown ofEventId"));
+    assert!(
+        !node_dir().join("receipts.jsonl").exists(),
+        "a refused event writes nothing: no receipts.jsonl line"
+    );
+    assert!(
+        !node_dir().join("imported.jsonl").exists(),
+        "a refused event is not recorded as imported"
     );
 }
 
@@ -739,4 +759,146 @@ fn lane_request_is_returned_to_the_caller_not_applied() {
     let third = import_batch(env.path(), std::slice::from_ref(&event)).expect("third");
     assert_eq!(third.duplicates, vec![event.event_id.clone()]);
     assert!(third.lane_requests.is_empty());
+}
+
+// ── rev 4: machine-shaped values are never free text ──────────────────
+
+/// A wire value containing a path separator, `..`, `:` or an absolute path
+/// must be refused for **every** machine-shaped field (contract §4, rev 4).
+#[test]
+fn parse_event_refuses_machine_traversal_on_every_machine_shaped_field() {
+    let traversal_values = ["../../x", "a/b", "C:/abs", "\\\\?\\C:", "..", ".", ":", ""];
+    let work_transition = NodeEvent::new(NodeEventBody::WorkTransition(WorkTransition {
+        work_id: "gh685".into(),
+        from_state: "open".into(),
+        to_state: "in_progress".into(),
+        receipt_id: "receipt-1".into(),
+        actor: "agent-a".into(),
+        origin_machine: "alpha".into(),
+        ts: "2026-09-14T00:00:00.000Z".into(),
+    }));
+    let handover = NodeEvent::new(NodeEventBody::Handover(Handover {
+        owner: "assistant/p".into(),
+        from_holder: "alpha/manager".into(),
+        to_holder: "beta/manager".into(),
+        from_machine: "alpha".into(),
+        to_machine: "beta".into(),
+        note: "handing over".into(),
+        ts: "2026-09-14T00:00:00.000Z".into(),
+    }));
+    let observation = NodeEvent::new(NodeEventBody::ActivationObservation(
+        ActivationObservation {
+            machine: "alpha".into(),
+            revision: "b2cb417".into(),
+            observed_at: "2026-09-14T00:00:00.000Z".into(),
+            origin_machine: "docs".into(),
+        },
+    ));
+
+    let cases: Vec<(serde_json::Value, Vec<&str>)> = vec![
+        (
+            owner_return_event("alpha", "job-a", "seed-a").to_wire_value(),
+            vec!["originMachine"],
+        ),
+        (
+            decision_fact_event("alpha", "k", "v", false).to_wire_value(),
+            vec!["originMachine"],
+        ),
+        (work_transition.to_wire_value(), vec!["originMachine"]),
+        (handover.to_wire_value(), vec!["fromMachine", "toMachine"]),
+        (
+            observation.to_wire_value(),
+            vec!["machine", "originMachine"],
+        ),
+        (
+            lane_request_event("alpha", "req-1").to_wire_value(),
+            vec!["originMachine"],
+        ),
+        (
+            receipt_event("beta", &sha("sent-event"), "owner_return", "acked").to_wire_value(),
+            vec!["originMachine"],
+        ),
+    ];
+
+    for (wire, fields) in cases {
+        for field in fields {
+            for value in traversal_values {
+                let mut bad = wire.clone();
+                bad[field] = serde_json::json!(value);
+                let refusal = parse_event(&bad)
+                    .expect_err("a traversal machine value must be refused at parse");
+                assert!(
+                    refusal.reason.contains(field),
+                    "the refusal must name {field} for {value:?}: {}",
+                    refusal.reason
+                );
+                assert!(
+                    refusal.reason.contains("machine label"),
+                    "the refusal must name the machine-label constraint: {}",
+                    refusal.reason
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn outbound_queue_refuses_a_non_machine_label_peer() {
+    let _store = isolated_store();
+    let store = edda_store::store_root();
+    let mut candidates: Vec<String> = vec![
+        "../../escaped".into(),
+        "a/b".into(),
+        "C:/abs".into(),
+        "\\\\?\\C:".into(),
+        "..".into(),
+        ".".into(),
+        "alpha:beta".into(),
+        "".into(),
+        "Alpha".into(),
+    ];
+    candidates.push("x".repeat(65));
+    for peer in &candidates {
+        let error = OutboundQueue::open(peer).expect_err("a non-label peer must be refused");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("machine label") || message.contains("non-label"),
+            "the refusal must name the constraint for {peer:?}: {message}"
+        );
+    }
+    // Nothing escaped the queue directory.
+    assert!(!store.join("escaped.jsonl").exists());
+    assert!(!store.join("node").join("escaped.jsonl").exists());
+}
+
+/// End-to-end: a `lane_request` whose `originMachine` is a traversal value is
+/// refused at parse, so it can never land and never reach
+/// `OutboundQueue::open` — and no file appears outside the queue directory.
+#[test]
+fn lane_request_with_traversal_origin_never_writes_outside_the_queue() {
+    let _store = isolated_store();
+    let wire = lane_request_event("../../escaped", "req-esc").to_wire_value();
+    let refusal = parse_event(&wire).expect_err("a traversal originMachine must be refused");
+    assert!(
+        refusal.reason.contains("originMachine"),
+        "the refusal must name the field: {}",
+        refusal.reason
+    );
+    assert!(
+        refusal.reason.contains("machine label"),
+        "the refusal must name the machine-label constraint: {}",
+        refusal.reason
+    );
+
+    // Defence in depth: even if the value had slipped through, opening the
+    // queue with it is refused and no file appears outside the queue dir.
+    assert!(OutboundQueue::open("../../escaped").is_err());
+    let store = edda_store::store_root();
+    assert!(!store.join("escaped.jsonl").exists());
+    assert!(!store.join("node").join("escaped.jsonl").exists());
+    assert!(!OutboundQueue::queue_dir()
+        .join("..")
+        .join("..")
+        .join("escaped.jsonl")
+        .exists());
 }

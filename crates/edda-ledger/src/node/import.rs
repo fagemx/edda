@@ -601,8 +601,8 @@ fn receipts_path() -> PathBuf {
 }
 
 /// Apply a receipt against the local outbound queue entry it names. A receipt
-/// for an unknown `ofEventId` is recorded as an observation and refused as a
-/// no-op — never a panic and never a silent state change.
+/// for an unknown `ofEventId` is refused with nothing written — no
+/// `receipts.jsonl` line, never a panic and never a silent state change.
 fn apply_receipt(event: &NodeEvent, body: &Receipt) -> Result<ApplyResult> {
     match find_queue_peer_for_event(&body.of_event_id)? {
         Some(peer) => {
@@ -616,11 +616,10 @@ fn apply_receipt(event: &NodeEvent, body: &Receipt) -> Result<ApplyResult> {
             Ok(ApplyResult::Applied { consumed: true })
         }
         None => {
-            record_receipt_observation(event, body, "", false)?;
-            anyhow::bail!(
-                "receipt for unknown ofEventId {} (recorded as an observation; no-op)",
-                body.of_event_id
-            )
+            // Frozen contract §3: a refused event writes nothing. An unmatched
+            // receipt is refused without a `receipts.jsonl` line, so a refusal
+            // is never partially applied.
+            anyhow::bail!("receipt for unknown ofEventId {}", body.of_event_id)
         }
     }
 }
@@ -660,15 +659,36 @@ fn record_receipt_observation(
 
 // ── revision ──────────────────────────────────────────────────────────
 
-/// A local revision observation: `EDDA_PI_RELEASE_ID`, else a best-effort git
-/// HEAD read, else `None` (rendered as `null`, never invented).
-pub fn local_revision(repo_root: &Path) -> Option<String> {
-    if let Ok(value) = std::env::var("EDDA_PI_RELEASE_ID") {
-        if !value.is_empty() {
-            return Some(value);
+/// Where a revision observation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionOrigin {
+    /// The workspace's own git HEAD.
+    RepoHead,
+    /// No revision could be observed.
+    None,
+}
+
+impl RevisionOrigin {
+    /// The wire/human spelling (`"repo-head"` / `"none"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RevisionOrigin::RepoHead => "repo-head",
+            RevisionOrigin::None => "none",
         }
     }
-    git_head(repo_root)
+}
+
+/// A local revision observation from the workspace: git HEAD, else `None`
+/// (rendered as `null`, never invented).
+///
+/// This deliberately does **not** read `EDDA_PI_RELEASE_ID`: that is a Pi
+/// package release id, not the edda revision, and substituting it is a false
+/// fact in a managed-Pi shell (contract §7).
+pub fn local_revision_origin(repo_root: &Path) -> (Option<String>, RevisionOrigin) {
+    match git_head(repo_root) {
+        Some(sha) => (Some(sha), RevisionOrigin::RepoHead),
+        None => (None, RevisionOrigin::None),
+    }
 }
 
 fn git_head(repo_root: &Path) -> Option<String> {

@@ -211,13 +211,22 @@ async fn post_sync(
             }
         }
         if !edda_bridge_claude::peers::request_delivered_exists(&project_id, &request.request_id) {
-            edda_bridge_claude::peers::write_request_delivered(
+            if let Err(error) = edda_bridge_claude::peers::write_request_delivered(
                 &project_id,
                 &request.request_id,
                 &request.to_label,
                 &request.origin_machine,
                 event_id,
-            );
+            ) {
+                refused.push(serde_json::json!({
+                    "index": index,
+                    "reason": format!(
+                        "lane_request '{}' could not record delivery: {error}",
+                        request.request_id
+                    ),
+                }));
+                continue;
+            }
         }
         landed_ids.push(event_id.clone());
     }
@@ -299,11 +308,17 @@ async fn get_status(
         })
         .collect();
 
+    // The revision is the **edda** revision this process can observe, with its
+    // origin named. `none` pairs with `revision: null`; a different artifact's
+    // identifier (a Pi package release id, a session id, a path) is never
+    // substituted for it (contract §7).
+    let (revision, revision_origin) = edda_ledger::node::local_revision_origin(&state.repo_root);
     let body = serde_json::json!({
         "machine": config.node.alias,
         "bind": config.node.bind,
         "port": config.node.port,
-        "revision": edda_ledger::node::local_revision(&state.repo_root),
+        "revision": revision,
+        "revisionOrigin": revision_origin.as_str(),
         "queue": queue,
         "peers": peers,
     });

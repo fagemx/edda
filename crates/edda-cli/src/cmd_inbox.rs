@@ -220,6 +220,26 @@ fn ack(args: &AckArgs, repo_root: &Path) -> Result<()> {
         .find(|delivered| delivered.request_id == args.id);
     if let Some(delivered) = delivered {
         if !delivered.via_machine.is_empty() && !delivered.via_event_id.is_empty() {
+            // Resolve the target peer from the local node config, never from the
+            // wire text directly. A `via_machine` that is not a configured peer
+            // is a named error and nothing is enqueued (frozen contract §4/§5).
+            let config =
+                edda_ledger::node::load_node_config(&edda_ledger::node::node_config_path())
+                    .map_err(|error| {
+                        anyhow::anyhow!("cannot route the ack receipt for '{}': {error:#}", args.id)
+                    })?;
+            let peer = config
+                .peers
+                .iter()
+                .find(|peer| peer.alias == delivered.via_machine)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "request '{}' arrived from machine '{}', which is not a configured node \
+                         peer in node.json; refusing to enqueue a receipt",
+                        args.id,
+                        delivered.via_machine
+                    )
+                })?;
             let origin = crate::cmd_bridge::local_machine_alias(repo_root).ok_or_else(|| {
                 anyhow::anyhow!(
                     "cannot route the ack receipt: this machine has no node alias (configure node.json)"
@@ -235,7 +255,7 @@ fn ack(args: &AckArgs, repo_root: &Path) -> Result<()> {
                     origin_machine: origin,
                 }),
             );
-            edda_ledger::node::OutboundQueue::open(&delivered.via_machine)?.enqueue(&receipt)?;
+            edda_ledger::node::OutboundQueue::open(&peer.alias)?.enqueue(&receipt)?;
         }
     }
 
@@ -461,7 +481,8 @@ mod tests {
             "machine-b",
         )
         .unwrap();
-        peers::write_request_delivered(&project_id, "req-wait-1", "beta", "machine-b", "evt-1");
+        peers::write_request_delivered(&project_id, "req-wait-1", "beta", "machine-b", "evt-1")
+            .unwrap();
         let code = run(
             InboxCmd::Wait(WaitArgs {
                 actor: "beta".into(),
@@ -549,7 +570,9 @@ mod tests {
             serde_json::to_vec_pretty(&serde_json::json!({
                 "version": 1,
                 "node": { "alias": "machine-b", "bind": "127.0.0.1", "port": 6850 },
-                "peers": [],
+                "peers": [
+                    { "alias": "docs", "host": "127.0.0.1", "port": 1, "token": "t" }
+                ],
             }))
             .unwrap(),
         )
@@ -577,7 +600,8 @@ mod tests {
             "beta-role",
             "docs",
             &event_id,
-        );
+        )
+        .unwrap();
 
         run(
             InboxCmd::Ack(AckArgs {
@@ -660,5 +684,43 @@ mod tests {
             1,
             "a same-machine target must not cross the wire"
         );
+    }
+
+    #[test]
+    fn machine_qualified_target_to_an_unconfigured_peer_is_refused_unless_forced() {
+        let _store = crate::test_support::isolated_store();
+        let repo = workspace();
+        let config = serde_json::json!({
+            "version": 1,
+            "node": { "alias": "alpha", "bind": "127.0.0.1", "port": 6850 },
+            "peers": [],
+        });
+        std::fs::write(
+            edda_ledger::node::node_config_path(),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        // A machine that is not a configured peer is a named error and queues
+        // nothing, mirroring the local unknown-label rule.
+        let error =
+            crate::cmd_bridge::request(&repo, "ghost/role", "hi", Some("s-cli"), false, None, true)
+                .expect_err("an unconfigured peer must be refused without --force");
+        assert!(
+            error.to_string().contains("not a configured node peer"),
+            "unexpected refusal: {error}"
+        );
+        assert!(
+            !edda_ledger::node::OutboundQueue::queue_dir()
+                .join("ghost.jsonl")
+                .exists(),
+            "a refused target queues nothing"
+        );
+
+        // With --force it queues, with a warning that nothing will flush it.
+        crate::cmd_bridge::request(&repo, "ghost/role", "hi", Some("s-cli"), true, None, true)
+            .unwrap();
+        let queue = OutboundQueue::open("ghost").unwrap();
+        assert_eq!(queue.entries().unwrap().len(), 1);
     }
 }

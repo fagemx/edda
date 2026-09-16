@@ -27,7 +27,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
     // Node bind guard (frozen contract §8): with the node transport enabled the
     // listener may only bind this machine's Tailscale 100.x IPv4 address. The
     // explicit test-only flag is the one way past it, and it says so on stderr.
-    if config.node.is_some() {
+    if let Some(node) = config.node.as_ref() {
         if !config.insecure_bind && !edda_ledger::node::is_tailnet_ipv4(&config.bind) {
             anyhow::bail!(
                 "refusing to bind '{}': the node transport only binds this machine's Tailscale \
@@ -35,6 +35,11 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
                 config.bind
             );
         }
+        // The same Tailscale policy applies to every configured peer host, so
+        // a direct `serve()` caller cannot bypass the boundary by handing in a
+        // LAN host while `bind` is a valid tailnet address (FU-1).
+        edda_ledger::node::validate_config_with_bind_policy(node, config.insecure_bind)
+            .map_err(|error| anyhow::anyhow!("invalid node config: {error:#}"))?;
         if config.insecure_bind {
             eprintln!(
                 "warning: --insecure-bind is set: binding '{}', which is not a Tailscale 100.x \

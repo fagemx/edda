@@ -12,7 +12,7 @@ fn request_delivered_is_not_an_ack() {
     assert!(write_request_with_id(
         pid, "s-alpha", "req-1", "alpha", "beta", "hi"
     ));
-    write_request_delivered(pid, "req-1", "beta", "machine-a", "evt-1");
+    write_request_delivered(pid, "req-1", "beta", "machine-a", "evt-1").expect("delivered marker");
 
     let board = compute_board_state(pid);
     assert_eq!(
@@ -47,7 +47,7 @@ fn board_folding_keeps_delivered_and_acked_distinct() {
     assert!(write_request_with_id(
         pid, "s-alpha", "req-9", "alpha", "beta", "hi"
     ));
-    write_request_delivered(pid, "req-9", "beta", "machine-a", "evt-9");
+    write_request_delivered(pid, "req-9", "beta", "machine-a", "evt-9").expect("delivered marker");
     let board = compute_board_state(pid);
     assert_eq!(board.request_delivered.len(), 1);
     assert!(board.request_acks.is_empty());

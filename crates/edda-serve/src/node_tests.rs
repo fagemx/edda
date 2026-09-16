@@ -447,6 +447,41 @@ fn node_status_reports_queue_and_unobserved_peer_reason() {
     assert!(!response["peers"][0]["reason"].as_str().unwrap().is_empty());
     assert_eq!(response["queue"][0]["peer"], "beta");
     assert_eq!(response["queue"][0]["pending"], 0);
+    // The revision is the edda revision with its origin named. This temp
+    // workspace has no git HEAD and the serve library has no build identity,
+    // so `none` pairs with `null` — never a fabricated revision.
+    assert_eq!(response["revisionOrigin"], "none");
+    assert_eq!(response["revision"], serde_json::Value::Null);
+}
+
+#[test]
+fn serve_refuses_non_tailnet_peer_host_without_insecure_bind() {
+    let repo = workspace();
+    let store = tempfile::tempdir().unwrap();
+    let _env = EnvOverride::install(store.path(), repo.path());
+    let config = node_config(
+        "alpha",
+        "100.64.0.1",
+        6850,
+        vec![peer("beta", "192.168.1.10", 6850, "shared-token")],
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(crate::serve(
+            repo.path(),
+            crate::ServeConfig {
+                bind: "100.64.0.1".into(),
+                port: 6850,
+                node: Some(config),
+                node_token: Some("shared-token".into()),
+                insecure_bind: false,
+            },
+        ))
+        .expect_err("serve() itself must refuse a non-tailnet peer host");
+    assert!(
+        format!("{error:#}").contains("peers[0].host"),
+        "the refusal must name the peer host: {error:#}"
+    );
 }
 
 #[test]
@@ -491,6 +526,49 @@ fn sync_refuses_unknown_event_field_without_partial_application() {
     assert!(
         mailbox_ids(repo.path()).is_empty(),
         "nothing partially applied"
+    );
+}
+
+#[test]
+fn sync_refuses_lane_request_with_path_shaped_origin_machine() {
+    let store = tempfile::tempdir().unwrap();
+    let repo = workspace();
+    let _env = EnvOverride::install(store.path(), repo.path());
+    let config = node_config("beta", "127.0.0.1", 6850, vec![]);
+    let addr = spawn_server(node_router(repo.path(), config, "shared-token"));
+
+    // The request-level `originMachine` is valid; only the event's machine
+    // value is path-shaped, so this exercises the parse-time machine rule.
+    let mut wire = lane_request_event("alpha", "req-esc", "beta").to_wire_value();
+    wire["originMachine"] = serde_json::json!("../../escaped");
+    let body = serde_json::json!({
+        "version": 1,
+        "kind": "edda.node.sync",
+        "originMachine": "alpha",
+        "events": [wire],
+    });
+    let (status, response) = http_post(addr, "/api/sync", Some("shared-token"), &body);
+    assert_eq!(
+        status, 200,
+        "a per-event refusal is a 200 with a refused list"
+    );
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["refused"][0]["index"], 0);
+    assert!(
+        response["refused"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("originMachine"),
+        "the refusal must name originMachine: {response}"
+    );
+    assert!(
+        coordination_lines(repo.path()).is_empty(),
+        "a refused lane_request lands nothing"
+    );
+    let store_root = edda_store::store_root();
+    assert!(
+        !store_root.join("escaped.jsonl").exists(),
+        "no file may appear outside the queue directory"
     );
 }
 

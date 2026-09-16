@@ -43,6 +43,12 @@ a second task system. The authoritative wire contract is
 - `tokenEnv` names an environment variable holding the shared token. The value
   is read at request time and is never stored, printed, logged or replicated.
   Unknown keys anywhere in `node.json` fail closed and name the offending key.
+- The **serving** machine reads its accepted token from the fixed
+  `EDDA_NODE_TOKEN`; each peer's `tokenEnv` must name a variable that holds the
+  *same* shared value on that peer. The variable name is a local indirection,
+  not a second secret: a peer naming a variable whose value differs receives a
+  **401 by design**, and a token absent from both the request and the server
+  config is also a 401 — never an open door.
 
 ## Run the node
 
@@ -56,8 +62,11 @@ edda node peers --json
 replicator that flushes each peer's durable outbound queue. `status` and `peers`
 are **local observations**: an unreachable or unobserved peer reports
 `reachable: false` with a reason and a freshness timestamp, never a silent zero,
-and the revision is a local fact (from `EDDA_PI_RELEASE_ID` or git HEAD), not a
-global claim.
+and the revision is a local fact with its origin named (`revisionOrigin`:
+`"build"` from this binary's own build identity, `"repo-head"` from the
+workspace git HEAD, or `"none"` with `revision: null`), not a global claim.
+A Pi package release id (`EDDA_PI_RELEASE_ID`) is never substituted for the
+edda revision.
 
 ## Send a request across machines
 
@@ -135,6 +144,11 @@ as named states, never as `dead` or a zero:
 - Every envelope is `deny_unknown_fields`. Unknown fields, and secret-shaped
   names (`sessionId`, `path`, `ownerRoot`, `registry`, `lease`, `token`, ...),
   are refused by name and never partially applied.
+- Every **machine-shaped value** (`originMachine`, `handover.fromMachine` /
+  `toMachine`, `activation_observation.machine`) must be a bare machine label
+  (`^[a-z0-9._-]{1,64}$`). A value carrying `/`, `\`, `..`, `:` or an absolute
+  path is refused at parse time, so a wire value can never reach a filesystem
+  path.
 - Auth is a shared bearer token checked before the body is read; a missing, empty
   or wrong token is a 401 that writes nothing. A token absent from both the
   request and the server config is a 401, not an open door.

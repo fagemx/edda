@@ -650,7 +650,10 @@ edda node peers [--config <path>] [--insecure-bind] [--json]
 - `tokenEnv` names an environment variable holding the shared token. The
   **value** is read at request time and never stored, printed, or replicated;
   an unset token is a 401, not an open door. `edda node start` reads its own
-  accepted token from `EDDA_NODE_TOKEN`.
+  accepted token from the fixed `EDDA_NODE_TOKEN`, and each peer's `tokenEnv`
+  must name a variable holding the same shared value; a peer naming a variable
+  whose value differs gets a **401 by design** (the name is a local
+  indirection, never a second secret).
 - Unknown keys anywhere in `node.json` fail closed and name the offending key.
 
 `POST /api/sync` carries `{version, kind, originMachine, events[]}` where every
@@ -661,11 +664,15 @@ name, never ignored, and never partially applied. Import dedupes on
 nothing twice. The outbound queue (`<store root>/node/queue/<peer>.jsonl`) is on
 disk and survives a restart: `sent → delivered → acked`.
 
-`edda node status` is a **local observation**: the machine, bind, revision
-(from `EDDA_PI_RELEASE_ID` or git HEAD, else `null`), per-peer queue counts and
-last-success time, and a bounded reachability probe. An unreachable peer is
-reported `reachable: false` with a reason, never as a silent zero. `edda node
-peers` lists the configured peers with their last-seen facts.
+`edda node status` is a **local observation**: the machine, bind, revision and
+`revisionOrigin`, per-peer queue counts and last-success time, and a bounded
+reachability probe. `revision` is the edda revision this process can observe:
+`revisionOrigin` is `"build"` (this binary's own build identity), `"repo-head"`
+(the workspace git HEAD), or `"none"` with `revision: null` — never a Pi package
+release id (`EDDA_PI_RELEASE_ID`) or another artifact's identifier. An
+unreachable peer is reported `reachable: false` with a reason, never as a
+silent zero. `edda node peers` lists the configured peers with their last-seen
+facts.
 
 #### Lane delivery (`sent → delivered → acked → dead`)
 

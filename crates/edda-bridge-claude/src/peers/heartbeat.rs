@@ -467,6 +467,11 @@ pub fn write_remote_request(
     message: &str,
     via_machine: &str,
 ) -> anyhow::Result<()> {
+    // `via_machine` reaches `OutboundQueue::open` on a later ack, so it must be
+    // a bare machine label, never wire text that names a path.
+    if let Err(error) = edda_ledger::node::validate_machine_label(via_machine) {
+        anyhow::bail!("invalid via_machine '{via_machine}': {error}");
+    }
     if request_exists(project_id, request_id) {
         anyhow::bail!(
             "request '{request_id}' already exists in the coordination log; refusing to apply it twice"
@@ -500,7 +505,10 @@ pub fn write_request_delivered(
     to_label: &str,
     via_machine: &str,
     via_event_id: &str,
-) {
+) -> anyhow::Result<()> {
+    if let Err(error) = edda_ledger::node::validate_machine_label(via_machine) {
+        anyhow::bail!("invalid via_machine '{via_machine}': {error}");
+    }
     let event = CoordEvent {
         ts: now_rfc3339(),
         session_id: String::new(),
@@ -513,6 +521,7 @@ pub fn write_request_delivered(
         }),
     };
     append_coord_event(project_id, &event);
+    Ok(())
 }
 
 /// Record an acknowledgement covering exactly one request id (GH-685).
