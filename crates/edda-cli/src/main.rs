@@ -24,6 +24,7 @@ mod cmd_draft;
 mod cmd_export;
 mod cmd_fleet;
 mod cmd_fleet_order;
+mod cmd_fleet_watch;
 mod cmd_gc;
 mod cmd_group;
 mod cmd_inbox;
@@ -75,7 +76,6 @@ mod pipeline_templates;
 mod test_support;
 #[cfg(feature = "tui")]
 mod tui;
-
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 
