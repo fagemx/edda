@@ -77,7 +77,7 @@
 # real process (Start-Sleep 20) in place of the agent, proves the task
 # process's parent is the Task Scheduler service (svchost.exe, doneWhen 3),
 # then unregisters. No agent spend. Every dry-run artifact is named
-# `$Name.dryrun*` inside -LogDir (log, done-file, wrapper, brief) — the real
+# `$Name.dryrun*` inside -LogDir (log, done-file, wrapper, brief, evidence) — the real
 # lane's `$Name.log` and `$Name.done` are never touched, so a real launch
 # after a dry run starts with a clean log and no stale done-file. That
 # namespace is why any -Name containing the dryrun segment is rejected by
@@ -264,6 +264,13 @@ if ($BuildLane) {
 }
 $Log = Join-Path $LogDir "$Name.log"
 $Done = Join-Path $LogDir "$Name.done"
+# GH-748: the durable delivery checkpoint. The done-file records only the exit
+# code, so a lane killed at its timeout left nothing that distinguished "ran
+# every gate and delivered nothing" from "did nothing". This side-file records
+# the lane's git delivery state (branch, HEAD, upstream, unpushed commits, the
+# dirty paths) independently of the log, so the evidence survives both an
+# empty log and removal of the scheduled-task registration.
+$Evidence = Join-Path $LogDir "$Name.evidence"
 $Wrapper = Join-Path $LogDir "$Name.wrapper.ps1"
 
 # Full path for the task action — 'pwsh.exe' does not resolve in the task
@@ -310,6 +317,11 @@ try {
   $controller = Get-Process -Id $PID -ErrorAction Stop
   $controllerStarted = $controller.StartTime.ToUniversalTime().ToString('o')
   Add-Content -LiteralPath $PSCommandPath -Value "# lane-reap: controller-pid=$PID controller-started=$controllerStarted" -Encoding utf8
+  # GH-748: the log is the lane's first-line evidence. Written before dispatch
+  # so a lane killed before its finally block (a host-process exit, a hard
+  # timeout) still leaves a readable log — and the GH-672 convention holds:
+  # a log with LANE_START but no '=== EXIT' was killed, not never run.
+  Add-Content -LiteralPath __LOG__ -Value "LANE_START at=$([DateTime]::UtcNow.ToString('o'))" -Encoding utf8
   __REVIEW_PREFLIGHT__
   __RUN__
   $code = $LASTEXITCODE
@@ -322,6 +334,52 @@ try {
   try { __REVIEW_FINISH__ } catch {
     $_ | Out-File __LOG__ -Append -Encoding utf8
     if ($null -eq $code -or $code -eq 0) { $code = 2 }
+  }
+  # GH-748: flush the delivery evidence before teardown. A lane that ends with
+  # an unpushed commit or a dirty worktree is UNDELIVERED — the exact state
+  # that was invisible on 2026-09-03, when three lanes' finished work never
+  # reached a PR. This runs before the registration is removed and before the
+  # done-file is written, so a later teardown failure cannot erase it, and it
+  # is wrapped so it can never turn a successful lane into a failed one.
+  try {
+    $evidenceHead = (& git rev-parse HEAD 2>$null)
+    $evidenceBranch = (& git rev-parse --abbrev-ref HEAD 2>$null)
+    $evidenceUpstream = (& git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null)
+    if (-not $evidenceUpstream -and $evidenceBranch -and $evidenceBranch -ne 'HEAD') {
+      if (& git rev-parse --verify --quiet "origin/$evidenceBranch" 2>$null) { $evidenceUpstream = "origin/$evidenceBranch" }
+    }
+    $unpushed = 0
+    if ($evidenceUpstream) { $unpushed = [int](& git rev-list --count "$evidenceUpstream..HEAD" 2>$null) }
+    elseif ($evidenceBranch -and $evidenceBranch -ne 'HEAD') { $unpushed = [int](& git rev-list --count 'origin/main..HEAD' 2>$null) }
+    $porcelain = @(& git status --porcelain=v1 --untracked-files=all 2>$null)
+    if ($porcelain.Count -gt 0 -or $unpushed -gt 0) { $delivery = 'UNDELIVERED' }
+    elseif ($code -eq 0) { $delivery = 'COMPLETE' }
+    else { $delivery = 'EMPTY' }
+    # The __TASK__/__CWD__/__LOG__/__EVIDENCE__ substitutions are PowerShell
+    # quoted literals, so bind them first: interpolating them straight into a
+    # double-quoted string would keep the quote characters as content.
+    $evidenceTask = __TASK__
+    $evidenceCwd = __CWD__
+    $evidenceLog = __LOG__
+    $evidencePath = __EVIDENCE__
+    $evidenceLines = @(
+      "task=$evidenceTask"
+      "cwd=$evidenceCwd"
+      "branch=$evidenceBranch"
+      "head=$evidenceHead"
+      "upstream=$evidenceUpstream"
+      "unpushed=$unpushed"
+      "dirty=$($porcelain.Count)"
+      "exit=$code"
+      "delivery=$delivery"
+      "log=$evidenceLog"
+      "at=$([DateTime]::UtcNow.ToString('o'))"
+      'porcelain:'
+    ) + $porcelain
+    Set-Content -LiteralPath $evidencePath -Value ($evidenceLines -join "`n") -Encoding utf8
+    Add-Content -LiteralPath $evidenceLog -Value "LANE_EVIDENCE delivery=$delivery head=$evidenceHead dirty=$($porcelain.Count) unpushed=$unpushed evidence=$evidencePath" -Encoding utf8
+  } catch {
+    try { Add-Content -LiteralPath __LOG__ -Value "lane evidence failed: $($_.Exception.Message)" -Encoding utf8 } catch {}
   }
   $unregisterVerdict = 'unregistered'
   try {
@@ -419,6 +477,7 @@ if ($DryRun) {
   # already-exited and a killed lane would look cleanly finished (GH-672).
   $Log = Join-Path $LogDir "$Name.dryrun.log"
   $Done = Join-Path $LogDir "$Name.dryrun.done"
+  $Evidence = Join-Path $LogDir "$Name.dryrun.evidence"
   $runDry = "& pwsh -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 20' 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
   $Wrapper = Join-Path $LogDir "$Name.dryrun-wrapper.ps1"
 
@@ -430,7 +489,7 @@ if ($DryRun) {
     $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
   }
   $wrapperText = $wrapperText.Replace('__IDENTITY_ENV__', $identityEnv)
-  $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
+  $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)).Replace('__EVIDENCE__', (PsQuote $Evidence)) |
     Set-Content -LiteralPath $Wrapper -Encoding utf8
   "dry-run wrapper=$Wrapper (identical to the real wrapper except __RUN__ runs the trivial process)"
   "dry-run log=$Log"
@@ -525,10 +584,17 @@ if ($BuildLane) {
   $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
 }
 $wrapperText = $wrapperText.Replace('__IDENTITY_ENV__', $identityEnv)
-$wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
+$wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)).Replace('__EVIDENCE__', (PsQuote $Evidence)) |
   Set-Content -LiteralPath $Wrapper -Encoding utf8
 
-Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
+# A relaunch under the same name must not inherit the previous run's terminal
+# artifacts (GH-748 review P1): a stale .evidence recorded COMPLETE would
+# otherwise outrank the new run's dirty worktree in lane-status, and a stale
+# log's '=== EXIT' would contradict the LANE_START-without-EXIT killed
+# convention that a killed run is meant to leave.
+Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $Evidence -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $Log -ErrorAction SilentlyContinue
 $registered = $false
 $scheduledActionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`""
 $registrationDescription = "edda lane registration $([guid]::NewGuid().ToString('N'))"
