@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use edda_ledger::node::{
-    self, NodeConfig, NodeEvent, NodeEventBody, NodeSection, OutboundQueue, OwnerReturn,
-    PeerConfig, QueueEntry,
+    self, LaneRequest, NodeConfig, NodeEvent, NodeEventBody, NodeSection, OutboundQueue,
+    OwnerReturn, PeerConfig, QueueEntry,
 };
 
 use crate::state::AppState;
@@ -491,5 +491,144 @@ fn sync_refuses_unknown_event_field_without_partial_application() {
     assert!(
         mailbox_ids(repo.path()).is_empty(),
         "nothing partially applied"
+    );
+}
+
+// ── GH-685 lane-request landing ────────────────────────────────────────
+
+fn lane_request_event(machine: &str, request_id: &str, to_label: &str) -> NodeEvent {
+    NodeEvent::new(NodeEventBody::LaneRequest(LaneRequest {
+        request_id: request_id.into(),
+        from_label: "alpha".into(),
+        to_label: to_label.into(),
+        message: "cross-machine please".into(),
+        ts: "2026-09-16T00:00:00Z".into(),
+        origin_machine: machine.into(),
+    }))
+}
+
+fn coordination_lines(repo_root: &Path) -> Vec<serde_json::Value> {
+    let project_id = edda_store::project_id(repo_root);
+    let path = edda_store::project_dir(&project_id)
+        .join("state")
+        .join("coordination.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("coordination line"))
+        .collect()
+}
+
+/// §6.7 — the receiving node lands a `lane_request` by writing a local
+/// `request` event with the wire id/labels and a `request_delivered` marker; no
+/// session id crosses the wire.
+#[test]
+fn lane_request_landing_writes_request_then_request_delivered_and_no_session_id() {
+    let store = tempfile::tempdir().unwrap();
+    let repo = workspace();
+    let _env = EnvOverride::install(store.path(), repo.path());
+    let config = node_config("beta", "127.0.0.1", 6850, vec![]);
+    let addr = spawn_server(node_router(repo.path(), config, "shared-token"));
+
+    let event = lane_request_event("alpha", "req-lane-1", "beta-role");
+    let event_id = event.event_id.clone();
+    let (status, body) = http_post(
+        addr,
+        "/api/sync",
+        Some("shared-token"),
+        &sync_body("alpha", std::slice::from_ref(&event)),
+    );
+    assert_eq!(status, 200, "sync body: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        response["accepted"].as_array().unwrap(),
+        &vec![serde_json::json!(event_id)],
+        "a landed lane_request is accepted (the delivered receipt)"
+    );
+    assert!(response["refused"].as_array().unwrap().is_empty());
+
+    let lines = coordination_lines(repo.path());
+    assert_eq!(lines.len(), 2, "request then request_delivered");
+    assert_eq!(lines[0]["event_type"], "request");
+    assert_eq!(lines[0]["payload"]["id"], "req-lane-1");
+    assert_eq!(lines[0]["payload"]["from_label"], "alpha");
+    assert_eq!(lines[0]["payload"]["to_label"], "beta-role");
+    assert_eq!(lines[0]["payload"]["via_machine"], "alpha");
+    // `session_id` is the local node's identity, never anything from the wire.
+    assert_eq!(lines[0]["session_id"], "node-beta");
+    assert_eq!(lines[1]["event_type"], "request_delivered");
+    assert_eq!(lines[1]["payload"]["request_id"], "req-lane-1");
+    assert_eq!(lines[1]["payload"]["via_machine"], "alpha");
+    assert_eq!(lines[1]["payload"]["via_event_id"], event_id);
+    let raw = serde_json::to_string(&lines).unwrap();
+    assert!(
+        !raw.contains("sessionId"),
+        "no session id came off the wire"
+    );
+
+    // A resend is a transport duplicate and applies nothing twice.
+    let (status, body) = http_post(
+        addr,
+        "/api/sync",
+        Some("shared-token"),
+        &sync_body("alpha", std::slice::from_ref(&event)),
+    );
+    assert_eq!(status, 200);
+    let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["duplicates"].as_array().unwrap().len(), 1);
+    assert_eq!(coordination_lines(repo.path()).len(), 2, "applied once");
+}
+
+/// §6.8 — a `lane_request` carrying a session id is refused by name; the same
+/// applies to this machine's own alias (a loop).
+#[test]
+fn lane_request_carrying_a_session_id_is_refused() {
+    let store = tempfile::tempdir().unwrap();
+    let repo = workspace();
+    let _env = EnvOverride::install(store.path(), repo.path());
+    let config = node_config("beta", "127.0.0.1", 6850, vec![]);
+    let addr = spawn_server(node_router(repo.path(), config, "shared-token"));
+
+    let mut wire = lane_request_event("alpha", "req-lane-2", "beta-role").to_wire_value();
+    wire["sessionId"] = serde_json::json!("s-leak");
+    let body = serde_json::json!({
+        "version": 1,
+        "kind": "edda.node.sync",
+        "originMachine": "alpha",
+        "events": [wire],
+    });
+    let (status, response) = http_post(addr, "/api/sync", Some("shared-token"), &body);
+    assert_eq!(status, 200, "a per-event refusal is a 200");
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(
+        response["refused"][0]["reason"],
+        "forbidden field `sessionId`"
+    );
+    assert!(coordination_lines(repo.path()).is_empty());
+
+    // A lane_request whose origin is this machine's own alias is refused as a
+    // loop rather than landed.
+    let event = lane_request_event("beta", "req-loop", "beta-role");
+    let (status, response) = http_post(
+        addr,
+        "/api/sync",
+        Some("shared-token"),
+        &sync_body("beta", std::slice::from_ref(&event)),
+    );
+    assert_eq!(status, 200);
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["refused"].as_array().unwrap().len(), 1);
+    assert!(
+        response["refused"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("loop"),
+        "the refusal names the loop: {response}"
+    );
+    assert!(
+        coordination_lines(repo.path()).is_empty(),
+        "a loop is not landed"
     );
 }

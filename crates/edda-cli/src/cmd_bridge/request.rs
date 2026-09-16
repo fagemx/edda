@@ -1,24 +1,104 @@
 use std::path::Path;
 
-/// `edda bridge claude request <to> <message>` — send cross-agent request
+use edda_ledger::node::{LaneRequest, NodeEvent, NodeEventBody, OutboundQueue};
+
+/// `edda request <to> <message> [--status <id>]` and
+/// `edda bridge claude request` — send cross-agent request.
 ///
 /// The target is a free-string label, so a typo used to be indistinguishable
 /// from a delivered message (GH-443). Resolve it against live sessions first:
 /// nobody listening is an error unless `--force`, and an ambiguous label is a
 /// warning, because the message really will land in several inboxes.
+///
+/// A `<machine>/<role>` target (GH-685) is machine-qualified: a same-machine
+/// target stays local, any other machine's target is enqueued as a
+/// `lane_request` into that peer's durable outbound queue instead of
+/// dead-lettering. `--status <id>` is read-only and reports the sender-side
+/// delivery state.
 pub fn request(
     repo_root: &Path,
     to: &str,
     message: &str,
     cli_session: Option<&str>,
     force: bool,
+    status: Option<&str>,
+    json: bool,
 ) -> anyhow::Result<()> {
+    if let Some(id) = status {
+        return crate::cmd_inbox::print_request_status(repo_root, id, json);
+    }
     let project_id = edda_store::project_id(repo_root);
     let (session_id, from_label) = resolve_session_id(cli_session, &project_id, "cli")?;
 
-    let targets = edda_bridge_claude::peers::resolve_request_targets(&project_id, to);
+    if let Some((machine, role)) = split_machine_target(to) {
+        if local_machine_alias(repo_root).as_deref() == Some(machine.as_str()) {
+            // Same machine: the local path needs no wire at all.
+            return send_local(
+                repo_root,
+                &project_id,
+                &session_id,
+                &from_label,
+                role,
+                message,
+                force,
+            );
+        }
+        return send_remote(
+            repo_root,
+            &project_id,
+            &session_id,
+            &from_label,
+            &machine,
+            role,
+            message,
+        );
+    }
+
+    send_local(
+        repo_root,
+        &project_id,
+        &session_id,
+        &from_label,
+        to,
+        message,
+        force,
+    )
+}
+
+/// Split `<machine>/<role>` into its two parts when the prefix is a valid
+/// machine label and the role is non-empty. A plain label (no slash, or an
+/// invalid prefix) is not machine-qualified.
+fn split_machine_target(to: &str) -> Option<(String, &str)> {
+    let (machine, role) = to.split_once('/')?;
+    if role.is_empty() || edda_ledger::node::validate_machine_label(machine).is_err() {
+        return None;
+    }
+    Some((machine.to_string(), role))
+}
+
+/// This machine's node alias: `node.json`'s alias when present, else the
+/// best-effort `EDDA_MACHINE`/host identity. `None` means no alias is known,
+/// which is a refusal for the wire path — never a guessed address.
+pub(crate) fn local_machine_alias(_repo_root: &Path) -> Option<String> {
+    if let Ok(config) = edda_ledger::node::load_node_config(&edda_ledger::node::node_config_path())
+    {
+        return Some(config.node.alias);
+    }
+    edda_bridge_claude::peers::machine_identity()
+}
+
+fn send_local(
+    repo_root: &Path,
+    project_id: &str,
+    session_id: &str,
+    from_label: &str,
+    to: &str,
+    message: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    let targets = edda_bridge_claude::peers::resolve_request_targets(project_id, to);
     if targets.is_empty() && !force {
-        let active = active_labels(&project_id);
+        let active = active_labels(project_id);
         let known = if active.is_empty() {
             "no sessions are currently active".to_string()
         } else {
@@ -36,14 +116,14 @@ pub fn request(
         );
     }
 
-    edda_bridge_claude::peers::write_request(&project_id, &session_id, &from_label, to, message);
+    edda_bridge_claude::peers::write_request(project_id, session_id, from_label, to, message);
     let notify_config =
         edda_notify::NotifyConfig::load(&edda_ledger::EddaPaths::discover(repo_root));
     if !notify_config.channels.is_empty() {
         edda_notify::dispatch(
             &notify_config,
             &edda_notify::NotifyEvent::RequestPending {
-                from_label: from_label.clone(),
+                from_label: from_label.to_string(),
                 to_label: to.to_string(),
                 message: message.to_string(),
             },
@@ -63,6 +143,56 @@ pub fn request(
         );
     }
     Ok(())
+}
+
+/// Enqueue a `lane_request` into the peer's durable outbound queue. The local
+/// `request` coord event is written first (same id) so the sender's own board
+/// and `edda request --status` both see it. The wire carries labels and a
+/// machine alias only: never a session id, path, root, lease or credential.
+fn send_remote(
+    repo_root: &Path,
+    project_id: &str,
+    session_id: &str,
+    from_label: &str,
+    machine: &str,
+    role: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    let origin = local_machine_alias(repo_root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot address '{machine}/{role}': this machine has no node alias (configure node.json)"
+        )
+    })?;
+    let request_id = ulid::Ulid::new().to_string();
+    if !edda_bridge_claude::peers::write_request_with_id(
+        project_id,
+        session_id,
+        &request_id,
+        from_label,
+        &format!("{machine}/{role}"),
+        message,
+    ) {
+        anyhow::bail!("request id '{request_id}' already exists; refusing to reuse it");
+    }
+    let event = NodeEvent::new(NodeEventBody::LaneRequest(LaneRequest {
+        request_id: request_id.clone(),
+        from_label: from_label.to_string(),
+        to_label: role.to_string(),
+        message: message.to_string(),
+        ts: now_rfc3339(),
+        origin_machine: origin,
+    }));
+    OutboundQueue::open(machine)?.enqueue(&event)?;
+    println!(
+        "Request queued across the wire for [{machine}/{role}]: \"{message}\" (request {request_id})"
+    );
+    Ok(())
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
 }
 
 /// Labels of every currently active session, for "did you mean" diagnostics.

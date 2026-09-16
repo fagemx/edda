@@ -400,6 +400,146 @@ pub fn write_request(
     id
 }
 
+/// Write a cross-agent request event with an explicit id.
+///
+/// Refuses (returns `false`, writes nothing) when the id already exists in the
+/// coordination log, so a redelivered node `lane_request` is not applied twice
+/// at this layer. Returns `true` when the event was appended.
+pub fn write_request_with_id(
+    project_id: &str,
+    session_id: &str,
+    request_id: &str,
+    from_label: &str,
+    to_label: &str,
+    message: &str,
+) -> bool {
+    if request_exists(project_id, request_id) {
+        return false;
+    }
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::Request,
+        payload: serde_json::json!({
+            "id": request_id,
+            "from_label": from_label,
+            "to_label": to_label,
+            "message": message,
+        }),
+    };
+    append_coord_event(project_id, &event);
+    true
+}
+
+/// True when a request with this id already exists in the coordination log.
+pub fn request_exists(project_id: &str, request_id: &str) -> bool {
+    compute_board_state(project_id)
+        .requests
+        .iter()
+        .any(|request| request.id == request_id)
+}
+
+/// True when a `request_delivered` marker names this request id.
+pub fn request_delivered_exists(project_id: &str, request_id: &str) -> bool {
+    compute_board_state(project_id)
+        .request_delivered
+        .iter()
+        .any(|delivered| delivered.request_id == request_id)
+}
+
+/// Land a transported `lane_request` (GH-685).
+///
+/// Writes the local `request` coord event with the wire `requestId` (id reuse),
+/// the two labels and the message, plus the provenance facts `via_machine` (the
+/// origin machine) and `via_event_id` (the canonical wire `eventId`). No session
+/// id, path, root or lease ever comes off the wire: `session_id` is the local
+/// node's own identity.
+///
+/// Refuses (errors, writes nothing) a `requestId` that already exists, so a
+/// redelivered envelope is not applied twice even though `mark_imported`
+/// already dedupes at the transport level.
+pub fn write_remote_request(
+    project_id: &str,
+    session_id: &str,
+    request_id: &str,
+    from_label: &str,
+    to_label: &str,
+    message: &str,
+    via_machine: &str,
+) -> anyhow::Result<()> {
+    if request_exists(project_id, request_id) {
+        anyhow::bail!(
+            "request '{request_id}' already exists in the coordination log; refusing to apply it twice"
+        );
+    }
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::Request,
+        payload: serde_json::json!({
+            "id": request_id,
+            "from_label": from_label,
+            "to_label": to_label,
+            "message": message,
+            "via_machine": via_machine,
+        }),
+    };
+    append_coord_event(project_id, &event);
+    Ok(())
+}
+
+/// Write the `request_delivered` marker for a landed lane request.
+///
+/// `via_event_id` is the canonical wire `eventId` of the `lane_request`; it is
+/// stored so `edda inbox ack` can emit a `receipt{state:"acked"}` keyed to the
+/// sender's durable queue entry. This is transport provenance, never an
+/// acknowledgement.
+pub fn write_request_delivered(
+    project_id: &str,
+    request_id: &str,
+    to_label: &str,
+    via_machine: &str,
+    via_event_id: &str,
+) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: String::new(),
+        event_type: CoordEventType::RequestDelivered,
+        payload: serde_json::json!({
+            "request_id": request_id,
+            "to_label": to_label,
+            "via_machine": via_machine,
+            "via_event_id": via_event_id,
+        }),
+    };
+    append_coord_event(project_id, &event);
+}
+
+/// Record an acknowledgement covering exactly one request id (GH-685).
+///
+/// An unknown id is a named error, never a silent success.
+pub fn write_request_ack_id(
+    project_id: &str,
+    session_id: &str,
+    from_label: &str,
+    request_id: &str,
+) -> anyhow::Result<()> {
+    if !request_exists(project_id, request_id) {
+        anyhow::bail!("unknown request id '{request_id}'; nothing was acknowledged");
+    }
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::RequestAck,
+        payload: serde_json::json!({
+            "from_label": from_label,
+            "request_ids": [request_id],
+        }),
+    };
+    append_coord_event(project_id, &event);
+    Ok(())
+}
+
 /// Write a request acknowledgement event.
 ///
 /// Resolves which of `from_label`'s messages are actually outstanding for this

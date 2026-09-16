@@ -552,36 +552,79 @@ fn show(dir: &Path, args: ShowArgs) -> Result<()> {
 }
 
 fn status(dir: &Path, args: OwnerArgs) -> Result<()> {
-    let record = holder(dir, &args.owner)?;
-    let pending = pending_messages(dir, &args.owner)?.len();
-    let all = list_json::<MessageRecord>(&dir.join("messages"))?
-        .into_iter()
-        .filter(|m| m.owner == args.owner)
-        .count();
+    let document = status_document(dir, &args.owner)?;
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "owner": args.owner,
-                "holder": record.as_ref().map(|r| r.holder_session.clone()),
-                "holderSince": record.as_ref().map(|r| r.holder_since.clone()),
-                "pending": pending,
-                "total": all,
-            }))?
-        );
+        println!("{}", serde_json::to_string_pretty(&document)?);
     } else {
-        match record {
-            Some(record) => println!(
-                "owner {} held by {} (pending {pending}, total {all})",
-                args.owner, record.holder_session
+        match document["holder"].as_str() {
+            Some(holder) => println!(
+                "owner {} held by {} (pending {}, total {})",
+                args.owner, holder, document["pending"], document["total"]
+            ),
+            None if document["holderUnknown"] == serde_json::json!(true) => println!(
+                "owner {} holder unknown ({}); pending {}, total {}",
+                args.owner,
+                document["holderUnknownReason"]
+                    .as_str()
+                    .unwrap_or("no holder"),
+                document["pending"],
+                document["total"]
             ),
             None => println!(
-                "owner {} unbound (pending {pending}, total {all})",
-                args.owner
+                "owner {} unbound (pending {}, total {})",
+                args.owner, document["pending"], document["total"]
             ),
+        }
+        if document["handoverPending"] == serde_json::json!(true) {
+            println!("handover pending for {}", args.owner);
         }
     }
     Ok(())
+}
+
+/// The read-only status document. Ambiguity (`holder_unknown`,
+/// `handover_pending`) is surfaced as a named fact with a reason, never as a
+/// healthy zero and never as `dead`/absent (frozen contract §5/§9).
+fn status_document(dir: &Path, owner: &str) -> Result<serde_json::Value> {
+    let record = holder(dir, owner)?;
+    let pending = pending_messages(dir, owner)?.len();
+    let all = list_json::<MessageRecord>(&dir.join("messages"))?
+        .into_iter()
+        .filter(|message| message.owner == owner)
+        .count();
+
+    // A replicated handover from another machine names this owner (D4). It is
+    // read-only here: status never binds, claims or mutates anything.
+    let handover = edda_ledger::node::read_handover()
+        .ok()
+        .and_then(|map| map.get(owner).cloned());
+    let handover_pending = handover
+        .as_ref()
+        .and_then(|value| value.get("pending"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    // No local binding and no replicated handover names a holder: this machine
+    // cannot say who holds the owner. That is a named ambiguity, not a zero.
+    let holder_unknown = record.is_none() && handover.is_none();
+    let holder_unknown_reason = holder_unknown.then(|| {
+        if edda_ledger::node::load_node_config(&edda_ledger::node::node_config_path()).is_err() {
+            "no local binding and this machine has no node configured, so no replicated handover can have arrived".to_string()
+        } else {
+            "no local binding and no replicated handover names a holder for this owner".to_string()
+        }
+    });
+
+    Ok(serde_json::json!({
+        "owner": owner,
+        "holder": record.as_ref().map(|r| r.holder_session.clone()),
+        "holderSince": record.as_ref().map(|r| r.holder_since.clone()),
+        "holderUnknown": holder_unknown,
+        "holderUnknownReason": holder_unknown_reason,
+        "handoverPending": handover_pending,
+        "handover": handover,
+        "pending": pending,
+        "total": all,
+    }))
 }
 
 #[cfg(test)]
@@ -837,5 +880,62 @@ mod tests {
             shared
         );
         assert!(mailbox_root(&repo, Some(std::ffi::OsString::from("relative/path"))).is_err());
+    }
+
+    // §6.11
+    #[test]
+    fn return_status_reports_holder_unknown_never_zero() {
+        let _store = crate::test_support::isolated_store();
+        let dir = temp();
+        ensure_layout(&dir).unwrap();
+        let document = status_document(&dir, "assistant/p").unwrap();
+        assert_eq!(document["holder"], serde_json::Value::Null);
+        assert_eq!(
+            document["holderUnknown"],
+            serde_json::json!(true),
+            "an unbound owner with no handover is holder_unknown"
+        );
+        assert!(
+            !document["holderUnknownReason"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "holder_unknown carries a reason string, never a silent zero"
+        );
+        assert_eq!(document["pending"], serde_json::json!(0));
+        assert_eq!(document["total"], serde_json::json!(0));
+    }
+
+    // §6.11
+    #[test]
+    fn return_status_reports_handover_pending() {
+        let _store = crate::test_support::isolated_store();
+        let repo = temp();
+        let event = edda_ledger::node::NodeEvent::new(edda_ledger::node::NodeEventBody::Handover(
+            edda_ledger::node::Handover {
+                owner: "assistant/p".into(),
+                from_holder: "h1".into(),
+                to_holder: "h2".into(),
+                from_machine: "machine-a".into(),
+                to_machine: "machine-b".into(),
+                note: "handover".into(),
+                ts: "2026-09-16T00:00:00Z".into(),
+            },
+        ));
+        edda_ledger::node::import_batch(&repo, &[event]).unwrap();
+
+        let dir = temp();
+        ensure_layout(&dir).unwrap();
+        let document = status_document(&dir, "assistant/p").unwrap();
+        assert_eq!(
+            document["handoverPending"],
+            serde_json::json!(true),
+            "a replicated pending handover is surfaced, never healthy-zero"
+        );
+        assert_eq!(
+            document["holderUnknown"],
+            serde_json::json!(false),
+            "a replicated handover names a holder"
+        );
     }
 }

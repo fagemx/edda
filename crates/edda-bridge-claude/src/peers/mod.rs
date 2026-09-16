@@ -106,6 +106,11 @@ pub(crate) enum CoordEventType {
     Binding,
     Request,
     RequestAck,
+    /// A transported `lane_request` was landed locally by the node (GH-685).
+    /// Written *after* the `request` event it names, so a delivered-but-unacked
+    /// request is still pending: this marker is transport provenance, never an
+    /// acknowledgement.
+    RequestDelivered,
     SubagentCompleted,
     TaskCompleted,
     TeammateIdle,
@@ -146,6 +151,23 @@ pub struct RequestEntry {
     pub ts: String,
 }
 
+/// A transported lane request's local landing marker (GH-685).
+///
+/// One per request id that arrived over the node wire. `via_machine` is the
+/// origin machine (provenance, never an address); `via_event_id` is the
+/// canonical wire `eventId`, so an ack can emit a receipt keyed to the sender's
+/// durable queue entry. Neither is a session, run id, path or lease.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestDeliveredEntry {
+    pub request_id: String,
+    pub to_label: String,
+    #[serde(default)]
+    pub via_machine: String,
+    #[serde(default)]
+    pub via_event_id: String,
+    pub ts: String,
+}
+
 /// A request acknowledgement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestAckEntry {
@@ -179,6 +201,7 @@ pub struct BoardState {
     pub bindings: Vec<BindingEntry>,
     pub requests: Vec<RequestEntry>,
     pub request_acks: Vec<RequestAckEntry>,
+    pub request_delivered: Vec<RequestDeliveredEntry>,
     pub subagent_completions: Vec<SubagentCompletedEntry>,
 }
 
@@ -279,9 +302,10 @@ pub(crate) use heartbeat::{
     write_subagent_heartbeat, write_task_completed, write_teammate_idle, SubagentReport,
 };
 pub use heartbeat::{
-    find_binding_conflict, remove_heartbeat, resolve_request_targets, touch_heartbeat,
-    write_binding, write_claim, write_claim_with_subject, write_heartbeat_minimal, write_request,
-    write_request_ack, write_unclaim,
+    find_binding_conflict, remove_heartbeat, request_delivered_exists, request_exists,
+    resolve_request_targets, touch_heartbeat, write_binding, write_claim, write_claim_with_subject,
+    write_heartbeat_minimal, write_remote_request, write_request, write_request_ack,
+    write_request_ack_id, write_request_delivered, write_request_with_id, write_unclaim,
 };
 pub use helpers::colliding_labels;
 pub use helpers::format_age;

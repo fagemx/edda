@@ -15,6 +15,13 @@
 
 use super::*;
 
+// GH-685: the identity encoding and validation rules are the shared ones in
+// `edda_ledger::node`, so this file-based path and the node import path are one
+// implementation and either round-trip is byte-identical.
+use edda_ledger::node::{
+    is_sha256_hex, owner_return_logical_id, validate_label, OwnerReturn as ReplicateEnvelope,
+};
+
 #[derive(Args, Debug)]
 pub struct ReplicateArgs {
     /// Export the local mailbox's immutable posted returns to a portable JSON file (read-only)
@@ -46,24 +53,6 @@ struct ReplicateFile {
     returns: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReplicateEnvelope {
-    logical_id: String,
-    message_id: String,
-    owner: String,
-    work: String,
-    status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    deliverable: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-    posted_at: String,
-    origin_machine: String,
-}
-
 const MAX_REPLICATE_BYTES: u64 = 64 * 1024 * 1024;
 const REPLICATE_KIND: &str = "edda.return.replicate";
 
@@ -80,30 +69,12 @@ struct ImportCounts {
 /// The dedupe key. It deliberately excludes the local posting session, the
 /// local salted message id and `postedAt`, so the same logical return posted
 /// from two machines collapses to one record on either side.
-fn logical_id(
-    owner: &str,
-    work: &str,
-    status: &str,
-    result: Option<&str>,
-    deliverable: Option<&str>,
-    message: Option<&str>,
-) -> String {
-    sha256_hex(
-        format!(
-            "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
-            owner,
-            work,
-            status,
-            result.unwrap_or(""),
-            deliverable.unwrap_or(""),
-            message.unwrap_or("")
-        )
-        .as_bytes(),
-    )
-}
-
+///
+/// GH-685: the body is the shared `edda_ledger::node::owner_return_logical_id`
+/// so the file path and the node import path share one implementation of the
+/// identity encoding.
 fn record_logical_id(record: &MessageRecord) -> String {
-    logical_id(
+    owner_return_logical_id(
         &record.owner,
         &record.work,
         &record.status,
@@ -133,21 +104,6 @@ fn envelope_of(record: &MessageRecord, machine: &str) -> ReplicateEnvelope {
         posted_at: record.posted_at.clone(),
         origin_machine,
     }
-}
-/// Ids on the wire are lowercase sha256 hex only, the same shape the local
-/// mailbox enforces, so an envelope can never name a path outside `messages/`.
-fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn validate_label(what: &str, value: &str) -> Result<()> {
-    if value.is_empty() || value.chars().count() > 200 || value.chars().any(char::is_control) {
-        bail!("invalid {what}: expected 1..=200 characters without control characters");
-    }
-    Ok(())
 }
 
 /// `--machine`, else `EDDA_MACHINE`, else `HOSTNAME`, else `COMPUTERNAME`, else
@@ -203,7 +159,7 @@ fn validate_envelope(envelope: &ReplicateEnvelope) -> Result<()> {
             }
         }
     }
-    let recomputed = logical_id(
+    let recomputed = owner_return_logical_id(
         &envelope.owner,
         &envelope.work,
         &envelope.status,
@@ -522,7 +478,7 @@ mod tests {
         assert_eq!(origin.message_id, imported.id);
         assert_eq!(
             origin.logical_id,
-            logical_id(
+            owner_return_logical_id(
                 "assistant/p",
                 "job-a",
                 "done",
@@ -799,7 +755,7 @@ mod tests {
         let message = "a\u{0}b";
         document["returns"][0]["message"] = serde_json::json!(message);
         // Keep the identity consistent so the NUL check, not a mismatch, is the refusal.
-        document["returns"][0]["logicalId"] = serde_json::json!(logical_id(
+        document["returns"][0]["logicalId"] = serde_json::json!(owner_return_logical_id(
             "assistant/p",
             "job-a",
             "done",
@@ -811,5 +767,77 @@ mod tests {
         write_document(&file, &document);
         assert!(import_registry(&target, &file).is_err());
         assert_eq!(message_count(&target), 0);
+    }
+
+    // §6.9 — the helper switch must not change a byte of the file behaviour.
+    #[test]
+    fn replicate_file_round_trip_is_byte_identical_after_the_helper_switch() {
+        let source = temp();
+        let target = temp();
+        bind(&source, "assistant/p", "s1", None).unwrap();
+        post_body(
+            &source,
+            "assistant/p",
+            "job-a",
+            "controller-1",
+            "report body",
+        )
+        .unwrap();
+        let first = source.join("first.json");
+        export_registry(&source, &first, "machine-a").unwrap();
+        let first_document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&first).unwrap()).unwrap();
+
+        assert_eq!(import_registry(&target, &first).unwrap().appended, 1);
+        let second = target.join("second.json");
+        export_registry(&target, &second, "machine-b").unwrap();
+        let second_document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&second).unwrap()).unwrap();
+
+        // The envelope bytes are identical: same field names, ordering and
+        // values; a relayed return keeps its original `originMachine`.
+        assert_eq!(
+            first_document["returns"], second_document["returns"],
+            "export -> import -> export must be byte-identical"
+        );
+        assert_eq!(second_document["returns"][0]["originMachine"], "machine-a");
+
+        // The existing refusals are unchanged: a foreign key still fails closed.
+        let mut foreign = first_document.clone();
+        foreign["returns"][0]["posted_by_session"] = serde_json::json!("controller-1");
+        let foreign_file = target.join("foreign.json");
+        write_document(&foreign_file, &foreign);
+        assert!(import_registry(&target, &foreign_file).is_err());
+    }
+
+    // §6.12 — an imported return stays unclaimable until this machine binds the
+    // owner, then is claimable exactly once.
+    #[test]
+    fn imported_owner_return_from_another_machine_is_unclaimable_then_claimable_exactly_once() {
+        let source = temp();
+        let target = temp();
+        bind(&source, "assistant/p", "s-source", None).unwrap();
+        post(&source, "assistant/p", "job-a", "controller-1").unwrap();
+        let file = source.join("from-other.json");
+        export_registry(&source, &file, "machine-a").unwrap();
+        assert_eq!(import_registry(&target, &file).unwrap().appended, 1);
+
+        // Visible pending, but unclaimable before a local binding.
+        assert_eq!(pending_messages(&target, "assistant/p").unwrap().len(), 1);
+        assert!(
+            claim(&target, "assistant/p", "s-target").is_err(),
+            "an imported return must not be claimable without a local binding"
+        );
+        assert_eq!(pending_messages(&target, "assistant/p").unwrap().len(), 1);
+
+        // After this machine binds the owner, the return is claimable exactly once.
+        bind(&target, "assistant/p", "s-target", None).unwrap();
+        claim(&target, "assistant/p", "s-target").unwrap();
+        assert!(pending_messages(&target, "assistant/p").unwrap().is_empty());
+        claim(&target, "assistant/p", "s-target").unwrap();
+        assert!(
+            pending_messages(&target, "assistant/p").unwrap().is_empty(),
+            "a second claim cannot double-present the same return"
+        );
     }
 }

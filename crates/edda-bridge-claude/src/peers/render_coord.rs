@@ -488,6 +488,7 @@ pub(crate) fn render_coord_diff(project_id: &str, session_id: &str) -> Option<St
             CoordEventType::Unclaim
             | CoordEventType::TaskCompleted
             | CoordEventType::SubagentCompleted
+            | CoordEventType::RequestDelivered
             | CoordEventType::RequestAck => continue,
             _ => {}
         }

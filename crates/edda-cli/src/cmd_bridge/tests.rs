@@ -601,7 +601,7 @@ fn request_to_unknown_label_is_rejected_unless_forced() {
     let _ = edda_store::ensure_dirs(&pid);
     edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "s-auth", "auth", ".");
 
-    let err = request(repo.path(), "aut", "hi", Some("s-cli"), false)
+    let err = request(repo.path(), "aut", "hi", Some("s-cli"), false, None, false)
         .expect_err("a typo'd label must not silently succeed");
     let msg = err.to_string();
     assert!(
@@ -614,9 +614,11 @@ fn request_to_unknown_label_is_rejected_unless_forced() {
     );
 
     // --force is the escape hatch for a peer that has not started yet.
-    request(repo.path(), "aut", "hi", Some("s-cli"), true).expect("--force should send anyway");
+    request(repo.path(), "aut", "hi", Some("s-cli"), true, None, false)
+        .expect("--force should send anyway");
     // A live label needs no escape hatch.
-    request(repo.path(), "auth", "hi", Some("s-cli"), false).expect("live label should send");
+    request(repo.path(), "auth", "hi", Some("s-cli"), false, None, false)
+        .expect("live label should send");
 
     let board = edda_bridge_claude::peers::compute_board_state(&pid);
     assert_eq!(board.requests.len(), 2, "both sent requests are recorded");
@@ -643,8 +645,16 @@ fn request_emits_request_pending_notification() {
     let (url, rx, server) = webhook_capture();
     enable_webhook(repo.path(), &url);
 
-    request(repo.path(), "billing", "need invoice type", None, true)
-        .expect("forced request should succeed");
+    request(
+        repo.path(),
+        "billing",
+        "need invoice type",
+        None,
+        true,
+        None,
+        false,
+    )
+    .expect("forced request should succeed");
     let body = rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("request creation should dispatch a notification");

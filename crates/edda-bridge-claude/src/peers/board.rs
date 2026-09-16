@@ -3,7 +3,7 @@ use std::fs;
 use super::helpers::{parse_rfc3339_to_epoch, timestamp_at_or_after};
 use super::{
     coordination_path, request_ttl_secs, BindingEntry, BoardState, ClaimEntry, CoordEvent,
-    CoordEventType, RequestAckEntry, RequestEntry, SubagentCompletedEntry,
+    CoordEventType, RequestAckEntry, RequestDeliveredEntry, RequestEntry, SubagentCompletedEntry,
 };
 use crate::parse::now_rfc3339;
 
@@ -23,6 +23,7 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
     let mut bindings: Vec<BindingEntry> = Vec::new();
     let mut requests: Vec<RequestEntry> = Vec::new();
     let mut request_acks: Vec<RequestAckEntry> = Vec::new();
+    let mut request_delivered: Vec<RequestDeliveredEntry> = Vec::new();
     let mut subagent_completions: Vec<SubagentCompletedEntry> = Vec::new();
 
     for line in content.lines() {
@@ -119,6 +120,26 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                     ts: event.ts,
                 });
             }
+            CoordEventType::RequestDelivered => {
+                // Transport provenance for a request that arrived over the node
+                // wire. Folded as its own entry: it is never read as an ack.
+                request_delivered.push(RequestDeliveredEntry {
+                    request_id: event.payload["request_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    to_label: event.payload["to_label"].as_str().unwrap_or("").to_string(),
+                    via_machine: event.payload["via_machine"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    via_event_id: event.payload["via_event_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    ts: event.ts,
+                });
+            }
             CoordEventType::TaskCompleted | CoordEventType::TeammateIdle => {
                 // TaskCompleted and TeammateIdle events are informational;
                 // no board-level state aggregation needed.
@@ -181,6 +202,7 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
         bindings,
         requests,
         request_acks,
+        request_delivered,
         subagent_completions,
     }
 }
@@ -332,6 +354,29 @@ pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
             session_id: ack.acker_session.clone(),
             event_type: CoordEventType::RequestAck,
             payload,
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            lines.push(line);
+        }
+    }
+
+    // Delivered markers are carried forward with their request, so a compacted
+    // log keeps the provenance an ack needs to route a receipt back.
+    for delivered in board.request_delivered.iter().filter(|d| {
+        parse_rfc3339_to_epoch(&d.ts)
+            .map(|ts| now.saturating_sub(ts) <= ttl)
+            .unwrap_or(true)
+    }) {
+        let event = CoordEvent {
+            ts: delivered.ts.clone(),
+            session_id: String::new(),
+            event_type: CoordEventType::RequestDelivered,
+            payload: serde_json::json!({
+                "request_id": delivered.request_id,
+                "to_label": delivered.to_label,
+                "via_machine": delivered.via_machine,
+                "via_event_id": delivered.via_event_id,
+            }),
         };
         if let Ok(line) = serde_json::to_string(&event) {
             lines.push(line);

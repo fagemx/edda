@@ -143,7 +143,7 @@ async fn post_sync(
 
     let events: Vec<edda_ledger::node::NodeEvent> =
         valid.iter().map(|(_, event)| event.clone()).collect();
-    let outcome =
+    let mut outcome =
         edda_ledger::node::import_batch(&state.repo_root, &events).map_err(AppError::Internal)?;
 
     // Re-anchor import refusals to their original request index.
@@ -158,13 +158,18 @@ async fn post_sync(
         }));
     }
 
-    // `lane_request` landing is worker B's task: writing the local coordination
-    // `request` + `request_delivered` needs a coordination event type that does
-    // not exist in this branch, and `edda-ledger` must stay free of
-    // `edda-bridge-claude`. The events are validated, deduped and returned
-    // (never silently dropped); they are reported as refused so the sender keeps
-    // them queued rather than treating an unlanded request as delivered. Worker B
-    // lands them and calls `edda_ledger::node::mark_imported`.
+    // Land the `lane_request`s `import_batch` handed back (GH-685): write the
+    // local `request` coord event plus the `request_delivered` marker into this
+    // node's own coordination log, then record the event ids as imported.
+    //
+    // A `lane_request` whose origin is this machine's own alias is a loop and is
+    // refused rather than landed (the local path never needs the wire). A crash
+    // between the receipt and the landing leaves the event un-imported, so the
+    // sender resends; `write_remote_request` refuses an already-landed id and
+    // `request_delivered_exists` keeps the marker from being doubled.
+    let project_id = edda_store::project_id(&state.repo_root);
+    let node_session = format!("node-{machine}");
+    let mut landed_ids: Vec<String> = Vec::new();
     for (request, event_id) in outcome
         .lane_requests
         .iter()
@@ -175,14 +180,49 @@ async fn post_sync(
             .find(|(_, event)| &event.event_id == event_id)
             .map(|(index, _)| *index)
             .unwrap_or(0);
-        refused.push(serde_json::json!({
-            "index": index,
-            "reason": format!(
-                "lane_request '{}' for '{}' is not landed by this node: lane-request forwarding is worker B's task",
-                request.request_id, request.to_label
-            ),
-        }));
+        if request.origin_machine == machine {
+            refused.push(serde_json::json!({
+                "index": index,
+                "reason": format!(
+                    "lane_request '{}' carries this machine's own alias '{machine}'; refused as a loop",
+                    request.request_id
+                ),
+            }));
+            continue;
+        }
+        if !edda_bridge_claude::peers::request_exists(&project_id, &request.request_id) {
+            if let Err(error) = edda_bridge_claude::peers::write_remote_request(
+                &project_id,
+                &node_session,
+                &request.request_id,
+                &request.from_label,
+                &request.to_label,
+                &request.message,
+                &request.origin_machine,
+            ) {
+                refused.push(serde_json::json!({
+                    "index": index,
+                    "reason": format!(
+                        "lane_request '{}' could not be landed: {error}",
+                        request.request_id
+                    ),
+                }));
+                continue;
+            }
+        }
+        if !edda_bridge_claude::peers::request_delivered_exists(&project_id, &request.request_id) {
+            edda_bridge_claude::peers::write_request_delivered(
+                &project_id,
+                &request.request_id,
+                &request.to_label,
+                &request.origin_machine,
+                event_id,
+            );
+        }
+        landed_ids.push(event_id.clone());
     }
+    edda_ledger::node::mark_imported(&state.repo_root, &landed_ids).map_err(AppError::Internal)?;
+    outcome.accepted.extend(landed_ids);
 
     Ok(Json(serde_json::json!({
         "version": 1,
