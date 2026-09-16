@@ -98,8 +98,20 @@ fn watch_recovers_an_orphan_lane_and_is_idempotent() {
         redispatch.get("worktree").is_some(),
         "redispatch payload must carry the worktree state, got: {redispatch}"
     );
-    assert_eq!(redispatch["worktree"]["dirty_files"], 0);
-    assert_eq!(redispatch["worktree"]["unpushed_commits"], 0);
+    assert!(
+        redispatch["worktree"].get("dirty_files").is_some(),
+        "the worktree read must be recorded (null when unreadable)"
+    );
+    // This fixture repo is not a git checkout, so the read did not happen and
+    // must be recorded as unknown rather than as a clean zero.
+    assert!(redispatch["worktree"]["dirty_files"].is_null());
+    assert!(redispatch["worktree"]["unpushed_commits"].is_null());
+    assert!(
+        redispatch["takeover_instruction"]
+            .as_str()
+            .is_some_and(|text| text.contains("could not be fully read")),
+        "an unreadable worktree must not be called clean: {redispatch}"
+    );
     assert!(!crate::cmd_claim::read_active_claims(&project_id)
         .unwrap()
         .iter()
@@ -485,6 +497,51 @@ fn watch_puts_the_takeover_instruction_into_the_retry_context() {
 struct FleetTestCli {
     #[command(subcommand)]
     cmd: crate::cmd_fleet::FleetCmd,
+}
+
+#[test]
+fn watch_stop_loss_names_an_already_queued_phase() {
+    let _store = isolated_store();
+    let tmp = repo_dir();
+    let repo = tmp.path().join("repo");
+    let _ = Ledger::open_or_init(&repo).unwrap();
+    // The phase is already Pending (a previous retry queued it), so there is a
+    // plan and a plan file - the stop-loss reason must not claim otherwise.
+    save_state(
+        &repo,
+        &fabricated_state("wave-queued", "p1", PhaseStatus::Pending),
+    )
+    .unwrap();
+    lane_heartbeat(
+        &repo,
+        "lane-queued",
+        "wave-queued",
+        "p1",
+        peers::stale_secs() * 10,
+        321,
+    );
+
+    run(
+        WatchArgs {
+            apply: true,
+            json: false,
+            max_redispatch: Some(1),
+        },
+        &repo,
+    )
+    .unwrap();
+    assert_eq!(fleet_notes(&repo, "terminal"), 1);
+    assert_eq!(fleet_notes(&repo, "redispatch"), 0);
+    let stop_loss = fleet_note_payload(&repo, "stop_loss").expect("stop-loss note");
+    let reason = stop_loss["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("already queued"),
+        "the reason must name the real cause, got: {reason}"
+    );
+    assert!(
+        !reason.contains("no recorded plan/brief"),
+        "a plan exists; that reason would be false, got: {reason}"
+    );
 }
 
 #[test]

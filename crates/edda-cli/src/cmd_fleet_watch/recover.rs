@@ -221,51 +221,71 @@ pub(super) fn prior_redispatches(lane: &Lane) -> u32 {
 /// redispatch is recorded (the issue's doneWhen item 3: re-dispatch must read
 /// the worktree's current state first, and an existing uncommitted/unpushed
 /// change means "continue on top of it", never "redo it").
+///
+/// Both counts are optional on purpose: `None` means the read did not happen
+/// (no git, a non-zero exit, no upstream), which must never render as "clean".
+/// A zero from a failed read would tell a lane to redo work it had not pushed
+/// — the fail-open opposite of this module's whole stance (REVIEW round 6,
+/// finding 1).
 #[derive(Debug, Clone, serde::Serialize)]
 struct WorktreeState {
-    dirty_files: usize,
-    unpushed_commits: usize,
+    dirty_files: Option<usize>,
+    unpushed_commits: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     sample_paths: Vec<String>,
 }
 
 impl WorktreeState {
     fn describe(&self) -> String {
-        if self.dirty_files == 0 && self.unpushed_commits == 0 {
-            return "worktree is clean (no uncommitted files, no unpushed commits);".to_string();
+        match (self.dirty_files, self.unpushed_commits) {
+            (Some(0), Some(0)) => {
+                "worktree is clean (no uncommitted files, no unpushed commits);".to_string()
+            }
+            (Some(dirty), Some(unpushed)) => {
+                let sample = if self.sample_paths.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", self.sample_paths.join("; "))
+                };
+                format!(
+                    "worktree has {dirty} uncommitted file(s){sample} and {unpushed} unpushed commit(s);"
+                )
+            }
+            // One or both reads failed: say so instead of claiming a clean
+            // worktree, and keep the instruction to look before continuing.
+            _ => "the worktree's current state could not be fully read (uncommitted files or \
+                  unpushed commits unknown);"
+                .to_string(),
         }
-        let sample = if self.sample_paths.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", self.sample_paths.join("; "))
-        };
-        format!(
-            "worktree has {} uncommitted file(s){sample} and {} unpushed commit(s);",
-            self.dirty_files, self.unpushed_commits
-        )
     }
 }
 
 /// Best-effort read of one worktree's current state. A non-git or unreadable
-/// worktree reports zeroes rather than failing the recovery: the observation
-/// plane must never block the work plane.
+/// worktree reports `None` rather than failing the recovery: the observation
+/// plane must never block the work plane, and must never invent a measurement.
 fn worktree_state(store_path: &Path) -> WorktreeState {
     let status = git_capture(store_path, &["status", "--porcelain"]);
-    let mut dirty_files = 0usize;
-    let mut sample_paths = Vec::new();
-    for line in status.lines() {
-        if line.trim().is_empty() {
-            continue;
+    let (dirty_files, sample_paths) = match &status {
+        Some(status) => {
+            let mut dirty_files = 0usize;
+            let mut sample_paths = Vec::new();
+            for line in status.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                dirty_files += 1;
+                if sample_paths.len() < 3 {
+                    sample_paths.push(line.trim().to_string());
+                }
+            }
+            (Some(dirty_files), sample_paths)
         }
-        dirty_files += 1;
-        if sample_paths.len() < 3 {
-            sample_paths.push(line.trim().to_string());
-        }
-    }
+        None => (None, Vec::new()),
+    };
+    // No upstream (`@{u}..HEAD` fails on a branch never pushed, and on a
+    // non-git directory) reads as unknown, not as zero unpushed commits.
     let unpushed_commits = git_capture(store_path, &["rev-list", "--count", "@{u}..HEAD"])
-        .trim()
-        .parse::<usize>()
-        .unwrap_or(0);
+        .and_then(|out| out.trim().parse::<usize>().ok());
     WorktreeState {
         dirty_files,
         unpushed_commits,
@@ -273,7 +293,9 @@ fn worktree_state(store_path: &Path) -> WorktreeState {
     }
 }
 
-fn git_capture(cwd: &Path, args: &[&str]) -> String {
+/// `Some(stdout)` on a zero exit; `None` when git is missing or exited
+/// non-zero — a distinct fact from an empty stdout.
+fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
     std::process::Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -281,17 +303,30 @@ fn git_capture(cwd: &Path, args: &[&str]) -> String {
         .ok()
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
-        .unwrap_or_default()
+}
+
+/// What a redispatch attempt concluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Redispatch {
+    /// The phase was re-armed; carries the resume hint.
+    Redispatched(String),
+    /// No plan state to re-arm anywhere: a stateless `edda dispatch` lane.
+    NoPlanState,
+    /// A plan state exists, but the phase is not on a retry edge (already
+    /// `Pending`, or the phase is unknown to the state): the work is already
+    /// queued and needs no re-arm.
+    NotOnRetryEdge,
 }
 
 /// Step 3a — record the redispatch and re-arm the conductor phase through the
 /// existing retry transition (Running/Checking → Stale → Pending), so the
 /// existing `edda conduct run <plan_file> --cwd <store>` resume re-runs it.
-/// Returns the resume hint, or `None` when there is no plan state to re-arm
-/// (a stateless dispatch lane), which the caller records as a stop-loss.
-fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> {
+/// The two ways to decline a re-arm are told apart, because the durable
+/// stop-loss reason must not claim "no recorded plan/brief" when a plan exists
+/// and its phase is merely already queued (REVIEW round 6, finding 2).
+fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Redispatch> {
     if !state_path(store_path, &lane.plan).is_file() {
-        return Ok(None);
+        return Ok(Redispatch::NoPlanState);
     }
     // Read the worktree BEFORE re-arming, so the instruction the redispatch
     // carries is evidence-based (the issue's doneWhen item 3).
@@ -342,7 +377,7 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> 
         Ok(Some(plan_file))
     })?;
     let Some(plan_file) = plan_file else {
-        return Ok(None);
+        return Ok(Redispatch::NotOnRetryEdge);
     };
 
     let ledger = Ledger::open(store_path)?;
@@ -368,7 +403,7 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<String>> 
     } else {
         plan_file
     };
-    Ok(Some(format!(
+    Ok(Redispatch::Redispatched(format!(
         "edda conduct run \"{plan}\" --cwd \"{}\"",
         store_path.display()
     )))
@@ -423,15 +458,23 @@ pub(super) fn recover(lane: &Lane, steps: &[RecoveryStep], cap: u32) -> anyhow::
     }
     match steps.last() {
         Some(RecoveryStep::Redispatch) => match redispatch(store_path, lane)? {
-            Some(resume) => {
+            Redispatch::Redispatched(resume) => {
                 out.redispatch_recorded = true;
                 out.resume = Some(resume);
             }
-            None => {
-                let reason = format!(
-                    "no recorded plan/brief for {}/{}; redispatch belongs to the caller",
-                    lane.plan, lane.phase
-                );
+            declined => {
+                let reason = match declined {
+                    Redispatch::NoPlanState => format!(
+                        "no recorded plan/brief for {}/{}; redispatch belongs to the caller",
+                        lane.plan, lane.phase
+                    ),
+                    Redispatch::NotOnRetryEdge => format!(
+                        "the phase {}/{} is already queued (not on a retry edge); no re-arm was \
+                         needed",
+                        lane.plan, lane.phase
+                    ),
+                    Redispatch::Redispatched(_) => unreachable!("handled above"),
+                };
                 record_stop_loss(store_path, lane, &reason)?;
                 out.stop_loss_recorded = true;
                 out.reason = Some(reason);

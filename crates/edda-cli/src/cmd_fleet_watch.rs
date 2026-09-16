@@ -377,9 +377,11 @@ fn phase_status_is_terminal(status: PhaseStatus) -> bool {
 /// The session-scoped terminal records — the ones that can name *this* lane.
 ///
 /// The conductor's `conductor_phase` ledger note is deliberately **not** one of
-/// them: its payload carries only `plan_id`/`phase_id`/`status`
-/// (`crates/edda-conductor/src/runner/edda.rs`), no session or attempt, so a
-/// note from an earlier attempt would mark a re-run attempt finished. The
+/// them: its payload is the phase receipt — `plan_id`/`phase_id`/`status` plus
+/// `cost_usd`/`elapsed_ms`/`elapsed_measured`
+/// (`crates/edda-conductor/src/runner/edda.rs`) — and it carries **no session
+/// or attempt field**, so a note from an earlier attempt would mark a re-run
+/// attempt finished. The
 /// default `on_fail: auto_retry` routes `Failed → Pending` and re-runs the
 /// phase, so that shape is the norm, not an edge: an attempt that died after a
 /// prior failure would never be recovered and its phase would stay `Running`
