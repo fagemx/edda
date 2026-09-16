@@ -30,6 +30,12 @@
 //! lane terminal. That is why the conductor's own `conductor_phase` note is not
 //! consulted — see `ledger_terminal`.
 //!
+//! The mirror image of that rule is that a lane is only judged while it is the
+//! **current** attempt of its phase: when the plan state records a newer attempt
+//! of the same (plan, phase) — the runner stamps `begin_attempt()`'s number into
+//! both sides — the heartbeat being observed is a superseded attempt's corpse,
+//! and it is reported `superseded`, never recovered.
+//!
 //! The one shape the product cannot answer for is a **stateless
 //! `edda dispatch` lane that recorded no claim lifecycle**: dispatch keeps no
 //! plan state, and without an un-released claim or a completed session digest
@@ -119,6 +125,10 @@ pub(crate) enum LaneVerdict {
     /// lifecycle). Heartbeat absence is then a hint and nothing more
     /// (`docs/fleet/rules.md` R17): report it, never recover it.
     Unrecorded,
+    /// Stale heartbeat, and a later attempt of the same (plan, phase) is the
+    /// current owner: this heartbeat is the corpse of a superseded attempt.
+    /// Report it, never recover off it.
+    Superseded,
 }
 
 impl LaneVerdict {
@@ -129,6 +139,9 @@ impl LaneVerdict {
             LaneVerdict::Unrecorded => Some(
                 "stateless dispatch lane with no recorded claim or completion; \
                  heartbeat absence is a hint, not a death verdict (R17)",
+            ),
+            LaneVerdict::Superseded => Some(
+                "a later attempt of this plan/phase is the current owner; this heartbeat is superseded",
             ),
             _ => None,
         }
@@ -151,17 +164,26 @@ pub(crate) enum TerminalRecord {
     Unreadable,
 }
 
-/// The whole classification rule, pure over three facts.
+/// The whole classification rule, pure over four facts.
 ///
 /// `claimed` is `Some(true/false)` from the board and `None` when the board
 /// itself (or the path-conflict rule over it) could not be judged. `None` must
 /// never become a death verdict: a surface we could not read is not evidence
 /// that the work is unowned. `terminal` carries the same fail-closed
 /// direction and adds the one case the product simply cannot answer for
-/// ([`TerminalRecord::NotKept`]).
-pub(crate) fn verdict(stale: bool, terminal: TerminalRecord, claimed: Option<bool>) -> LaneVerdict {
+/// ([`TerminalRecord::NotKept`]). `superseded` is the plan state's own answer
+/// that a newer attempt owns the phase, which outranks every other reading.
+pub(crate) fn verdict(
+    stale: bool,
+    terminal: TerminalRecord,
+    superseded: bool,
+    claimed: Option<bool>,
+) -> LaneVerdict {
     if !stale {
         return LaneVerdict::Live;
+    }
+    if superseded {
+        return LaneVerdict::Superseded;
     }
     match claimed {
         Some(true) => LaneVerdict::Claimed,
@@ -403,9 +425,9 @@ fn ledger_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool
     Ok(Some(false))
 }
 
-/// `Ok(Some(true))` terminal, `Ok(Some(false))` state exists but records no
-/// terminal for this work, `Ok(None)` no state for this plan here.
-fn state_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool>> {
+/// What the plan state says about this lane's phase, or `None` when this store
+/// has no state for the plan.
+fn state_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<PhaseRecord>> {
     if edda_conductor::state::persist::validate_plan_name(&lane.plan).is_err() {
         return Ok(None);
     }
@@ -416,17 +438,57 @@ fn state_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool>
         state.plan_status,
         PlanStatus::Completed | PlanStatus::Aborted
     ) {
-        return Ok(Some(true));
+        return Ok(Some(PhaseRecord {
+            terminal: true,
+            superseded: false,
+        }));
     }
     match state.phases.iter().find(|p| p.id == lane.phase) {
-        Some(phase) => Ok(Some(phase_status_is_terminal(phase.status))),
+        Some(phase) => {
+            let terminal = phase_status_is_terminal(phase.status);
+            // The runner stamps `begin_attempt()`'s number into the lane
+            // heartbeat and into `PhaseState.attempts`, so a strictly newer
+            // attempt with the phase not terminal means a *later* lane owns
+            // this phase now and the heartbeat we are looking at is the
+            // corpse of a superseded attempt. Re-arming the phase off that
+            // corpse would stomp the live attempt's state and burn its
+            // per-(plan, phase) redispatch budget (REVIEW round 5, finding 1).
+            let superseded = !terminal
+                && matches!(phase.status, PhaseStatus::Running | PhaseStatus::Checking)
+                && phase.attempts > lane.attempt;
+            Ok(Some(PhaseRecord {
+                terminal,
+                superseded,
+            }))
+        }
         // The state exists but knows nothing about this phase: nothing terminal
         // has been recorded for this work here.
-        None => Ok(Some(false)),
+        None => Ok(Some(PhaseRecord {
+            terminal: false,
+            superseded: false,
+        })),
     }
 }
 
-/// Is there a terminal record for this lane's work?
+/// What the plan state records about one lane's phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhaseRecord {
+    /// The phase's turn is over (see [`phase_status_is_terminal`]).
+    terminal: bool,
+    /// A newer attempt of the same phase is the current owner.
+    superseded: bool,
+}
+
+/// What the observation saw for one lane: its terminal record and whether the
+/// plan state shows a newer attempt owning the phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkRecord {
+    terminal: TerminalRecord,
+    superseded: bool,
+}
+
+/// Is there a terminal record for this lane's work, and is this lane the
+/// current attempt of its phase?
 ///
 /// [`TerminalRecord::Unreadable`] (no readable surface at all, or a read error)
 /// is never a death verdict: an unreadable surface must not turn into a
@@ -434,11 +496,17 @@ fn state_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<Option<bool>
 /// un-released claim for this session — for a stateless `edda dispatch` lane
 /// that is the only thing that can make its work a unit the product records
 /// state for at all; without it the lane is [`TerminalRecord::NotKept`].
-fn terminal_record(lane: &Lane, has_open_claim: bool) -> TerminalRecord {
+fn work_record(lane: &Lane, has_open_claim: bool) -> WorkRecord {
     let mut judged = false;
+    let mut superseded = false;
     for store_path in &lane.stores {
         match ledger_terminal(store_path, lane) {
-            Ok(Some(true)) => return TerminalRecord::Recorded,
+            Ok(Some(true)) => {
+                return WorkRecord {
+                    terminal: TerminalRecord::Recorded,
+                    superseded: false,
+                }
+            }
             Ok(Some(false)) => judged = true,
             Ok(None) => {}
             Err(e) => {
@@ -447,12 +515,23 @@ fn terminal_record(lane: &Lane, has_open_claim: bool) -> TerminalRecord {
                     store_path.display(),
                     lane.session_id
                 );
-                return TerminalRecord::Unreadable;
+                return WorkRecord {
+                    terminal: TerminalRecord::Unreadable,
+                    superseded: false,
+                };
             }
         }
         match state_terminal(store_path, lane) {
-            Ok(Some(true)) => return TerminalRecord::Recorded,
-            Ok(Some(false)) => judged = true,
+            Ok(Some(record)) if record.terminal => {
+                return WorkRecord {
+                    terminal: TerminalRecord::Recorded,
+                    superseded: false,
+                }
+            }
+            Ok(Some(record)) => {
+                judged = true;
+                superseded |= record.superseded;
+            }
             Ok(None) => {}
             Err(e) => {
                 eprintln!(
@@ -460,17 +539,23 @@ fn terminal_record(lane: &Lane, has_open_claim: bool) -> TerminalRecord {
                     store_path.display(),
                     lane.session_id
                 );
-                return TerminalRecord::Unreadable;
+                return WorkRecord {
+                    terminal: TerminalRecord::Unreadable,
+                    superseded: false,
+                };
             }
         }
     }
-    if !judged {
-        return TerminalRecord::Unreadable;
-    }
-    if lane.plan == DISPATCH_PLAN && !has_open_claim {
+    let terminal = if !judged {
+        TerminalRecord::Unreadable
+    } else if lane.plan == DISPATCH_PLAN && !has_open_claim {
         TerminalRecord::NotKept
     } else {
         TerminalRecord::Absent
+    };
+    WorkRecord {
+        terminal,
+        superseded,
     }
 }
 
@@ -524,10 +609,22 @@ fn resolve_cap(repo_root: &Path, flag: Option<u32>) -> u32 {
     }
     if let Ok(ledger) = Ledger::open_existing(repo_root) {
         if let Ok(branch) = ledger.head_branch() {
-            if let Ok(Some(decision)) = ledger.find_active_decision(&branch, MAX_REDISPATCH_KEY) {
-                if let Ok(value) = decision.value.trim().parse::<u32>() {
-                    return value;
-                }
+            match ledger.find_active_decision(&branch, MAX_REDISPATCH_KEY) {
+                Ok(Some(decision)) => match decision.value.trim().parse::<u32>() {
+                    Ok(value) => return value,
+                    // A typo in an operator decision must not silently move the
+                    // ladder: say so and fall back to the default.
+                    Err(e) => eprintln!(
+                        "⚠ fleet watch: ledger decision {MAX_REDISPATCH_KEY} = {:?} is not a \
+                         number ({e}); using {DEFAULT_MAX_REDISPATCH}",
+                        decision.value
+                    ),
+                },
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "⚠ fleet watch: ledger decision {MAX_REDISPATCH_KEY} unreadable ({e:#}); using \
+                     {DEFAULT_MAX_REDISPATCH}"
+                ),
             }
         }
     }
@@ -576,6 +673,7 @@ fn render_text(report: &WatchReport) -> String {
             LaneVerdict::Orphan => "⏰ ORPHAN  ",
             LaneVerdict::Unjudged => "?  unjudged",
             LaneVerdict::Unrecorded => "?  norecord",
+            LaneVerdict::Superseded => "?  superseded",
         };
         let pid = lane
             .pid
@@ -661,8 +759,8 @@ fn build_report(args: &WatchArgs, repo_root: &Path) -> anyhow::Result<WatchRepor
                 .iter()
                 .any(|claim| claim.session_id == lane.session_id)
         });
-        let terminal = terminal_record(&lane, has_open_claim);
-        let judged = verdict(lane.stale, terminal, claimed);
+        let record = work_record(&lane, has_open_claim);
+        let judged = verdict(lane.stale, record.terminal, record.superseded, claimed);
         if judged == LaneVerdict::Orphan {
             orphans.push(lane);
         } else {
@@ -748,4 +846,8 @@ fn lane_json(lane: &Lane, judged: LaneVerdict) -> LaneJson {
 }
 
 #[cfg(test)]
+mod fixtures;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_io;

@@ -1436,11 +1436,14 @@ finished lane also ages out of its heartbeat, so the terminal record is what
 stops the false positive, and the standing claim is what stops taking over a
 live peer's work.
 
-The one shape the product cannot answer for is a stateless `edda dispatch` lane
-that recorded no claim lifecycle: dispatch keeps no plan state, so with no
-un-released claim and no session digest there is neither a terminal record nor
-evidence that the unit was ever recorded. That lane is reported `unrecorded`,
-never recovered — one proof is not a verdict.
+A lane is only judged while it is the **current attempt** of its phase: when the
+conductor plan state records a newer attempt of the same (plan, phase), the stale
+heartbeat is a superseded attempt's corpse and is reported `superseded`, never
+recovered. The one shape the product cannot answer for is a stateless `edda
+dispatch` lane that recorded no claim lifecycle: dispatch keeps no plan state, so
+with no un-released claim and no session digest there is neither a terminal
+record nor evidence that the unit was ever recorded. That lane is reported
+`unrecorded`, never recovered — one proof is not a verdict.
 
 ```bash
 edda fleet watch                       # dry run: report verdicts only
