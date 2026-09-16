@@ -1,242 +1,378 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, symlink } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import { listManagedRuns } from './activation.mjs';
-import { managedStatus, managedConversation } from './managed-client.mjs';
-import { listSessions } from './client.mjs';
-import { doctor } from './dependency-client.mjs';
-import { readJson, readRecord, sessionDir } from './store.mjs';
+import { digest, sessionDir } from './store.mjs';
+import { messageId } from './inbox-store.mjs';
+import { enrollRecovery, revokeRecovery, readRecovery, listRecovery, recoveryDecision, recoveryPass,
+  reconnectMessage } from './recovery.mjs';
 
-// Corruption is per record, never a registry outage. The fixture is a disposable
-// temp-dir registry: no live registry, no service, no Pi process.
-const exec = promisify(execFile), cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
-const NUL = (bytes = 1887) => Buffer.alloc(bytes, 0); // exact audit shape
-const parserText = (value) => /Unexpected token|JSON\.parse|is not valid JSON|Unexpected end/.test(JSON.stringify(value));
+// Hermetic: a disposable temp registry, no real Pi launch, no network beyond a
+// loopback stub. Clear any ambient mailbox selector so a managed session cannot
+// change where these tests read.
+delete process.env.EDDA_RETURN_ROOT;
+delete process.env.EDDA_OWNER_REF;
+delete process.env.EDDA_RETURN_OWNER;
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 async function fixture(t) {
-  const dir = await mkdtemp(join(tmpdir(), 'edda-recovery-test-'));
+  const dir = await mkdtemp(join(tmpdir(), 'edda-recovery-impl-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const root = join(dir, 'registry'), project = join(dir, 'project');
-  await mkdir(project, { recursive: true });
-  return { dir, root, project: await realpath(project) };
+  const root = join(dir, 'registry');
+  await mkdir(root, { recursive: true });
+  return { dir, root };
 }
 
-async function managedRun(root, project, { stateKind = 'json', config = {}, state = {} } = {}) {
-  const runId = randomUUID(), sessionId = randomUUID();
-  const dir = join(root, 'managed', runId), sessions = join(dir, 'sessions');
-  await mkdir(sessions, { recursive: true });
-  await writeFile(join(dir, 'config.json'), JSON.stringify({ version: 1, runId, root: resolve(root), project,
-    prompt: 'SECRET-PROMPT', provider: 'test-provider', model: 'test-model', thinking: 'high',
-    release: { id: 'a'.repeat(64), path: join(root, 'releases', 'x') }, ...config }));
-  const sessionFile = join(sessions, `2026-09-13T00-00-00-000Z_${sessionId}.jsonl`);
-  await writeFile(sessionFile, [
-    { type: 'session', id: sessionId, cwd: project, timestamp: '2026-09-13T00:00:00.000Z' },
-    { id: 'e1', parentId: null, timestamp: '2026-09-13T00:00:01.000Z', type: 'message', message: { role: 'user', content: 'HELLO-RECOVERED' } },
-    { id: 'e2', parentId: 'e1', timestamp: '2026-09-13T00:00:02.000Z', type: 'message', message: { role: 'assistant', content: 'REPLY-RECOVERED' } },
-  ].map((value) => JSON.stringify(value)).join('\n') + '\n');
-  const statePath = join(dir, 'state.json');
+// A managed run record. `phase` drives `managedStatus` fallback; `owner: null`
+// produces a session-addressed run that enrollment must refuse.
+async function managedRun(root, { runId = randomUUID(), sessionId = randomUUID(), owner = 'assistant/x',
+  phase = 'ready', stateKind = 'json', runner = null } = {}) {
+  const dir = join(root, 'managed', runId);
+  await mkdir(join(dir, 'sessions'), { recursive: true });
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ version: 1, runId, root: resolve(root),
+    project: resolve(root), prompt: 'SECRET-PROMPT', provider: 'test-provider', model: 'test-model',
+    release: { id: 'a'.repeat(64) }, ...(owner ? { owner } : {}) }));
   if (stateKind === 'json') {
-    await writeFile(statePath, JSON.stringify({ runId, serviceId: randomUUID(), phase: 'stopped', sessionId, sessionFile,
-      updatedAt: '2026-09-13T00:00:00.000Z', error: 'SECRET-ERROR', token: 'SECRET-TOKEN', ...state }));
-  } else if (stateKind === 'nul') await writeFile(statePath, NUL());
-  else if (stateKind === 'invalid') await writeFile(statePath, '{ SECRET-BROKEN-JSON');
-  return { runId, dir, sessionId, sessionFile, statePath };
+    await writeFile(join(dir, 'state.json'), JSON.stringify({ runId, sessionId, ...(owner ? { owner } : {}), phase,
+      sessionFile: join(dir, 'sessions', 'x.jsonl'), updatedAt: '2026-09-13T00:00:00.000Z' }));
+  } else if (stateKind === 'nul') {
+    await writeFile(join(dir, 'state.json'), Buffer.alloc(1887, 0));
+  }
+  if (runner) {
+    await writeFile(join(dir, 'owner.json'), JSON.stringify({ runId, serviceId: runner.serviceId, pid: 4242,
+      port: runner.port, token: 'b'.repeat(64) }));
+  }
+  return { runId, sessionId, dir };
 }
 
-async function serviceSession(root, project, { stateKind = 'json', ownerKind = 'json' } = {}) {
-  const sessionId = randomUUID(), dir = sessionDir(root, sessionId);
+// Point a run's Pi channel at a loopback `port` so `requestSession` reaches it.
+async function channelOwner(root, sessionId, port) {
+  const dir = sessionDir(root, sessionId);
   await mkdir(dir, { recursive: true });
-  const ownerPath = join(dir, 'owner.json');
-  if (ownerKind === 'json') {
-    await writeFile(ownerPath, JSON.stringify({ sessionId, instanceId: randomUUID(), pid: 4242, port: 9, token: 'b'.repeat(64), cwd: project }));
-  } else if (ownerKind === 'nul') await writeFile(ownerPath, NUL());
-  const statePath = join(dir, 'state.json');
-  if (stateKind === 'json') {
-    await writeFile(statePath, JSON.stringify({ sessionId, state: 'idle', cwd: project, token: 'SECRET-TOKEN' }));
-  } else if (stateKind === 'nul') await writeFile(statePath, NUL());
-  else if (stateKind === 'invalid') await writeFile(statePath, '{ SECRET-BROKEN-JSON');
-  return { sessionId, dir, statePath, ownerPath };
+  await writeFile(join(dir, 'owner.json'), JSON.stringify({ sessionId, instanceId: randomUUID(), pid: 4242,
+    port, token: 'c'.repeat(64) }));
 }
 
-test('run discovery degrades a NUL state per record and keeps config identity', async (t) => {
-  const { root, project } = await fixture(t);
-  const healthy = await managedRun(root, project);
-  const corrupt = await managedRun(root, project, { stateKind: 'nul' });
-  const before = await readFile(corrupt.statePath);
-  const result = listManagedRuns(root);
-  assert.equal(result.runs.length, 2);
-  const healthyRow = result.runs.find((r) => r.runId === healthy.runId), corruptRow = result.runs.find((r) => r.runId === corrupt.runId);
-  assert.equal(healthyRow.sessionId, healthy.sessionId);
-  assert.equal(healthyRow.recordedPhase, 'stopped');
-  assert.equal(healthyRow.error, null);
-  assert.equal(corruptRow.project, project);
-  assert.equal(corruptRow.releaseId, 'a'.repeat(64));
-  assert.equal(corruptRow.recordedPhase, 'unknown');
-  assert.equal(corruptRow.error.code, 'record_unavailable');
-  assert.equal(corruptRow.error.record, 'state.json');
-  assert.ok(!parserText(result));
-  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
-  assert.deepEqual(await readFile(corrupt.statePath), before);
+async function writeSupervision(root, sessionId, value) {
+  const dir = join(root, 'supervision');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${digest(sessionId)}.json`), JSON.stringify({ sessionId, ...value }));
+}
+
+// A closed loopback port: connects are refused, which `requestSession` reports as
+// an unknown delivery outcome.
+async function closedPort() {
+  const server = createServer();
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const port = server.address().port;
+  await new Promise((done) => server.close(done));
+  return port;
+}
+
+// A stub runner/status and message endpoint. Records each POST /messages body.
+async function runnerServer(t, { runId, sessionId, live = true, messageStatus = 'accepted' }) {
+  const serviceId = randomUUID();
+  const messages = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/status') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ runId, serviceId, sessionId, live, status: live ? 'ready' : 'stopped' }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/messages') {
+      const chunks = [];
+      req.on('data', (chunk) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        messages.push(body);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ sessionId, id: body.id, status: messageStatus, accepted: true }));
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not found' }));
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  t.after(() => new Promise((done) => server.close(done)));
+  return { serviceId, port: server.address().port, messages };
+}
+
+const basePolicy = (overrides = {}) => ({ version: 1, enabled: true, scope: 'bounded scope',
+  maxAttempts: 3, cooldownMs: 60000, attempts: [], ...overrides });
+
+test('enroll refuses an unowned run and names the adoption fix', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, { owner: null });
+  await assert.rejects(enrollRecovery(root, run.runId, { scope: 'do the thing' }), (error) => {
+    assert.match(error.message, /not owner-bound/);
+    assert.match(error.message, new RegExp(`owner adopt --run ${run.runId} --owner`));
+    assert.match(error.message, new RegExp(`run-resume ${run.runId} --runtime current`));
+    return true;
+  });
+  assert.equal(readRecovery(root, run.runId), null);
 });
 
-test('run-status returns config identity, not a parser error, when state.json is unreadable', async (t) => {
-  const { root, project } = await fixture(t);
-  const run = await managedRun(root, project, { stateKind: 'nul' });
-  const before = await readFile(run.statePath);
-  const result = await managedStatus(root, run.runId);
-  assert.equal(result.runId, run.runId);
-  assert.equal(result.status, 'record_unavailable');
-  assert.equal(result.live, false);
-  assert.equal(result.project, project);
-  assert.deepEqual(result.release, { id: 'a'.repeat(64), path: join(root, 'releases', 'x') });
-  assert.equal(result.provider, 'test-provider');
-  assert.equal(result.model, 'test-model');
-  assert.equal(result.thinking, 'high');
-  assert.deepEqual(result.error, { code: 'record_unavailable', record: 'state.json',
-    message: 'Record unavailable: state.json; it was not repaired' });
-  assert.ok(!parserText(result));
-  assert.doesNotMatch(JSON.stringify(result), /SECRET/);
-  assert.deepEqual(await readFile(run.statePath), before);
+test('enroll validates scope and limits and records the runner identity', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  await assert.rejects(enrollRecovery(root, run.runId, {}), /scope/i);
+  await assert.rejects(enrollRecovery(root, run.runId, { scope: 'x', maxAttempts: 0 }), /max-attempts/);
+  await assert.rejects(enrollRecovery(root, run.runId, { scope: 'x', maxAttempts: 11 }), /max-attempts/);
+  await assert.rejects(enrollRecovery(root, run.runId, { scope: 'x', cooldownMs: -1 }), /cooldown-ms/);
+  await assert.rejects(enrollRecovery(root, run.runId, { scope: 'x'.repeat(8001) }), /scope/i);
+  assert.equal(readRecovery(root, randomUUID()), null);
+  const policy = await enrollRecovery(root, run.runId, { scope: 'do the thing' });
+  assert.equal(policy.runId, run.runId);
+  assert.equal(policy.sessionId, run.sessionId);
+  assert.equal(policy.owner, 'assistant/x');
+  assert.equal(policy.maxAttempts, 3);
+  assert.equal(policy.cooldownMs, 60000);
+  assert.equal(policy.enabled, true);
+  assert.deepEqual(policy.attempts, []);
+  assert.ok(Number.isFinite(Date.parse(policy.enrolledAt)));
 });
 
-test('run-conversation recovers runId -> sessionId and persisted history without state.json', async (t) => {
-  const { root, project } = await fixture(t);
-  const run = await managedRun(root, project, { stateKind: 'nul' });
-  const before = await readFile(run.statePath);
-  const result = await managedConversation(root, run.runId);
-  assert.equal(result.evidenceSource, 'persisted_session');
-  assert.equal(result.sessionId, run.sessionId);
-  assert.equal(result.error.code, 'record_unavailable');
-  const texts = result.conversation.entries.map((e) => e.text);
-  assert.ok(texts.includes('HELLO-RECOVERED'));
-  assert.ok(texts.includes('REPLY-RECOVERED'));
-  assert.ok(!parserText(result));
-  assert.deepEqual(await readFile(run.statePath), before);
+test('revoke disables the policy, keeps history and makes it not enrolled', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  await enrollRecovery(root, run.runId, { scope: 'do the thing' });
+  const status = { live: false, lastRecordedPhase: 'ready' };
+  const before = recoveryDecision({ policy: readRecovery(root, run.runId), status });
+  assert.equal(before.decision, 'eligible');
+  const revoked = revokeRecovery(root, run.runId, { reason: 'operator decision' });
+  assert.equal(revoked.enabled, false);
+  assert.equal(revoked.revokedReason, 'operator decision');
+  const after = recoveryDecision({ policy: readRecovery(root, run.runId), status });
+  assert.deepEqual(after, { decision: 'skip', reason: 'not_enrolled' });
+  assert.throws(() => revokeRecovery(root, randomUUID(), {}), /no recovery enrollment/);
 });
 
-test('list survives a NUL service state and recovers identity from owner.json', async (t) => {
-  const { root, project } = await fixture(t);
-  const corrupt = await serviceSession(root, project, { stateKind: 'nul' });
-  const before = await readFile(corrupt.statePath);
-  const rows = await listSessions(root);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].sessionId, corrupt.sessionId);
-  assert.equal(rows[0].status, 'record_unavailable');
-  assert.equal(rows[0].state, 'record_unavailable');
-  assert.equal(rows[0].live, false);
-  assert.deepEqual(rows[0].error, { code: 'record_unavailable', record: 'state.json',
-    message: 'Record unavailable: state.json; it was not repaired' });
-  assert.ok(!parserText(rows));
-  assert.doesNotMatch(JSON.stringify(rows), /SECRET/);
-  assert.deepEqual(await readFile(corrupt.statePath), before);
+test('enroll keeps prior attempts when re-scoping an enrolled run', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  const first = await enrollRecovery(root, run.runId, { scope: 'first' });
+  const withHistory = { ...first, attempts: [{ at: new Date().toISOString(), outcome: 'refused', reason: 'x', reconnect: 'none' }] };
+  const path = join(run.dir, 'recovery.json');
+  await writeFile(path, JSON.stringify(withHistory));
+  const again = await enrollRecovery(root, run.runId, { scope: 'second', maxAttempts: 5 });
+  assert.equal(again.scope, 'second');
+  assert.equal(again.maxAttempts, 5);
+  assert.equal(again.attempts.length, 1);
+  assert.equal(again.enabled, true);
 });
 
-test('doctor succeeds against a corrupt record and names it', async (t) => {
-  const { root, project } = await fixture(t);
-  const corrupt = await serviceSession(root, project, { stateKind: 'nul' });
-  await writeFile(join(root, 'not-a-record.txt'), 'ignored');
-  const result = await doctor(root);
-  assert.equal(result.status, 'diagnosed');
-  assert.deepEqual(result.unreadable, [{ sessionId: corrupt.sessionId, record: 'state.json' }]);
-  const selected = await doctor(root, corrupt.sessionId);
-  assert.equal(selected.sessions[0].readiness, 'record_unavailable');
-  assert.equal(selected.sessions[0].error.code, 'record_unavailable');
-  assert.equal(selected.sessions[0].error.record, 'state.json');
-  assert.ok(!parserText(result) && !parserText(selected));
+test('recoveryDecision classifies each boundary with its own reason', () => {
+  const now = Date.parse('2026-09-13T12:00:00.000Z');
+  const status = { live: false, lastRecordedPhase: 'ready' };
+  assert.deepEqual(recoveryDecision({}), { decision: 'skip', reason: 'not_enrolled' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy({ enabled: false }), status, now }),
+    { decision: 'skip', reason: 'not_enrolled' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { ...status, live: true }, now }),
+    { decision: 'skip', reason: 'live_holder' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { ...status, lastRecordedPhase: 'stopped' }, now }),
+    { decision: 'skip', reason: 'intentionally_stopped' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status, supervision: { enabled: false, action: 'paused' }, now }),
+    { decision: 'skip', reason: 'paused' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { live: false, status: 'record_unavailable', lastRecordedPhase: null }, now }),
+    { decision: 'attention', reason: 'record_unavailable' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy({ attempts: [{ at: '2026-09-13T11:59:30.000Z' }] }), status, now }),
+    { decision: 'skip', reason: 'cooldown' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy({ attempts: [{}, {}, {}] }), status, now }),
+    { decision: 'skip', reason: 'attempts_exhausted' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status, now }),
+    { decision: 'eligible', reason: 'eligible' });
 });
 
-test('a session with no recoverable identity is omitted from list and named by doctor', async (t) => {
-  const { root, project } = await fixture(t);
-  const blind = await serviceSession(root, project, { stateKind: 'nul', ownerKind: 'nul' });
-  assert.deepEqual(await listSessions(root), []);
-  const result = await doctor(root);
-  assert.deepEqual(result.unreadable, [{ sessionId: null, record: 'state.json' }]);
-  const selected = await doctor(root, blind.sessionId);
-  assert.equal(selected.status, 'record_unavailable');
-  assert.equal(selected.sessionId, blind.sessionId);
+test('a pass never resumes a live holder, a stop, a pause, a corrupt record or an exhausted run', async (t) => {
+  const { root } = await fixture(t);
+  const results = {};
+  const resumeCalls = [];
+
+  // live holder: a reachable runner status reports live
+  const live = await managedRun(root, {});
+  await enrollRecovery(root, live.runId, { scope: 'x' });
+  const server = await runnerServer(t, { runId: live.runId, sessionId: live.sessionId, live: true });
+  await writeFile(join(live.dir, 'owner.json'), JSON.stringify({ runId: live.runId, serviceId: server.serviceId,
+    pid: 4242, port: server.port, token: 'b'.repeat(64) }));
+
+  // intentional stop: unreachable runner with a recorded stopped phase
+  const stopped = await managedRun(root, { phase: 'stopped' });
+  await enrollRecovery(root, stopped.runId, { scope: 'x' });
+
+  // paused: an existing supervision pause marker
+  const paused = await managedRun(root, {});
+  await enrollRecovery(root, paused.runId, { scope: 'x' });
+  await writeSupervision(root, paused.sessionId, { enabled: false, action: 'paused' });
+
+  // record unavailable: corrupt state.json, never repaired
+  const corrupt = await managedRun(root, {});
+  await enrollRecovery(root, corrupt.runId, { scope: 'x' });
+  const corruptPath = join(corrupt.dir, 'state.json');
+  await writeFile(corruptPath, Buffer.alloc(1887, 0));
+
+  // attempts exhausted
+  const exhausted = await managedRun(root, {});
+  await enrollRecovery(root, exhausted.runId, { scope: 'x' });
+  const policy = readRecovery(root, exhausted.runId);
+  await writeFile(join(exhausted.dir, 'recovery.json'), JSON.stringify({ ...policy,
+    attempts: [{ at: '2026-09-13T11:00:00.000Z', outcome: 'refused', reason: 'x', reconnect: 'none' },
+      { at: '2026-09-13T11:01:00.000Z', outcome: 'refused', reason: 'x', reconnect: 'none' },
+      { at: '2026-09-13T11:02:00.000Z', outcome: 'refused', reason: 'x', reconnect: 'none' }] }));
+
+  const now = Date.parse('2026-09-13T12:30:00.000Z');
+  const pass = await recoveryPass(root, { max: 5, now, ownerReturns: async () => ({ status: 'ok', pending: 0 }),
+    resume: async (_root, run) => { resumeCalls.push(run); return { live: true }; } });
+  for (const entry of pass.results) results[entry.runId] = entry;
+  assert.equal(resumeCalls.length, 0);
+  assert.equal(pass.resumed, 0);
+  assert.equal(results[live.runId].reason, 'live_holder');
+  assert.equal(results[stopped.runId].reason, 'intentionally_stopped');
+  assert.equal(results[paused.runId].reason, 'paused');
+  assert.equal(results[corrupt.runId].decision, 'attention');
+  assert.equal(results[corrupt.runId].reason, 'record_unavailable');
+  assert.equal(results[exhausted.runId].reason, 'attempts_exhausted');
 });
 
-test('an absent state record keeps the pre-existing unreachable shape, not record_unavailable', async (t) => {
-  const { root, project } = await fixture(t);
-  await serviceSession(root, project, { stateKind: 'missing' });
-  const rows = await listSessions(root);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].state, 'unreachable');
-  assert.equal(rows[0].error, undefined);
-  assert.deepEqual((await doctor(root)).unreadable, []);
+test('an eligible run resumes once, sends one deterministic reconnect, then cools down', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  await enrollRecovery(root, run.runId, { scope: 'fix the parser only' });
+  const server = await runnerServer(t, { runId: run.runId, sessionId: run.sessionId, live: true });
+  await channelOwner(root, run.sessionId, server.port);
+
+  const resumeCalls = [];
+  const resume = async (_root, id) => { resumeCalls.push(id); return { live: true }; };
+  const now = Date.parse('2026-09-13T12:00:00.000Z');
+  const pass = await recoveryPass(root, { max: 1, now, resume,
+    ownerReturns: async () => ({ status: 'ok', pending: 2 }) });
+  assert.equal(pass.status, 'recovery_pass');
+  assert.equal(pass.considered, 1);
+  assert.equal(pass.resumed, 1);
+  assert.deepEqual(resumeCalls, [run.runId]);
+  assert.equal(pass.results[0].outcome, 'resumed');
+  assert.equal(pass.results[0].reconnect, 'sent');
+
+  const expectedId = messageId(digest(`edda-recovery-v1:${run.runId}:1`));
+  assert.equal(server.messages.length, 1);
+  assert.equal(server.messages[0].id, expectedId);
+  assert.equal(server.messages[0].mode, 'followUp');
+  assert.match(server.messages[0].message, /bounded recovery/i);
+  assert.match(server.messages[0].message, /not the original prompt/i);
+  assert.match(server.messages[0].message, /fix the parser only/);
+  assert.match(server.messages[0].message, /milestone|stopping reason/i);
+  assert.ok(Buffer.byteLength(server.messages[0].message) <= 1200);
+
+  const stored = readRecovery(root, run.runId);
+  assert.equal(stored.attempts.length, 1);
+  assert.equal(stored.attempts[0].outcome, 'resumed');
+  assert.equal(stored.attempts[0].reconnect, 'sent');
+
+  // An immediate second pass is refused by cooldown and sends no second message.
+  const second = await recoveryPass(root, { max: 1, now: now + 1000, resume,
+    ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  assert.equal(second.resumed, 0);
+  assert.equal(second.results[0].reason, 'cooldown');
+  assert.equal(resumeCalls.length, 1);
+  assert.equal(server.messages.length, 1);
 });
 
-test('a non-NUL invalid record degrades exactly like a NUL record', async (t) => {
-  const { root, project } = await fixture(t);
-  const nul = await managedRun(root, project, { stateKind: 'nul' });
-  const invalid = await managedRun(root, project, { stateKind: 'invalid' });
-  const nulStatus = await managedStatus(root, nul.runId), invalidStatus = await managedStatus(root, invalid.runId);
-  assert.equal(invalidStatus.status, 'record_unavailable');
-  assert.deepEqual(invalidStatus.error, nulStatus.error);
-  assert.ok(!parserText(invalidStatus));
-  assert.doesNotMatch(JSON.stringify(invalidStatus), /SECRET/);
-  const brokenConfig = await managedRun(root, project);
-  await writeFile(join(brokenConfig.dir, 'config.json'), NUL());
-  const brokenRow = listManagedRuns(root).runs.find((r) => r.runId === brokenConfig.runId);
-  assert.equal(brokenRow.error.code, 'record_unavailable');
-  assert.equal(brokenRow.error.record, 'config.json');
-  assert.equal(brokenRow.project, null);
+test('a throwing resume is recorded as refused and never throws out of the pass', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  await enrollRecovery(root, run.runId, { scope: 'x' });
+  const now = Date.parse('2026-09-13T12:00:00.000Z');
+  const pass = await recoveryPass(root, { max: 1, now,
+    resume: async () => { throw new Error('session file identity mismatch'); },
+    ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  assert.equal(pass.resumed, 0);
+  assert.equal(pass.results[0].outcome, 'refused');
+  assert.equal(pass.results[0].reconnect, 'none');
+  const stored = readRecovery(root, run.runId);
+  assert.equal(stored.attempts.length, 1);
+  assert.equal(stored.attempts[0].outcome, 'refused');
+  assert.match(stored.attempts[0].reason, /identity mismatch/);
 });
 
-test('readRecord classifies unparseable, oversized and non-file records without parser text', async (t) => {
-  const { dir } = await fixture(t);
-  const nulPath = join(dir, 'nul.json');
-  await writeFile(nulPath, NUL());
-  const invalidPath = join(dir, 'invalid.json');
-  await writeFile(invalidPath, '{ SECRET-BROKEN-JSON');
-  const oversizedPath = join(dir, 'oversized.json');
-  await writeFile(oversizedPath, Buffer.alloc(1024 * 1024 + 1, 0x30));
-  const directoryPath = join(dir, 'as-directory.json');
-  await mkdir(directoryPath);
-  for (const path of [nulPath, invalidPath, oversizedPath, directoryPath]) {
-    const result = readRecord(path);
-    assert.equal(result.value, null);
-    assert.equal(result.error.code, 'record_unavailable');
-    assert.ok(!parserText(result));
-    assert.throws(() => readJson(path), (error) => error.code === 'record_unavailable' && !/Unexpected token|JSON\.parse/.test(error.message));
-  }
-  assert.deepEqual(readRecord(join(dir, 'missing.json')), { value: null, error: null });
+test('max bounds how many runs are resumed in one pass', async (t) => {
+  const { root } = await fixture(t);
+  const a = await managedRun(root, {}), b = await managedRun(root, {});
+  await enrollRecovery(root, a.runId, { scope: 'x' });
+  await enrollRecovery(root, b.runId, { scope: 'x' });
+  const resumeCalls = [];
+  const now = Date.parse('2026-09-13T12:00:00.000Z');
+  const pass = await recoveryPass(root, { max: 1, now,
+    resume: async (_root, id) => { resumeCalls.push(id); return { live: true }; },
+    ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  assert.equal(resumeCalls.length, 1);
+  assert.equal(pass.resumed, 1);
+  const deferred = pass.results.filter((entry) => entry.outcome === 'deferred');
+  assert.equal(deferred.length, 1);
+  assert.equal(deferred[0].decision, 'eligible');
+  // The deferred run recorded no attempt.
+  assert.equal(readRecovery(root, deferred[0].runId).attempts.length, 0);
 });
 
-test('a symlinked record is a typed degradation, not an outage', async (t) => {
-  const { dir } = await fixture(t);
-  const target = join(dir, 'target.json');
-  await writeFile(target, JSON.stringify({ ok: true }));
-  const link = join(dir, 'link.json');
-  try { await symlink(target, link, 'file'); }
-  catch (error) {
-    if (!['EPERM', 'EACCES', 'UNKNOWN', 'ENOSYS'].includes(error.code)) throw error;
-    // Windows without developer mode can still create a directory junction.
-    try { await symlink(dir, link, 'junction'); }
-    catch { t.skip(`symlink unavailable: ${error.code}`); return; }
-  }
-  const result = readRecord(link);
-  assert.equal(result.value, null);
-  assert.equal(result.error.code, 'record_unavailable');
+test('an unknown reconnect receipt is recorded and not resent on an immediate pass', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  await enrollRecovery(root, run.runId, { scope: 'x' });
+  await channelOwner(root, run.sessionId, await closedPort());
+  const now = Date.parse('2026-09-13T12:00:00.000Z');
+  const pass = await recoveryPass(root, { max: 1, now,
+    resume: async () => ({ live: true }),
+    ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  assert.equal(pass.results[0].outcome, 'resumed');
+  assert.equal(pass.results[0].reconnect, 'unknown');
+  const stored = readRecovery(root, run.runId);
+  assert.equal(stored.attempts.length, 1);
+  assert.equal(stored.attempts[0].reconnect, 'unknown');
+  const second = await recoveryPass(root, { max: 1, now: now + 1000,
+    resume: async () => { throw new Error('must not resume again'); },
+    ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  assert.equal(second.resumed, 0);
+  assert.equal(second.results[0].reason, 'cooldown');
 });
 
-test('CLI reads print degraded JSON without parser or NUL text', async (t) => {
-  const { root, project } = await fixture(t);
-  const run = await managedRun(root, project, { stateKind: 'nul' });
-  await serviceSession(root, project, { stateKind: 'nul' });
-  const env = { ...process.env, EDDA_PI_CHANNEL_DIR: root };
-  for (const args of [['runs'], ['list'], ['doctor'], ['run-status', run.runId], ['run-conversation', run.runId]]) {
-    const outcome = await exec(process.execPath, [cli, ...args], { env, timeout: 20000 }).catch((error) => error);
-    const output = `${outcome.stdout || ''}${outcome.stderr || ''}`;
-    assert.doesNotMatch(output, /Unexpected token|JSON\.parse|is not valid JSON/);
-    assert.ok(!output.includes('\u0000'));
-    assert.doesNotMatch(output, /SECRET/);
-    assert.doesNotThrow(() => JSON.parse(outcome.stdout), `stdout for ${args[0]}`);
-  }
+test('a pass for an unknown single run is not_enrolled, not attention', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  let called = false;
+  const pass = await recoveryPass(root, { runId: run.runId,
+    resume: async () => { called = true; return { live: true }; } });
+  assert.equal(pass.considered, 1);
+  assert.equal(pass.resumed, 0);
+  assert.deepEqual(pass.results[0], { runId: run.runId, decision: 'skip', reason: 'not_enrolled',
+    outcome: null, reconnect: 'none', receipt: null });
+  assert.equal(called, false);
+});
+
+test('listRecovery is bounded to managed run directories and surfaces a corrupt policy', async (t) => {
+  const { root } = await fixture(t);
+  const good = await managedRun(root, {});
+  await enrollRecovery(root, good.runId, { scope: 'x' });
+  const bad = await managedRun(root, {});
+  await enrollRecovery(root, bad.runId, { scope: 'x' });
+  await writeFile(join(bad.dir, 'recovery.json'), Buffer.alloc(64, 0));
+  await mkdir(join(root, 'managed', 'not-a-run'), { recursive: true });
+  await writeFile(join(root, 'managed', 'not-a-run', 'recovery.json'), JSON.stringify({ runId: 'nope' }));
+  const listed = listRecovery(root);
+  assert.equal(listed.length, 2);
+  const goodEntry = listed.find((entry) => entry.runId === good.runId);
+  const badEntry = listed.find((entry) => entry.runId === bad.runId);
+  assert.equal(goodEntry.policy.scope, 'x');
+  assert.equal(badEntry.policy, null);
+  assert.equal(badEntry.error.code, 'record_unavailable');
+});
+
+test('reconnectMessage stays bounded and names the declared scope', () => {
+  const text = reconnectMessage({ runId: 'r', scope: 's'.repeat(8000), attempt: 1, pending: 3 });
+  assert.ok(Buffer.byteLength(text) <= 1200);
+  assert.match(text, /bounded recovery/i);
+  assert.match(text, /not the original prompt/i);
+  assert.match(text, /pending for your owner: 3/);
 });

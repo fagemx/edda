@@ -47,7 +47,9 @@ export function runtimeInfo(root = defaultRoot()) {
       notice: 'A session Edda did not launch must load this installed extension (handOpened.argv) and declare EDDA_OWNER_REF. A live session reports its loaded channel as integration.modulePath in edda-pi list; if it matches neither runtime-info.channel.path nor a verified runtime-info.releases[].channel, it loaded a stale copy and owner-mailbox pickup fails silently.' },
     releases: installed.releases, releasesHasMore: installed.hasMore,
     capabilities: { managedLaunch: true, sameSessionResume: true, explicitMessages: true, persistedManagedConversation: true,
-      selectedTaskNotifications: true, managedFork: false, automaticProcessRestart: false, automaticOwnerWake: false },
+      selectedTaskNotifications: true, managedFork: false, automaticProcessRestart: false, automaticOwnerWake: false,
+      optInProcessRecovery: true,
+      unattendedRecovery: { inProcess: 'opt-in', hostRestart: false, systemAutostart: false } },
     notice: 'Installed client capabilities only. Inspect run-status for the runtime actually loaded by a run. No session was started or upgraded.',
     nextStep: pi ? 'Read the installed guide; runs discovers existing managed runs without starting them.' : 'Install Pi or set EDDA_PI_ENTRY to its dist/bundle/cli.js, then run runtime-info again.' };
 }

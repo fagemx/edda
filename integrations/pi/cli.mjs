@@ -16,6 +16,7 @@ import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConver
 import { startSupervisor, supervisorStatus, stopSupervisor } from './supervisor-client.mjs';
 import { runtimeInfo, listManagedRuns } from './activation.mjs';
 import { activationReceipt } from './activation-receipt.mjs';
+import { enrollRecovery, revokeRecovery, readRecovery, listRecovery, recoveryPass } from './recovery.mjs';
 
 const help = `Edda Pi session channel (same-user, same-machine)
   edda-pi --version
@@ -60,6 +61,10 @@ const help = `Edda Pi session channel (same-user, same-machine)
   node integrations/pi/cli.mjs run-conversation RUN_ID [--after ENTRY_ID] [--limit 20]
   node integrations/pi/cli.mjs run-stop RUN_ID [--abort]
   node integrations/pi/cli.mjs run-resume RUN_ID [--runtime pinned|current]
+  node integrations/pi/cli.mjs run-recovery enroll <RUN_ID> --scope TEXT [--max-attempts N] [--cooldown-ms N]
+  node integrations/pi/cli.mjs run-recovery revoke <RUN_ID> [--reason TEXT]
+  node integrations/pi/cli.mjs run-recovery status [RUN_ID]
+  node integrations/pi/cli.mjs run-recover [--run RUN_ID] [--max N]
   node integrations/pi/cli.mjs supervisor-start --config FILE [--id UUID]
   node integrations/pi/cli.mjs supervisor-status SUPERVISOR_ID
   node integrations/pi/cli.mjs supervisor-stop SUPERVISOR_ID
@@ -67,7 +72,7 @@ const help = `Edda Pi session channel (same-user, same-machine)
 JSON stdout; diagnostics stderr. EDDA_PI_CHANNEL_DIR overrides the private root.
 --registry DIR addresses a session in another registry root (send/receipt/list/status/conversation).
 Supervision commands are tools for an authorized controller, not a decision engine.
-No automatic process restart or message retry. Opt-in dependency alerts may start a model turn.
+No automatic process restart without an explicit per-run recovery enrollment (edda-pi run-recovery enroll); no message retry. Opt-in dependency alerts may start a model turn.
 The listener is local only. Keep the message ID.
 Install from the packaged tarball; see README.md and the installed getting-started.md.
 `.replaceAll('node integrations/pi/cli.mjs ', 'edda-pi ') +
@@ -137,13 +142,17 @@ async function main(args) {
     'inbox-respond': ['--message', '--message-file', '--authorization', '--consumer'], 'inbox-wake': [],
     'runtime-install': [], launch: ['--project', '--pi-entry', '--provider', '--model', '--thinking', '--prompt-file', '--run-id', '--extension', '--agent-dir', '--no-tools', '--owner', '--return-owner', '--owner-root'],
     'run-status': [], 'run-conversation': ['--after', '--limit'], 'run-stop': ['--abort'], 'run-resume': ['--runtime'],
+    'run-recovery': ['--scope', '--max-attempts', '--cooldown-ms', '--reason'], 'run-recover': ['--run', '--max'],
     owner: ['--run', '--owner', '--return-owner', '--owner-root'],
     'supervisor-start': ['--config', '--id'], 'supervisor-status': [], 'supervisor-stop': [],
     reply: ['--to', '--message', '--message-file'], checkpoint: ['--cursor', '--action', '--note'],
   }[command];
   if (!allowed || Object.keys(options).some((key) => !allowed.includes(key))) throw new Error('Unknown command or option; use --help');
   const root = options['--registry'] !== undefined ? registryRoot(options['--registry']) : defaultRoot();
-  const counts = ['doctor', 'owner'].includes(command) ? [0, 1] : [['runtime-info', 'activation', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
+  const counts = command === 'run-recovery' ? [1, 2]
+    : command === 'run-recover' ? [0]
+    : ['doctor', 'owner'].includes(command) ? [0, 1]
+    : [['runtime-info', 'activation', 'runs', 'list', 'watch', 'compose', 'inbox', 'inbox-wake', 'runtime-install', 'launch', 'supervisor-start'].includes(command) ? 0 : 1];
   if (!counts.includes(positional.length)) throw new Error('Use the exact session ID; see --help');
   const sessionId = positional[0];
   let result;
@@ -184,6 +193,29 @@ async function main(args) {
   if (command === 'run-conversation') result = await managedConversation(root, sessionId, { after: options['--after'], limit: options['--limit'] });
   if (command === 'run-stop') result = await stopManaged(root, sessionId, { abort: options['--abort'] === true });
   if (command === 'run-resume') result = await resumeManaged(root, sessionId, { runtime: options['--runtime'] });
+  if (command === 'run-recovery') {
+    const verb = positional[0];
+    if (verb === 'enroll') {
+      if (!options['--scope']) throw new Error('run-recovery enroll requires --scope');
+      result = await enrollRecovery(root, positional[1], { scope: options['--scope'],
+        maxAttempts: options['--max-attempts'] === undefined ? undefined : Number(options['--max-attempts']),
+        cooldownMs: options['--cooldown-ms'] === undefined ? undefined : Number(options['--cooldown-ms']) });
+    } else if (verb === 'revoke') {
+      result = revokeRecovery(root, positional[1], { reason: options['--reason'] });
+    } else if (verb === 'status') {
+      if (positional.length === 2) {
+        const recovery = readRecovery(root, positional[1]);
+        result = { runId: positional[1], status: recovery ? (recovery.enabled ? 'enrolled' : 'revoked') : 'not_enrolled', recovery };
+      } else {
+        result = { status: 'recovery_policies', registryRoot: root, policies: listRecovery(root) };
+      }
+    } else throw new Error("run-recovery supports enroll, revoke or status; use --help");
+  }
+  if (command === 'run-recover') {
+    const max = options['--max'] === undefined ? 1 : Number(options['--max']);
+    result = await recoveryPass(root, { runId: options['--run'], max });
+    if (result.results?.some((entry) => entry.decision === 'attention')) process.exitCode = 2;
+  }
   if (command === 'inbox') result = listInbox(root, { consumer: options['--consumer'], limit: options['--limit'], after: options['--after'] });
   if (command === 'inbox-read') result = await readInbox(root, sessionId, { consumer: options['--consumer'], budget: options['--budget-bytes'] });
   if (command === 'inbox-ack') result = acknowledgeInbox(root, sessionId, options['--consumer']);
