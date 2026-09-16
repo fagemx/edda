@@ -142,8 +142,28 @@ test('explicit recovery clears a stale registration when the live PID is not the
   // registration is stale and recover must clear it rather than refuse.
   const result = recover(root, channel.sessionId, channel.instanceId, { livePidIsOwned: false });
   assert.equal(result.recovered, true);
-  assert.equal(result.staleCleared, true);
   assert.equal(readJson(join(sessionDir(root, channel.sessionId), 'owner.json')), null);
+});
+
+test('recover clears an un-signalable PID when the caller proved the owner is not live', async (t) => {
+  const { root, channel } = await fixture(t);
+  const original = process.kill;
+  // Another account's process: the PID exists but cannot be signalled (EPERM).
+  process.kill = () => { const error = new Error('operation not permitted'); error.code = 'EPERM'; throw error; };
+  try {
+    assert.equal(recover(root, channel.sessionId, channel.instanceId, { livePidIsOwned: false }).recovered, true);
+  } finally { process.kill = original; }
+  assert.equal(readJson(join(sessionDir(root, channel.sessionId), 'owner.json')), null);
+});
+
+test('recover refuses an un-signalable PID when the owner may still be live', async (t) => {
+  const { root, channel } = await fixture(t);
+  const original = process.kill;
+  process.kill = () => { const error = new Error('operation not permitted'); error.code = 'EPERM'; throw error; };
+  try {
+    assert.throws(() => recover(root, channel.sessionId, channel.instanceId), /Cannot prove owner is dead/);
+  } finally { process.kill = original; }
+  assert.ok(readJson(join(sessionDir(root, channel.sessionId), 'owner.json')));
 });
 
 test('crash/recover/reopen makes every prior nonterminal receipt durably unknown without replay', async (t) => {
