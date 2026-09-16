@@ -213,7 +213,13 @@ async function main(args) {
   if (command === 'list') result = await listSessions(root);
   if (command === 'status') { try { result = await requestSession(root, sessionId, '/status'); } catch (error) { throw registryContext(error, sessionId, root); } }
   if (command === 'receipt') { try { result = await getReceipt(root, sessionId, validateId(options['--id'])); } catch (error) { throw registryContext(error, sessionId, root); } }
-  if (command === 'recover') result = recover(root, sessionId, options['--instance']);
+  if (command === 'recover') {
+    // A reachable channel proves the recorded PID is the owned process; an
+    // unreachable one means a live PID is a reused number, not the owner.
+    let livePidIsOwned = false;
+    try { await requestSession(root, sessionId, '/status'); livePidIsOwned = true; } catch { livePidIsOwned = false; }
+    result = recover(root, sessionId, options['--instance'], { livePidIsOwned });
+  }
   if (command === 'conversation') { try { result = await inspectSession(root, sessionId, { after: options['--after'], limit: options['--limit'] }); } catch (error) { throw registryContext(error, sessionId, root); } }
   if (command === 'enroll') result = await enroll(root, sessionId, options['--scope']);
   if (command === 'watch') result = await watch(root, { withConversation: options['--conversation'] === true });

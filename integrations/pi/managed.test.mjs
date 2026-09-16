@@ -12,8 +12,9 @@ import { fileURLToPath } from 'node:url';
 import { installRuntime, verifyRelease, rpcFrames, managedDir, alive } from './managed-store.mjs';
 import { launchManaged, managedStatus, stopManaged, resumeManaged, managedConversation, adoptOwner } from './managed-client.mjs';
 import { requestSession } from './client.mjs';
-import { readJson, writeJson, sessionDir } from './store.mjs';
+import { readJson, writeJson, sessionDir, recover } from './store.mjs';
 import { listInbox } from './inbox-manager.mjs';
+import { startChannel } from './channel.mjs';
 import { listManagedRuns } from './activation.mjs';
 import { removeTempTree } from './fixtures/temp-teardown.mjs';
 
@@ -223,29 +224,22 @@ test('run-resume waits out a just-stopped owned child instead of refusing', asyn
   assert.equal(resumed.live, true, JSON.stringify(resumed).slice(0, 240));
 });
 
-test('run-resume refuses while a prior owned child is genuinely alive', async (t) => {
+test('run-resume refuses while the owned channel is genuinely live', async (t) => {
   const f = await fixture(t);
   await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
   await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
   await stopManaged(f.registry, f.runId);
   const dir = managedDir(f.registry, f.runId);
   const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  child.unref();
-  // A genuinely live owned child has both the recorded PID and the matching
-  // channel registration (session + instance identity).
-  const sessionOwnerPath = join(sessionDir(f.registry, state.sessionId), 'owner.json');
-  const priorSessionOwner = readJson(sessionOwnerPath);
-  await writeJson(sessionOwnerPath, { version: 1, sessionId: state.sessionId, instanceId: state.instanceId,
-    pid: child.pid, token: 'a'.repeat(64), port: 1 });
-  await writeFile(join(dir, 'state.json'), JSON.stringify({ ...state, childPid: child.pid }));
+  // Clear the stopped run's registration, then run a real channel for the same
+  // session: a reachable live channel is the authoritative owned-alive signal.
+  const existing = readJson(join(sessionDir(f.registry, state.sessionId), 'owner.json'));
+  if (existing) recover(f.registry, state.sessionId, existing.instanceId);
+  const channel = await startChannel({ root: f.registry, sessionId: state.sessionId, cwd: f.project, deliver() {} });
   try {
-    await assert.rejects(resumeManaged(f.registry, f.runId), /Previous Pi may still be alive/);
+    await assert.rejects(resumeManaged(f.registry, f.runId), /Pi is still running/);
   } finally {
-    // Restore the owned state so the fixture cleanup does not wait on this synthetic PID.
-    await writeFile(join(dir, 'state.json'), JSON.stringify(state));
-    if (priorSessionOwner) await writeJson(sessionOwnerPath, priorSessionOwner); else await rm(sessionOwnerPath, { force: true });
-    try { child.kill(); } catch { /* already exited */ }
+    await channel.close();
   }
 });
 
@@ -263,6 +257,28 @@ test('run-resume ignores a stale recorded PID that was reused by another process
   await rm(join(dir, 'owner.json'), { force: true });
   await rm(join(sessionDir(f.registry, state.sessionId), 'owner.json'), { force: true });
   await writeFile(join(dir, 'state.json'), JSON.stringify({ ...state, runnerPid: reused.pid, childPid: reused.pid }));
+  try {
+    const resumed = await resumeManaged(f.registry, f.runId);
+    assert.equal(resumed.live, true, JSON.stringify(resumed).slice(0, 240));
+  } finally {
+    try { reused.kill(); } catch { /* already exited */ }
+  }
+});
+
+test('run-resume clears a matching session registration whose PID was reused', async (t) => {
+  const f = await fixture(t);
+  await launchManaged(f.registry, { runId: f.runId, project: f.project, piEntry: f.entry, prompt: 'HELLO', provider: 'fixture', model: 'echo' });
+  await until(async () => (await managedStatus(f.registry, f.runId)).initialReceipt?.status === 'settled');
+  await stopManaged(f.registry, f.runId);
+  const dir = managedDir(f.registry, f.runId);
+  const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'));
+  const reused = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  reused.unref();
+  // A surviving registration that matches sessionId+instanceId but whose PID was
+  // reused by an unrelated process (the recorded port/token do not answer).
+  await writeJson(join(sessionDir(f.registry, state.sessionId), 'owner.json'),
+    { version: 1, sessionId: state.sessionId, instanceId: state.instanceId, pid: reused.pid, token: 'a'.repeat(64), port: 1 });
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ ...state, childPid: reused.pid }));
   try {
     const resumed = await resumeManaged(f.registry, f.runId);
     assert.equal(resumed.live, true, JSON.stringify(resumed).slice(0, 240));
