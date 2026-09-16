@@ -226,29 +226,31 @@ export async function resumeManaged(root, id, { runtime = 'pinned' } = {}) {
     const existing = await managedStatus(root, id);
     if (existing.live) return existing;
     const state = readJson(join(dir, 'state.json'));
-    const owner = readJson(join(dir, 'owner.json'));
-    // `alive(pid)` is a bare liveness probe: a recorded PID can be reused by an
-    // unrelated process after a crash. Only an owned registration (the runner's
-    // owner.json / the channel's session owner.json) whose identity matches the
-    // recorded run counts as "still alive", so a stale PID cannot block recovery.
-    const ownedRunner = owner && owner.runId === id
-      && (state?.serviceId === undefined || owner.serviceId === state.serviceId) ? owner : null;
-    if (ownedRunner && await previousProcessLingering(ownedRunner.pid)) throw new Error('Previous runner may still be alive; no duplicate launch');
+    // A runner whose endpoint answers was already returned by managedStatus as
+    // live; past that point the runner is not serving, so a live PID in the run
+    // record cannot be the owned runner (the number may have been reused).
     ownedSessionFile(dir, config, state);
+    // A reachable, live channel is the authoritative "owned Pi is running"
+    // signal. A live PID in a surviving session registration is only the owned
+    // process when the channel can prove it; otherwise the number was reused and
+    // the registration is stale.
+    let channelReachable = false;
     try {
       const live = await requestSession(root, state.sessionId, '/status');
+      channelReachable = true;
       if (live.live) throw Object.assign(new Error('Pi is still running; reconnect instead of launching another process'), { live: true });
     } catch (error) { if (error.live) throw error; }
     const piOwner = readJson(join(sessionDir(root, state.sessionId), 'owner.json'));
     const ownedChild = piOwner && piOwner.sessionId === state.sessionId
       && (state.instanceId === undefined || piOwner.instanceId === state.instanceId)
       && (state.childPid === undefined || piOwner.pid === state.childPid) ? piOwner : null;
-    // A just-stopped owned child can read alive for a moment (not yet reaped).
-    // Wait on the observable PID with a bound before refusing, so a correct
-    // resume is not refused by a transient read while a genuinely live owned
-    // process still blocks duplicate launch.
-    if (ownedChild && await previousProcessLingering(ownedChild.pid)) throw new Error('Previous Pi may still be alive; recovery refused');
-    if (ownedChild) recover(root, state.sessionId, ownedChild.instanceId);
+    if (ownedChild) {
+      // A just-stopped owned child can read alive for a moment (not yet reaped).
+      // Wait on the observable PID with a bound only when the channel proves the
+      // process is owned; a reused PID with an unreachable channel is cleared.
+      if (channelReachable && await previousProcessLingering(ownedChild.pid)) throw new Error('Previous Pi may still be alive; recovery refused');
+      recover(root, state.sessionId, ownedChild.instanceId, { livePidIsOwned: channelReachable });
+    }
     // Explicit opt-in re-pin: keep the pinned runtime by default (existing runs
     // are not upgraded in place), but allow adopting a run whose pinned release
     // predates the current lifecycle by resuming it from the installed release.

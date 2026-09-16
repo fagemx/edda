@@ -135,6 +135,17 @@ test('explicit recovery refuses live process and mismatched instance', async (t)
   assert.equal((await listSessions(root))[0].state, 'idle');
 });
 
+test('explicit recovery clears a stale registration when the live PID is not the owner', async (t) => {
+  const { root, channel } = await fixture(t);
+  // The channel's recorded PID is alive (the test process), but the caller has
+  // proven it is not the owned process (e.g. the channel cannot answer), so the
+  // registration is stale and recover must clear it rather than refuse.
+  const result = recover(root, channel.sessionId, channel.instanceId, { livePidIsOwned: false });
+  assert.equal(result.recovered, true);
+  assert.equal(result.staleCleared, true);
+  assert.equal(readJson(join(sessionDir(root, channel.sessionId), 'owner.json')), null);
+});
+
 test('crash/recover/reopen makes every prior nonterminal receipt durably unknown without replay', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'edda-crash-test-'));
   const sid = randomUUID();
