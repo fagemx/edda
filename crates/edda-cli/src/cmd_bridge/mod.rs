@@ -29,7 +29,7 @@ pub use vendors::{
     uninstall_codex, uninstall_cursor, uninstall_hermes, uninstall_openclaw,
 };
 
-pub(crate) use request::resolve_session_id;
+pub(crate) use request::{local_machine_alias, resolve_session_id};
 
 /// One line naming the board a verb read or wrote: the project id and the
 /// directory `edda_store::project_root` resolved it from (GH-1048). Without
@@ -188,10 +188,18 @@ pub enum BridgeClaudeCmd {
     },
     /// Send a request to another session
     Request {
-        /// Target session label
-        to: String,
+        /// Target session label or `<machine>/<role>` peer
+        #[arg(required_unless_present = "status")]
+        to: Option<String>,
         /// Request message
-        message: String,
+        #[arg(required_unless_present = "status")]
+        message: Option<String>,
+        /// Show the delivery state (pending|delivered|acked|dead) of a request id
+        #[arg(long)]
+        status: Option<String>,
+        /// Output as JSON (with --status)
+        #[arg(long)]
+        json: bool,
         /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
@@ -382,9 +390,19 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
             BridgeClaudeCmd::Request {
                 to,
                 message,
+                status,
+                json,
                 session,
                 force,
-            } => request(repo_root, &to, &message, session.as_deref(), force),
+            } => request(
+                repo_root,
+                to.as_deref().unwrap_or_default(),
+                message.as_deref().unwrap_or_default(),
+                session.as_deref(),
+                force,
+                status.as_deref(),
+                json,
+            ),
             BridgeClaudeCmd::RenderWriteback => render_writeback(),
             BridgeClaudeCmd::RenderWorkspace { budget } => render_workspace(repo_root, budget),
             BridgeClaudeCmd::RenderCoordination { session } => {

@@ -13,6 +13,7 @@ pub mod domain;
 pub mod guided_execution;
 pub mod ledger;
 pub mod lock;
+pub mod node;
 pub mod paths;
 pub(crate) mod sqlite_store;
 pub mod sync;

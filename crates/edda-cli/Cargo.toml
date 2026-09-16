@@ -33,6 +33,7 @@ edda-pack = { path = "../edda-pack", version = "0.6.2" }
 edda-mcp = { path = "../edda-mcp", version = "0.6.2" }
 edda-serve = { path = "../edda-serve", version = "0.6.2" }
 edda-notify = { path = "../edda-notify", version = "0.6.2" }
+ureq = "3"
 edda-postmortem = { path = "../edda-postmortem", version = "0.6.2" }
 edda-search-fts = { path = "../edda-search-fts", version = "0.6.2" }
 edda-conductor = { path = "../edda-conductor", version = "0.6.2" }

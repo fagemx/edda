@@ -27,10 +27,12 @@ mod cmd_fleet_order;
 mod cmd_fleet_watch;
 mod cmd_gc;
 mod cmd_group;
+mod cmd_inbox;
 mod cmd_init;
 mod cmd_intake;
 mod cmd_log;
 mod cmd_merge;
+mod cmd_node;
 mod cmd_note;
 mod cmd_notify;
 mod cmd_pair;
@@ -227,10 +229,18 @@ enum Command {
     },
     /// Send a request to another session (shortcut for `bridge claude request`)
     Request {
-        /// Target session label
-        to: String,
+        /// Target session label or `<machine>/<role>` peer
+        #[arg(required_unless_present = "status")]
+        to: Option<String>,
         /// Request message
-        message: String,
+        #[arg(required_unless_present = "status")]
+        message: Option<String>,
+        /// Show the delivery state (pending|delivered|acked|dead) of a request id
+        #[arg(long)]
+        status: Option<String>,
+        /// Output as JSON (with --status)
+        #[arg(long)]
+        json: bool,
         /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
@@ -255,6 +265,20 @@ enum Command {
     /// Show active peer sessions (shortcut for `bridge claude peers`)
     Peers {
         /// Output sessions, claims, requests, and acknowledgements as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Peer inbox: wait, ack, send, status (no subcommand lists approval items)
+    Inbox {
+        #[command(subcommand)]
+        cmd: Option<cmd_inbox::InboxCmd>,
+        /// (approval listing) Filter by actor name
+        #[arg(long)]
+        by: Option<String>,
+        /// (approval listing) Filter by role
+        #[arg(long)]
+        role: Option<String>,
+        /// (approval listing) Output as JSON lines
         #[arg(long)]
         json: bool,
     },
@@ -612,6 +636,11 @@ enum Command {
         /// Port number
         #[arg(long, default_value_t = 7433)]
         port: u16,
+    },
+    /// Cross-machine node transport: `start`, `status`, `peers`
+    Node {
+        #[command(subcommand)]
+        cmd: cmd_node::NodeCmd,
     },
     /// Garbage collect expired blobs and transcripts
     Gc {
@@ -1237,13 +1266,38 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Request {
             to,
             message,
+            status,
+            json,
             session,
             force,
-        } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref(), force),
+        } => cmd_bridge::request(
+            &repo_root,
+            to.as_deref().unwrap_or_default(),
+            message.as_deref().unwrap_or_default(),
+            session.as_deref(),
+            force,
+            status.as_deref(),
+            json,
+        ),
         Command::RequestAck { from, session } => {
             cmd_bridge::request_ack(&repo_root, &from, session.as_deref())
         }
         Command::Peers { json } => cmd_bridge::peers(&repo_root, json),
+        Command::Inbox {
+            cmd,
+            by,
+            role,
+            json,
+        } => match cmd {
+            Some(cmd) => {
+                let code = cmd_inbox::run(cmd, &repo_root)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                Ok(())
+            }
+            None => cmd_draft::inbox(&repo_root, by.as_deref(), role.as_deref(), json),
+        },
         Command::Coord { session } => {
             cmd_bridge::render_coordination(&repo_root, session.as_deref())
         }
@@ -1406,6 +1460,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Notify { cmd } => cmd_notify::run(cmd, &repo_root),
         Command::Pair { cmd } => cmd_pair::execute(cmd, &repo_root),
         Command::Serve { bind, port } => cmd_serve::execute(&repo_root, &bind, port),
+        Command::Node { cmd } => cmd_node::run(cmd, &repo_root),
         Command::Gc {
             dry_run,
             keep_days,

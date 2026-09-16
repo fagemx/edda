@@ -13,7 +13,7 @@ use std::time::Duration;
 use tower::ServiceExt;
 
 /// Serialize tests that set EDDA_STORE_ROOT env var.
-static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// RAII guard that removes EDDA_STORE_ROOT on drop (panic-safe cleanup).
 struct StoreRootGuard;
@@ -3457,6 +3457,8 @@ fn app_with_auth(repo_root: &Path) -> Router {
         repo_root: repo_root.to_path_buf(),
         chronicle,
         pending_pairings: Mutex::new(HashMap::new()),
+        node: None,
+        node_token: None,
     });
 
     let public_routes = api::events::public_routes();
@@ -4487,6 +4489,8 @@ fn router_no_chronicle(repo_root: &Path) -> Router {
         repo_root: repo_root.to_path_buf(),
         chronicle: None,
         pending_pairings: Mutex::new(HashMap::new()),
+        node: None,
+        node_token: None,
     });
     api::events::routes()
         .merge(api::drafts::routes())
@@ -4832,6 +4836,8 @@ async fn pair_and_list_device() {
         repo_root: tmp.path().to_path_buf(),
         chronicle,
         pending_pairings: Mutex::new(HashMap::new()),
+        node: None,
+        node_token: None,
     });
 
     let make_app = || {

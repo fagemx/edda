@@ -474,21 +474,26 @@ rule, so they cannot answer differently about the same board.
 
 ### `edda request`
 
-Send a request to another active session.
+Send a request to another active session — or, with a `<machine>/<role>`
+target, to a peer machine's node (GH-685).
 
 ```bash
 edda request <TO> <MESSAGE> [OPTIONS]
+edda request --status <REQUEST_ID> [--json]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `TO` | Target session label |
+| `TO` | Target session label, or `<machine>/<role>` to cross the node wire |
 | `MESSAGE` | Request message |
+| `--status <ID>` | Read-only: print the delivery state of a request id instead of sending |
+| `--json` | JSON output for `--status` |
 | `--session ID` | Explicit session attribution; otherwise uses process-carried `EDDA_SESSION_ID` |
-| `--force` | Send even when no active session answers to `TO` |
+| `--force` | Send even when no active session answers to a local `TO` |
 
 ```bash
 edda request "billing" "Please expose invoice total as a public method"
+edda request "docs/role" "Please review the frozen contract"
 ```
 
 `TO` is resolved against active sessions before the request is recorded. A
@@ -496,8 +501,24 @@ label nobody answers to is an error — usually a typo — and `--force` queues 
 anyway for a peer that has not started yet. A label held by more than one
 session is a warning: all of them will see the message.
 
-Unacked requests expire after 7 days (`EDDA_REQUEST_TTL_SECS`), after which
-they are reported as expired and dropped by the next `edda gc`.
+A `<machine>/<role>` target is **machine-qualified**: a target whose machine is
+this machine's own alias stays local (the role label resolves on this board);
+any other machine's target is written to the local board and enqueued as a
+`lane_request` into that peer's durable outbound queue instead of
+dead-lettering. See `edda inbox` and `edda node` below.
+
+`--status <REQUEST_ID>` reads the sender-side durable queue and prints
+`pending | delivered | acked | dead` with the observed timestamps. `ack` is the
+only thing that moves a request to `acked`; an unacknowledged request older than
+the node delivery TTL (`EDDA_NODE_REQUEST_TTL_SECS`, default 24 h) is `dead` —
+a real state, never a silent zero. `edda inbox status --id <ID>` is an alias.
+
+> **Spelling note.** GH-685's issue text wrote `edda request status <id>`; that
+> would collide with the existing `edda request <to> <message>` positional form
+> used across the fleet, so the additive `--status` flag is used instead.
+
+Unacked local requests expire after 7 days (`EDDA_REQUEST_TTL_SECS`), after
+which they are reported as expired and dropped by the next `edda gc`.
 
 ### `edda request-ack`
 
@@ -511,6 +532,48 @@ Rendering a request into an agent's context is delivery, not acknowledgement:
 the request keeps appearing until it is acked here, and the ack covers only the
 messages outstanding at that moment — later ones from the same peer still
 arrive.
+
+### `edda inbox`
+
+The receiving half of the node lane (GH-685): wait for an unacked request, ack
+exactly one request id, send a request, or read a request's delivery state.
+
+```bash
+edda inbox wait --actor <LABEL> [--timeout <SECS>] [--json]
+edda inbox ack --actor <LABEL> --id <REQUEST_ID> [--session <ID>] [--json]
+edda inbox send --to <MACHINE>/<ROLE> --message <TEXT> [--force] [--json]
+edda inbox status --id <REQUEST_ID> [--json]
+edda inbox [--by <ACTOR>] [--role <ROLE>] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--actor <LABEL>` | Label the request is addressed to / the acknowledging label |
+| `--timeout <SECS>` | `wait` window, clamped to `1..=600` (default 60) |
+| `--id <REQUEST_ID>` | The single request id to ack or report on |
+| `--to` / `--message` | `send` target and text (alias for the forwarding path) |
+| `--force` | Send even when no active session answers to a local target |
+
+- `wait` is a **read-only** waiter. It blocks until an unacked request
+  addressed to `--actor` exists (exit 0 with the request), or the timeout
+  expires (exit 2). It polls no faster than 250 ms, has no scheduler, and
+  **never** acknowledges anything. A `request_delivered` marker is transport
+  provenance, not an ack: a delivered-but-unacked request is still pending and
+  is still returned by `wait`.
+- `ack` writes the existing `request_ack` covering **exactly** the named id.
+  An unknown id is a named error, not a silent success. When the request
+  arrived over the node wire, `ack` also enqueues the reverse-direction
+  `receipt{state:"acked"}` so the sender's queue entry moves to `acked`.
+- `send` is an alias for `edda request` with `--to`/`--message`.
+- `status` is an alias for `edda request --status`.
+- With **no subcommand**, `edda inbox` keeps its existing behaviour: it lists
+  pending draft/approval items (`--by`/`--role`/`--json`).
+
+```bash
+edda inbox wait --actor "docs/role" --timeout 120
+edda inbox ack --actor "docs/role" --id "01J..."
+edda inbox status --id "01J..." --json
+```
 
 ### `edda peers`
 
@@ -549,6 +612,87 @@ Output (empty workspace):
 ```
 No active sessions.
 ```
+
+### `edda node`
+
+Per-machine node transport over Tailscale (GH-685). One node per machine moves
+allowlisted coordination events to peers; it is not a scheduler, a second task
+system, or a remote executor. The listener binds **only** this machine's
+Tailscale `100.x` IPv4 address and accepts `POST /api/sync` and
+`GET /api/node/status` with a shared bearer token.
+
+```bash
+edda node start [--config <path>] [--insecure-bind]
+edda node status [--config <path>] [--insecure-bind] [--json]
+edda node peers [--config <path>] [--insecure-bind] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config <path>` | Node config path (default: `<store root>/node.json`). |
+| `--insecure-bind` | Test-only: allow a non-tailnet bind / peer host and print a stderr warning. Never used for the real two-machine proof. |
+| `--json` | Machine-readable output for `status` / `peers`. |
+
+`node.json` is machine-local and never committed:
+
+```json
+{
+  "version": 1,
+  "node": { "alias": "4090", "bind": "100.105.187.119", "port": 6850 },
+  "peers": [
+    { "alias": "docs", "host": "100.116.144.116", "port": 6850, "tokenEnv": "EDDA_NODE_TOKEN" }
+  ]
+}
+```
+
+- `alias` is a machine label (`^[a-z0-9._-]{1,64}$`); a session id, run id or
+  path is never an address.
+- `tokenEnv` names an environment variable holding the shared token. The
+  **value** is read at request time and never stored, printed, or replicated;
+  an unset token is a 401, not an open door. `edda node start` reads its own
+  accepted token from the fixed `EDDA_NODE_TOKEN`, and each peer's `tokenEnv`
+  must name a variable holding the same shared value; a peer naming a variable
+  whose value differs gets a **401 by design** (the name is a local
+  indirection, never a second secret).
+- Unknown keys anywhere in `node.json` fail closed and name the offending key.
+
+`POST /api/sync` carries `{version, kind, originMachine, events[]}` where every
+envelope is `deny_unknown_fields`. Unknown fields — and secret-shaped foreign
+fields such as `sessionId`, `path`, `ownerRoot` or `token` — are refused by
+name, never ignored, and never partially applied. Import dedupes on
+`(originMachine, eventId)`, so a reconnect flush loses nothing and applies
+nothing twice. The outbound queue (`<store root>/node/queue/<peer>.jsonl`) is on
+disk and survives a restart: `sent → delivered → acked`.
+
+`edda node status` is a **local observation**: the machine, bind, revision and
+`revisionOrigin`, per-peer queue counts and last-success time, and a bounded
+reachability probe. `revision` is the edda revision this process can observe:
+`revisionOrigin` is `"build"` (this binary's own build identity), `"repo-head"`
+(the workspace git HEAD), or `"none"` with `revision: null` — never a Pi package
+release id (`EDDA_PI_RELEASE_ID`) or another artifact's identifier. An
+unreachable peer is reported `reachable: false` with a reason, never as a
+silent zero. `edda node peers` lists the configured peers with their last-seen
+facts.
+
+#### Lane delivery (`sent → delivered → acked → dead`)
+
+A `<machine>/<role>` target on `edda request` / `edda inbox send` writes the
+local `request` and enqueues a `lane_request` into that peer's durable queue
+(`sent`). The receiving node lands it by writing, into its own
+`coordination.jsonl`, a `request` event with the wire `requestId`, the two
+labels and a `via_machine` provenance fact, then a `request_delivered` marker;
+the 2xx is the durable `delivered` receipt. `edda inbox ack --actor <role> --id
+<id>` writes the `request_ack` and returns a `receipt{state:"acked"}`, moving
+the sender's queue entry to `acked`. An unacknowledged request older than
+`EDDA_NODE_REQUEST_TTL_SECS` (default 24 h) is `dead` — a real state, never a
+silent zero. A `lane_request` whose `originMachine` is this machine's own alias
+is refused as a loop rather than landed.
+
+The wire never carries a session id, run id, path, root, lease or credential;
+the receiving node writes its own local identity and records `via_machine` as
+provenance, not an address. `import_batch` dedupes on `(originMachine,
+eventId)` and `write_remote_request` refuses an already-landed request id, so a
+redelivered envelope is not applied twice.
 
 ### `edda watch`
 

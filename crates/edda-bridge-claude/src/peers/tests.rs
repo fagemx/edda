@@ -3564,3 +3564,6 @@ mod tests_tail_gh757;
 
 #[path = "tests_tail_gh671.rs"]
 mod tests_tail_gh671;
+
+#[path = "tests_tail_gh685.rs"]
+mod tests_tail_gh685;
