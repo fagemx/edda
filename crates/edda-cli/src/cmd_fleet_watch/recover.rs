@@ -176,6 +176,11 @@ fn write_terminal(store_path: &Path, lane: &Lane) -> anyhow::Result<bool> {
 
 /// Step 2 — release the dead session's claim, if one is on the board. A
 /// session that never claimed is a no-op, so a second run writes nothing.
+///
+/// The release is **confirmed, not assumed**: `peers::write_unclaim` returns
+/// `()` and surfaces a failed write only through the bridge's dropped-write
+/// recorder, so the report re-reads the board and reports `true` only when the
+/// session is actually gone (REVIEW round 7, finding 1).
 fn release_claim(lane: &Lane) -> bool {
     let Ok(claims) = crate::cmd_claim::read_active_claims(&lane.project_id) else {
         eprintln!(
@@ -188,7 +193,26 @@ fn release_claim(lane: &Lane) -> bool {
         return false;
     }
     peers::write_unclaim(&lane.project_id, &lane.session_id);
-    true
+    match crate::cmd_claim::read_active_claims(&lane.project_id) {
+        Ok(claims) => {
+            let still_held = claims.iter().any(|c| c.session_id == lane.session_id);
+            if still_held {
+                eprintln!(
+                    "⚠ fleet watch: the claim release for lane {} did not take effect; the board \
+                     still lists it",
+                    lane.session_id
+                );
+            }
+            !still_held
+        }
+        Err(e) => {
+            eprintln!(
+                "⚠ fleet watch: could not confirm the claim release for lane {}: {e:#}",
+                lane.session_id
+            );
+            false
+        }
+    }
 }
 
 /// Prior redispatches this verb recorded for (plan, phase), read back from the
@@ -312,10 +336,20 @@ enum Redispatch {
     Redispatched(String),
     /// No plan state to re-arm anywhere: a stateless `edda dispatch` lane.
     NoPlanState,
-    /// A plan state exists, but the phase is not on a retry edge (already
-    /// `Pending`, or the phase is unknown to the state): the work is already
-    /// queued and needs no re-arm.
-    NotOnRetryEdge,
+    /// A plan state exists but nothing needed re-arming: either the phase is
+    /// already `Pending` (a previous retry queued it) or the plan state does
+    /// not record the heartbeat's phase at all. The `Option` keeps those two
+    /// apart so the durable reason can name the real one.
+    NoRearmNeeded(Option<PhaseStatus>),
+}
+
+/// How a plan state answered the re-arm attempt.
+enum Rearm {
+    /// The phase was re-armed; carries the plan file recorded in the state.
+    Armed(String),
+    /// No re-arm: nothing to re-arm (`None`) or the phase is not on a retry
+    /// edge (its current status).
+    Declined(Option<PhaseStatus>),
 }
 
 /// Step 3a — record the redispatch and re-arm the conductor phase through the
@@ -339,7 +373,7 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Redispatch> {
         worktree.describe()
     );
 
-    let plan_file = update_state(store_path, &lane.plan, |state| {
+    let outcome = update_state(store_path, &lane.plan, |state| {
         let plan_file = state.plan_file.clone();
         let Some(current) = state
             .phases
@@ -347,7 +381,7 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Redispatch> {
             .find(|p| p.id == lane.phase)
             .map(|p| p.status)
         else {
-            return Ok(None);
+            return Ok(Rearm::Declined(None));
         };
         // Through the state machine's own retry edges (`Stale → Pending`,
         // `Failed → Pending`), exactly as `edda conduct retry` does: that is
@@ -356,7 +390,7 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Redispatch> {
         // those edges (e.g. already Pending after a previous stop-loss) is
         // left alone rather than forced.
         if current != PhaseStatus::Stale && current != PhaseStatus::Failed {
-            return Ok(None);
+            return Ok(Rearm::Declined(Some(current)));
         }
         // `retry_context` is the channel the runner actually consumes: it is
         // injected into the phase prompt by `build_phase_prompt` on the next
@@ -374,10 +408,11 @@ fn redispatch(store_path: &Path, lane: &Lane) -> anyhow::Result<Redispatch> {
             }),
         )?;
         edda_conductor::state::derive::update_plan_status(state);
-        Ok(Some(plan_file))
+        Ok(Rearm::Armed(plan_file))
     })?;
-    let Some(plan_file) = plan_file else {
-        return Ok(Redispatch::NotOnRetryEdge);
+    let plan_file = match outcome {
+        Rearm::Armed(plan_file) => plan_file,
+        Rearm::Declined(status) => return Ok(Redispatch::NoRearmNeeded(status)),
     };
 
     let ledger = Ledger::open(store_path)?;
@@ -468,9 +503,14 @@ pub(super) fn recover(lane: &Lane, steps: &[RecoveryStep], cap: u32) -> anyhow::
                         "no recorded plan/brief for {}/{}; redispatch belongs to the caller",
                         lane.plan, lane.phase
                     ),
-                    Redispatch::NotOnRetryEdge => format!(
-                        "the phase {}/{} is already queued (not on a retry edge); no re-arm was \
-                         needed",
+                    Redispatch::NoRearmNeeded(Some(status)) => format!(
+                        "the phase {}/{} is already {status:?} (not on a retry edge); no re-arm \
+                         was needed",
+                        lane.plan, lane.phase
+                    ),
+                    Redispatch::NoRearmNeeded(None) => format!(
+                        "the plan state for {} does not record a phase \"{}\"; no re-arm was \
+                         possible",
                         lane.plan, lane.phase
                     ),
                     Redispatch::Redispatched(_) => unreachable!("handled above"),

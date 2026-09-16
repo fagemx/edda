@@ -493,12 +493,6 @@ fn watch_puts_the_takeover_instruction_into_the_retry_context() {
     assert!(ctx.contains("continue on top of it"), "got: {ctx}");
 }
 
-#[derive(clap::Parser)]
-struct FleetTestCli {
-    #[command(subcommand)]
-    cmd: crate::cmd_fleet::FleetCmd,
-}
-
 #[test]
 fn watch_stop_loss_names_an_already_queued_phase() {
     let _store = isolated_store();
@@ -535,7 +529,7 @@ fn watch_stop_loss_names_an_already_queued_phase() {
     let stop_loss = fleet_note_payload(&repo, "stop_loss").expect("stop-loss note");
     let reason = stop_loss["reason"].as_str().unwrap_or_default();
     assert!(
-        reason.contains("already queued"),
+        reason.contains("already Pending"),
         "the reason must name the real cause, got: {reason}"
     );
     assert!(
