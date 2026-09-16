@@ -81,6 +81,61 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
 }
 
+// A valid live-service registration: `cli.js start` writes this, so its absence
+// or invalidity is how "the service is not there" is detected.
+function ownerRecord(root) {
+  const record = readJsonBounded(join(root, 'owner.json')).value;
+  if (!record || typeof record !== 'object') return null;
+  const valid = record.version === 1 && Number.isInteger(record.pid) && record.pid > 0 &&
+    typeof record.token === 'string' && record.token.length > 0 && typeof record.instanceId === 'string' && record.instanceId &&
+    typeof record.origin === 'string' && /^http:\/\/127\.0\.0\.1:[0-9]+$/.test(record.origin);
+  return valid ? record : null;
+}
+
+// The authoritative "is it up" signal: the authenticated endpoint the operator's
+// browser also uses. A pid alone is not enough (a reused PID looks alive).
+async function serviceResponds(owner, timeoutMs = 1500) {
+  if (!owner) return null;
+  try {
+    const response = await fetch(`${owner.origin}/api/service`, { headers: { authorization: `Bearer ${owner.token}` },
+      signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
+    if (!response.ok) return null;
+    const body = await response.json();
+    return { pid: owner.pid, instanceId: owner.instanceId, origin: owner.origin,
+      version: body.version ?? null, startedAt: body.startedAt ?? null, agents: body.agents ?? null };
+  } catch { return null; }
+}
+
+// After a stop/recover the previous instance must be gone before a second one is
+// started, otherwise the new process can lose the port/lock race and die.
+async function waitForRelease(root, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const owner = ownerRecord(root);
+    const stillThere = owner && pidAlive(owner.pid) && await serviceResponds(owner);
+    if (!stillThere) return true;
+    if (Date.now() >= deadline) return false;
+    await delay(250);
+  }
+}
+
+// Poll until the freshly started instance answers, so "exit 0" cannot stand for a
+// service that is not there (GH #1275).
+async function verifyService(root, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const owner = ownerRecord(root);
+    if (owner && pidAlive(owner.pid)) {
+      const service = await serviceResponds(owner);
+      if (service) return service;
+    }
+    if (Date.now() >= deadline) return null;
+    await delay(300);
+  }
+}
+
+function delay(ms) { return new Promise((done) => setTimeout(done, ms)); }
+
 function ownerOf(path) {
   const record = readJsonBounded(path);
   if (!record.present) return { present: false, owner: null, invalid: false };
@@ -91,7 +146,7 @@ function ownerOf(path) {
   return { present: true, owner: valid ? value : null, invalid: !valid };
 }
 
-function main(argv) {
+async function main(argv) {
   let options;
   try { options = parse(argv); }
   catch (error) { console.error(`manager-release: ${error.usage}`); process.exit(2); }
@@ -156,6 +211,11 @@ function main(argv) {
     if (!options.noRestart) {
       if (live) { run(process.execPath, [cli, 'stop', '--root', root]); executed.push('stop'); }
       else if (owner.present) { run(process.execPath, [cli, 'recover', '--root', root]); executed.push('recover'); }
+      // Do not start a second instance onto a root the previous one has not released.
+      if (!(await waitForRelease(root, 10000))) {
+        throw new Error('previous agent-manager instance did not release the service root/port within 10s; refusing to start a second one');
+      }
+      executed.push('released');
     }
 
     const previous = readJsonBounded(releaseFile).value;
@@ -177,10 +237,20 @@ function main(argv) {
     executed.push('write-release');
 
     let started = null;
-    if (!options.noRestart) { started = run(process.execPath, [cli, 'start', '--root', root]); executed.push('start'); }
+    if (!options.noRestart) {
+      for (let attempt = 1; attempt <= 2 && !started; attempt += 1) {
+        run(process.execPath, [cli, 'start', '--root', root]);
+        executed.push(attempt === 1 ? 'start' : 'start-retry');
+        // Exit 0 from `start` is a claim, not evidence: verify the instance answers.
+        started = await verifyService(root, 15000);
+      }
+      if (!started) {
+        throw new Error('agent-manager start did not produce a responding service (no authenticated /api/service answer after 2 attempts)');
+      }
+    }
     let status = null;
     try { status = JSON.parse(run(process.execPath, [cli, 'status', '--root', root])); } catch { /* status is best-effort evidence */ }
-    const result = { status: 'activated', ...plan, executed, started: started ? 'confirmed' : 'skipped', service: status };
+    const result = { status: 'activated', ...plan, executed, started: started ? 'verified' : 'skipped', service: started || status };
     if (options.json) console.log(JSON.stringify(result, null, 2));
     else console.log(`manager-release: activated revision=${revision} root=${root} entrypoint=${cli} steps=${executed.join(',')}`);
   } catch (error) {
@@ -191,4 +261,7 @@ function main(argv) {
   }
 }
 
-main(process.argv.slice(2));
+main(process.argv.slice(2)).catch((error) => {
+  console.error(`manager-release: ${(error && error.message) || error}`);
+  process.exit(1);
+});
