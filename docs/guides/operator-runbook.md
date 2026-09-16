@@ -335,21 +335,22 @@ L1 是 exact-head CI，加 verifier 對 Windows CI 未覆蓋 surface 的 focused
 
 7. **合併**（只由已具 repository R6 standing authority 的控制者執行；條件綠就立即合，不再二次詢問；worker、fixer、reviewer 永不合併；`docs/fleet/rules.md` R6）：先執行 `edda review merge --pr <N>`；它直接讀可信作者貼出的 SHA-pinned §7 留言，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過，再直接結算留言聯集（GH-1057），不呼叫 `edda review deliver`、不讀 `Independent Review` status。該 SHA 上只要還有一則站著的 Changes Requested，後來的 LGTM 也蓋不過（GH-742）。**開著的 PR 整體漂移它只印不擋**：跨 PR 的漂移不是 R6 條件，被判的永遠是被合的那張自己——漂移行仍逐行印出（#1124、`review.merge-drift-guard=advisory-not-an-r6-condition`；fleet 健康訊號看 `edda review drift` 與每日摘要，不看這一步的 rc）。**被合的那張自己仍然擋，而且是從它自己讀的**：`mergeable=CONFLICTING`（R24 不准在這種狀態回報就緒，而 `--check` 就是那個回報）、孤兒 Review Response（回應一個從未貼出的輪次，GH-993）、walk 自己的留言順序把主體最新的**權威**判決讀成 stale（它按建立序讀留言、閘自己按 GitHub 的編輯序選最新的一輪；兩者不一致時以擋為準，不當綠，因為讀同一份留言得到兩個答案不是綠。SHADOW 輪次不是判決、不進 union，所以擋不住）、判決沒釘在 head（R6 的條件）——walk 讀不到時也藏不住這四者。檢查通過後，已有上述 standing R6 authority 的控制者直接使用 `edda review merge --pr <N> --merge`，不另請示；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。它也把 squash subject 永遠釘在 PR 標題上（GH-1100）：合併一律帶 `--subject`——單 commit 的 PR 若讓 GitHub 自選 subject，會原封抄用該 commit 的標題，fa0d011 那次就是這樣把 `wip(review): ...` 寫進 main——且標題先按 conventional commit 格式驗證（REVIEW.md §5 U4），`wip(...)`、空 scope、缺 type 一律當場拒絕、不執行合併（`--check` 也驗，早一步給訊號）。GitHub 只會替「自己挑的」subject 補上 ` (#N)` 這個 PR 回指，帶了 `--subject` 就原文照用、不補；所以這個動詞自己接上 `<PR 標題> (#<PR 編號>)`，squash commit 才不會從此在 main 上失去 PR 指標（U4 驗的仍是純標題，不含後綴；標題若已經以「本 PR 自己的編號」結尾就不重複補，結尾是「別的 PR 編號」則照補，免得 `git log` 的回指指到無關的 PR）。合併 body 可用 `--body-file <path>` 指定（只在 `--merge` 有效，空字串或配 `--check` 都會拒絕）；沒給就自動組一張最小收據（審查 SHA、LGTM 輪號、CI run 連結）當 body。`scripts/merge-reviewed-pr.sh` 還在，是一行適配器（GH-1105）：PR 編號之後的參數原封轉發（`--check`／`--merge`／`--body-file <path>` 都穿得過去），`--help` 也直接接到動詞自己的說明，所以舊呼叫不變。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 8. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
-9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009）：
-   先看 dry-run —— `sh scripts/fleet/reclaim-merged.sh`。每個 worktree／local branch／remote
+9. **回收**（wave 收尾，**控制者**跑，在 `C:\ai_agent\edda` 主 checkout 跑；GH-1009、GH-1093）：
+   先看 dry-run —— `edda fleet reclaim`。每個 worktree／local branch／remote
    branch 一行，附對應 PR、PR 狀態、dirty 與否，以及被留下的理由；確認 `RECLAIM` 那幾行就是
-   自己要清的，再 `sh scripts/fleet/reclaim-merged.sh --apply`，每移除一項留一行收據
+   自己要清的，再 `edda fleet reclaim --apply`，每移除一項留一行收據
    （路徑、branch、PR#、squash SHA）。
    它只動 `fleet.merged-artifact-cleanup` 授權內的東西：PR 已 MERGED、worktree 乾淨、ref 還停在
    被合併的那顆 commit。closed-unmerged、open、dirty、無 PR、同名多 PR、locked、detached、
    主 checkout 與 `.claude/worktrees/` 底下的 agent worktree 一律只列不碰（R7）；任何一項檢查
-   出錯就降級成只列。**活躍 peer session 的 branch 自動受保**：腳本讀一次 `edda peers --json`，
+   出錯就降級成只列。**活躍 peer session 的 branch 自動受保**：動詞讀一次 `edda peers --json`，
    以它發佈的 `stale` 判定（GH-617 的單一存活判準）把該 session 的 branch、其 worktree 與
-   `origin/<branch>` 標成 `live-peer <name>` 而不回收；這張表讀不到（無 `edda`／`jq`、指令非零、
+   `origin/<branch>` 標成 `live-peer <name>` 而不回收；這張表讀不到（無 `edda`、指令非零、
    回應無法解析或缺 `sessions`）時所有候選一律只列，fail closed。其餘還在跑的 lane 用
    `--protect <worktree 目錄名或分支名>` 保住（可重複）。
    **lane 不跑這支**——§四第 3 條仍是「不刪分支、不刪 worktree」；回收是控制者的動作。
-   這支腳本是過渡載體，產品家在 `edda fleet reclaim`（腳本檔頭載明）。
+   產品家就是 `edda fleet reclaim`；`sh scripts/fleet/reclaim-merged.sh` 還在，是一行相容適配器
+   （GH-1093），舊呼叫不變。
 10. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
 
 ---

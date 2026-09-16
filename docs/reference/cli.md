@@ -1359,6 +1359,69 @@ Exit codes:
 | 1 | error (a `gh` or `git` failure, an unreadable fixture, a failed stdout write) |
 | 2 | usage |
 
+#### edda fleet reclaim
+
+Reclaim merged, clean artifacts. `edda fleet reclaim` executes
+`fleet.merged-artifact-cleanup` (#1093): an artifact whose PR is MERGED — the
+merged PR's remote branch and its lane worktree — may be reclaimed, because
+the squash commit is on `main` and GitHub keeps `refs/pull/N/head`, so
+SHA-pinned verdicts stay resolvable. The default is a dry run; `--apply`
+performs the removals. Every check that errors demotes its item to KEEP: an
+item whose PR state, tree state or live-peer state could not be established is
+not a reclamation candidate.
+
+```bash
+edda fleet reclaim                                       # dry run
+edda fleet reclaim --apply                               # perform removals
+edda fleet reclaim --protect lane-4242 --pr-limit 5000
+```
+
+Flags:
+
+- `--apply` — perform removals; without it the run only classifies.
+- `--protect <NAME>` — keep a worktree directory basename or a branch name
+  exactly; repeatable. A protected item is always KEEP.
+- `--pr-limit <N>` — maximum number of PRs to read from `gh`; default 2000.
+
+Authority (`fleet.merged-artifact-cleanup`): only an artifact whose PR is
+MERGED, whose worktree tree is clean, and whose ref still sits at the merged
+commit is reclaimed. `git worktree remove`'s own refusals are honored, and a
+branch is deleted only after a post-delete re-read proves it gone.
+
+The KEEP set, first match wins — the worktree listing first, then local
+branches, then remote branches:
+
+- every worktree: the main checkout, a worktree nested inside it (agent
+  worktrees under `.claude/worktrees/`), the worktree the verb runs from,
+  `locked`, `protected`, and prunable/missing (run `git worktree prune`).
+- a worktree with no branch is `detached`; a branch name reused across PRs is
+  `pr-ambiguous`; a branch with no PR row is `no-pr`; and any PR state other
+  than MERGED is `pr-<state>`.
+- a worktree tree that is dirty or could not be read is `tree-<state>`; a
+  local branch whose tip has moved past the merged head is `local-ahead-of-pr`;
+  a remote branch whose tip no longer matches the merged head is
+  `remote-moved-since-merge`.
+- the repository's default branch is `default-branch`, and a local branch
+  checked out in a worktree is `checked-out`. A remote branch whose local
+  counterpart was kept is `local-kept`.
+- live-peer protection (GH-1094): a merged, clean worktree or branch on a live
+  peer session's branch is `KEEP live-peer <name>`. Liveness is read once from
+  `edda peers --json`, which publishes the shared per-session `stale` verdict
+  (GH-617); if that table cannot be read, every otherwise-reclaimable item is
+  `KEEP liveness-unreadable` — unreadable liveness fails closed.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | ran (dry run or `--apply`) |
+| 2 | usage |
+| 3 | the PR table could not be read — every item's PR state is unknown, so nothing may be reclaimed |
+| 4 | a post-delete re-read could not be verified — the affected refs are reported KEPT/unverified, not receipted as reclaimed |
+
+`scripts/fleet/reclaim-merged.sh` is now a one-line adapter to this verb
+(GH-1093); existing callers keep working unchanged.
+
 #### edda fleet watch
 
 Detect and bounded-recover orphaned lanes (GH-573). A lane dies abnormally

@@ -456,6 +456,27 @@ test('switching an adopted run to another owner does not re-migrate the stale se
   assert.equal(readJson(join(ownerSubscriptionDir(root, ownerB), 'dependencies.json')), null);
 });
 
+test('a re-adoption drops a leftover session snapshot even when the owner record already exists', async (t) => {
+  const project = await mkdtemp(join(tmpdir(), 'edda-owner-leftover-'));
+  const root = join(project, 'private');
+  const ownerRef = 'assistant/leftover-owner';
+  await writeFile(join(project, 'task.json'), JSON.stringify(baseTask()));
+  const dependencyCommand = { file: process.execPath, args: [fileURLToPath(new URL('./fixtures/edda-task-reader.mjs', import.meta.url))] };
+  const channel = await startChannel({ root, sessionId: randomUUID(), cwd: project, ownerCommand: returnFixture(), dependencyCommand, deliver() {} });
+  t.after(async () => { await channel.close(); await rm(project, { recursive: true, force: true }); });
+  await enroll(root, channel.sessionId, 'Observe this synthetic fixture; no real task work or spending.');
+  await channel.dependencies.configure({ project, taskIds: ['17'], notify: false, maxNotifications: 10 });
+  // Simulate a prior adopt whose owner record exists while the session record lingers
+  // (e.g. a delete that failed once). The unconditional best-effort delete must drop it.
+  const sessionPath = join(sessionDir(root, channel.sessionId), 'dependencies.json');
+  const sessionRecord = readJson(sessionPath);
+  writeJson(join(ownerSubscriptionDir(root, ownerRef), 'dependencies.json'),
+    { ...sessionRecord, ownerRef, holderSession: channel.sessionId, sessionId: channel.sessionId });
+  assert.ok(readJson(sessionPath));
+  await channel.adoptOwner({ owner: ownerRef });
+  assert.equal(readJson(sessionPath), null, 'leftover session snapshot removed on re-adoption');
+});
+
 test('a failed dependency rebind is retried on a later adoption of the same owner', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'edda-owner-retry-'));
   const root = join(project, 'private');
