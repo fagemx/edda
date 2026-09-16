@@ -3,6 +3,7 @@ import { defaultRoot, digest, readJson } from './store.mjs';
 import { managedDir } from './managed-store.mjs';
 import { pageConversation, projectEntry } from './conversation.mjs';
 import { reportSchema } from './handoff-schema.mjs';
+import { recoveryPass } from './recovery.mjs';
 import { join } from 'node:path';
 
 // A managed run's effective owner is persisted in its state.json by the runner,
@@ -72,6 +73,17 @@ export default function eddaSessionChannel(pi) {
       });
       if (!ctx.isIdle()) channel.event('agent_start');
       ctx.ui?.setStatus?.('edda-session', `Edda: ${channel.sessionId.slice(0, 8)}`);
+      // One bounded in-process recovery pass, only for an owner-bound session and
+      // only when not explicitly disabled. It never blocks or fails session
+      // start, never throws into Pi, and adds no timer, interval or retry loop.
+      if (process.env.EDDA_RECOVERY !== 'off' && (managedOwnerRefs() || process.env.EDDA_OWNER_REF)) {
+        void recoveryPass(defaultRoot(), { max: 1 }).then((pass) => {
+          const resumed = (pass.results ?? []).filter((entry) => entry.outcome === 'resumed');
+          if (!resumed.length) return;
+          ctx.ui?.setStatus?.('edda-recovery', `Edda recovery: resumed ${resumed.length}`);
+          ctx.ui?.notify?.(`Edda bounded recovery resumed ${resumed.length} interrupted run(s).`, 'info');
+        }).catch(() => {});
+      }
     } catch (error) {
       failed = true;
       ctx.ui?.notify?.(`Edda session channel unavailable: ${error.message}`, 'error');

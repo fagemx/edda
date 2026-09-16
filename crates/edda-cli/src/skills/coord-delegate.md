@@ -332,8 +332,80 @@ edda-pi run-stop <runId>         # only when the run is idle
   and do not replay the initial work.
 - Preserve attempt identity: a run that cannot be reached stays a preserved attempt, not a renamed
   success. Record a replacement as a **new** attempt only when the old one is genuinely unrecoverable.
-- Do not promise or claim automatic restart, offline wake, callback into an external chat, or
-  cross-machine migration — none of those exist here.
+- Do not promise automatic restart, offline wake, callback into an external chat, or cross-machine
+  migration. The one bounded, opt-in exception is per-run recovery enrollment
+  (`edda-pi run-recovery enroll`): it resumes a *provably dead, pre-authorized* run while a host is up and
+  reconnects its unfinished work. It never revives an intentionally stopped or paused run, never races a
+  live owner, and is not a resident host or a boot-time service — host reboot and system autostart remain
+  concrete gaps to report, not claims.
+
+## 6. A named research consumer: keep one bounded question running across episodes
+
+`coord-delegate` delegates one job. A **research consumer** is a standing, bounded *question* that attaches
+several execution episodes over days and must not need the user to restate the goal at every seam. It uses
+the same public surface; it is not a second orchestrator, it does not own the engineering controller's
+workers, and the original controller's review/merge authority and its route back to the assistant are
+unchanged. Research is another **named consumer**, not a new layer.
+
+### Attach execution, one bounded episode at a time
+
+```text
+edda-pi launch --project <episode-workdir> --provider <p> --model <m> --thinking high \
+  --prompt-file <episode-brief.md> --owner controller/<episode> --return-owner <research-owner-ref>
+```
+
+- Write the open question, the episode's falsifiable goal, the evidence the episode must return, and its
+  stopping condition into the research record **before** launching. The brief, not the launch command, is
+  where the question lives.
+- Give every episode a stable owner identity and a `--return-owner`, so its result has an address that
+  survives session replacement.
+- One live owner per episode: do not re-brief a running owner and do not create a second controller for
+  the same episode.
+
+### Collect results
+
+```text
+edda-pi run-status <runId>                     # live state and the sessionId
+edda-pi run-conversation <runId> --limit 20    # bounded public history
+edda return status --owner <research-owner-ref> --json
+edda return claim  --owner <research-owner-ref> --session <sessionId> --json
+```
+
+- The owner mailbox is the durable return; a claimed return is **declared controller data, not
+  acceptance**. Check it against the question's own acceptance record before advancing the question.
+- For a task-backed episode, `edda-pi follow <sessionId> --project <path> --tasks <ids> --scope <scope>
+  --notify` may wake a **running** owner on a selected change, and an owner-bound subscription survives
+  replacement. It is opt-in and consumes bounded model turns.
+- A green test suite or a delivered PR is episode evidence, never the research answer.
+
+### Continue after an episode ends, without the user saying "continue"
+
+```text
+edda-pi run-resume <runId>                       # same run and session; never replays the prompt
+edda-pi send <sessionId> --message-file <next-step.md> --sender research
+edda-pi run-recovery enroll <runId> --scope "<declared scope>"
+edda-pi run-recovery status <runId>
+edda-pi run-recovery revoke <runId> --reason "<why>"
+edda-pi run-recover --max 1
+```
+
+- After an explicit `run-resume`, send **one** evidence-bound next step. Never replay the initial prompt
+  and never send a generic "continue".
+- For a run that a host may lose, enroll it **once** with an explicit bounded scope. Recovery is opt-in,
+  bounded (attempt cap + cooldown) and visible: it skips a live holder, an intentionally stopped run, a
+  paused/revoked run, a run with no attempts left, and a corrupt record it cannot prove — those stay
+  visible as `attention`, never guessed. A successful recovery also reconnects pending owner returns.
+- Keep one work ledger across episodes: do not reset the budget, the attempt identity or the consumed
+  returns when an episode is replaced.
+- Host reboot and system autostart are **not** provided. Report that as a concrete gap; do not build a
+  private scheduler, a second mailbox or a `continue` nagger.
+
+### When the whole question ends
+
+- Stop when the question's acceptance record is met, when the evidence refutes the question, or when the
+  bounded budget is exhausted — then write the closing report and launch no further episode.
+- An episode that ends `unknown`, `record_unavailable` or unrecoverable stays preserved and visible. It is
+  not a success, and it is not silently retried as a new job.
 
 ## Boundaries
 

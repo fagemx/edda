@@ -30,6 +30,9 @@ test('runtime-info and runs are read-only and publish honest capabilities', asyn
   const info = runtimeInfo(root);
   assert.equal(info.registryRoot, root);
   assert.equal(info.capabilities.automaticProcessRestart, false);
+  assert.equal(info.capabilities.automaticOwnerWake, false);
+  assert.equal(info.capabilities.optInProcessRecovery, true);
+  assert.deepEqual(info.capabilities.unattendedRecovery, { inProcess: 'opt-in', hostRestart: false, systemAutostart: false });
   assert.equal(info.capabilities.managedFork, false);
   assert.match(await readFile(info.guide, 'utf8'), /new session/i);
   assert.deepEqual(listManagedRuns(root).runs, []);
