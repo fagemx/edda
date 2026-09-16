@@ -1422,6 +1422,65 @@ Exit codes:
 `scripts/fleet/reclaim-merged.sh` is now a one-line adapter to this verb
 (GH-1093); existing callers keep working unchanged.
 
+#### edda fleet watch
+
+Detect and bounded-recover orphaned lanes (GH-573). A lane dies abnormally
+when its heartbeat is stale, its work has no terminal record (no done/failed rail
+task, no completed `#session_digest`, no terminal phase/plan in the conductor
+plan state — a lane's terminal record must be able to name its session, so the
+conductor's own per-attempt `conductor_phase` receipts are not consulted),
+**and** no claim that still stands holds it — including a live peer whose
+standing claim intersects the surfaces the dead lane was writing. Heartbeat
+absence alone is never a death verdict (`docs/fleet/rules.md` R3/R17): a normally
+finished lane also ages out of its heartbeat, so the terminal record is what
+stops the false positive, and the standing claim is what stops taking over a
+live peer's work.
+
+A lane is only judged while it is the **current attempt** of its phase: when the
+conductor plan state records a newer attempt of the same (plan, phase), the stale
+heartbeat is a superseded attempt's corpse and is reported `superseded`, never
+recovered. The one shape the product cannot answer for is a stateless `edda
+dispatch` lane that recorded no claim lifecycle: dispatch keeps no plan state, so
+with no un-released claim and no session digest there is neither a terminal
+record nor evidence that the unit was ever recorded. That lane is reported
+`unrecorded`, never recovered — one proof is not a verdict.
+
+```bash
+edda fleet watch                       # dry run: report verdicts only
+edda fleet watch --json                # machine-readable report
+edda fleet watch --apply               # write the terminal record, release the claim, redispatch
+edda fleet watch --apply --max-redispatch 0   # bound the ladder at zero retries
+```
+
+Flags:
+
+- `--apply` — perform the recovery. Without it the command is read-only
+  (the default).
+- `--json` — emit the report as JSON.
+- `--max-redispatch <N>` — stop-loss after N redispatches per (plan, phase);
+  default is the ledger decision `fleet.watch.max-redispatch`, else 1.
+
+Recovery order is fixed: write the terminal record (a ledger note keyed by
+plan/phase/session, plus the `Running`/`Checking` → `Stale` transition), then
+release the dead session's board claim, then redispatch or stop-loss. The
+redispatch count is read back from the verb's own `fleet_watch` ledger notes,
+so there is no second state system, and a phase is re-armed through the
+existing retry transition (`edda conduct run` picks it up on resume). Before
+re-arming, the worktree's current state is read and written into the phase's
+`retry_context` — the channel the runner injects into the next phase prompt —
+as a takeover instruction ("continue on top of it, do not redo it"). The
+terminal record makes the lane `finished` on the next run, so a second
+invocation with no state change is a no-op. The verb installs no scheduler and
+starts no loop or agent.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | report rendered (orphans found or not) |
+| 1 | error |
+| 2 | usage |
+
 ### edda review
 
 Review a committed branch using an independent read-only agent and record a

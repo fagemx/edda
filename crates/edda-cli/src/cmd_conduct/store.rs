@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// prefix, unifies separators, and case-folds on Windows only — POSIX paths
 /// are case- and separator-sensitive, so folding there would collapse
 /// distinct stores into one.
-pub(super) fn normalize_store_path(p: &Path) -> String {
+pub(crate) fn normalize_store_path(p: &Path) -> String {
     let canonical = std::fs::canonicalize(p)
         .map(|c| c.to_string_lossy().trim_start_matches(r"\\?\").to_string())
         .unwrap_or_else(|_| p.to_string_lossy().to_string());
@@ -50,7 +50,7 @@ pub(super) fn normalize_store_path(p: &Path) -> String {
 /// the verb resolution is reproducible. A failed enumeration is warned about
 /// only when `repo_root` really is a git checkout — a non-git demo cwd is
 /// not a fault.
-pub(super) fn candidate_stores(repo_root: &Path) -> Vec<PathBuf> {
+pub(crate) fn candidate_stores(repo_root: &Path) -> Vec<PathBuf> {
     let mut stores: Vec<PathBuf> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     push_unique(&mut stores, &mut seen, repo_root.to_path_buf());
@@ -176,9 +176,9 @@ pub(super) fn registry_roots_for(run_cwd: &Path, shell_cwd: &Path) -> Vec<PathBu
 }
 
 /// Plans found, as `(name, store)` — the shared discovery output type.
-pub(super) type DiscoveredPlans = Vec<(String, PathBuf)>;
+pub(crate) type DiscoveredPlans = Vec<(String, PathBuf)>;
 /// Corrupt-state diagnostics from a discovery pass: `(name, store, error)`.
-pub(super) type DiscoveryCorruption = Vec<(String, PathBuf, anyhow::Error)>;
+pub(crate) type DiscoveryCorruption = Vec<(String, PathBuf, anyhow::Error)>;
 
 /// One discovery pass shared by `status` and the recovery verbs, so the two
 /// surfaces can never disagree about which store holds a plan.
@@ -186,7 +186,7 @@ pub(super) type DiscoveryCorruption = Vec<(String, PathBuf, anyhow::Error)>;
 /// Registry-referenced states are collected first (before any directory
 /// scan), so a live lane outranks a stale same-name `state.json` elsewhere.
 /// Results are deduped by `(plan, normalized store)`.
-pub(super) fn discover_plans(repo_root: &Path) -> (DiscoveredPlans, DiscoveryCorruption) {
+pub(crate) fn discover_plans(repo_root: &Path) -> (DiscoveredPlans, DiscoveryCorruption) {
     let mut found: DiscoveredPlans = Vec::new();
     let mut corrupt: DiscoveryCorruption = Vec::new();
     let stores = candidate_stores(repo_root);
