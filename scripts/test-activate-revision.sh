@@ -22,7 +22,25 @@ sh -n "$0" || { echo "FAIL: sh -n $0" >&2; exit 1; }
 node --check "$writer" || { echo "FAIL: node --check $writer" >&2; exit 1; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/test-activate-revision.XXXXXX")
-cleanup() { rm -rf "$work"; }
+fixture_pid=""
+# Kill a process by the PID the process reported. On Git Bash that is a native
+# Windows PID, which MSYS `kill` cannot reach, so use taskkill there.
+kill_reported_pid() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) MSYS_NO_PATHCONV=1 taskkill /PID "$1" /T /F >/dev/null 2>&1 || true ;;
+    *) kill -KILL "$1" 2>/dev/null || true ;;
+  esac
+}
+reported_pid_alive() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $1" 2>/dev/null | grep -q "$1" ;;
+    *) kill -0 "$1" 2>/dev/null ;;
+  esac
+}
+cleanup() {
+  [ -n "$fixture_pid" ] && kill_reported_pid "$fixture_pid"
+  rm -rf "$work"
+}
 trap cleanup 0 HUP INT TERM
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -336,5 +354,92 @@ node "$writer" --repo "$fixture" --root "$work/manager" --revision "$fixture_rev
 node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));const n=r.resolvedNpm;if(!n)process.exit(1);if(n.command==='npm.cmd'&&n.shell!==true)process.exit(2);if(process.platform==='win32'&&!/npm-cli\.js$/.test((n.prefix||[]).join(''))&&n.shell!==true)process.exit(3)" "$work/writer-npm.json" \
   || fail "manager-release would spawn an unspawnable npm command"
 pass "manager-release resolves a spawnable npm command"
+
+# ── manager-release: post-start verification (#1275) ──────────────────
+# A fixture manager whose `start` returns 0 without a responding service must
+# fail the step; one that actually serves must pass. Before the fix the first
+# case exited 0.
+mgr_repo="$work/mgr-repo"
+mgr_root="$work/mgr-root"
+mkdir -p "$mgr_repo/integrations/agent-manager/dist/src" "$mgr_repo/integrations/agent-manager/node_modules" "$mgr_root"
+printf '%s\n' '{"name":"fixture-manager","version":"0.0.0","private":true,"type":"module","scripts":{"build":"node -e \"process.exit(0)\""}}' > "$mgr_repo/integrations/agent-manager/package.json"
+cat > "$mgr_repo/integrations/agent-manager/dist/src/fixture-service.mjs" <<'SERVICE'
+import { writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { join } from 'node:path';
+const [root, mode] = process.argv.slice(2);
+const token = 'f'.repeat(64);
+if (mode === 'dead') {
+  writeFileSync(join(root, 'owner.json'), JSON.stringify({ version: 1, pid: process.pid, instanceId: 'dead-instance',
+    origin: 'http://127.0.0.1:1', token, startedAt: new Date().toISOString() }));
+  process.exit(0);
+}
+const server = createServer((req, res) => {
+  if (req.url !== '/api/service' || req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401); res.end(); return; }
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ version: 1, startedAt: new Date().toISOString(), agents: 3 }));
+});
+server.listen(0, '127.0.0.1', () => {
+  writeFileSync(join(root, 'owner.json'), JSON.stringify({ version: 1, pid: process.pid, instanceId: 'live-instance',
+    origin: `http://127.0.0.1:${server.address().port}`, token, startedAt: new Date().toISOString() }));
+});
+SERVICE
+cat > "$mgr_repo/integrations/agent-manager/dist/src/cli.js" <<'CLI'
+#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const [command, ...rest] = process.argv.slice(2);
+const root = rest[rest.indexOf('--root') + 1];
+if (command === 'stop' || command === 'recover') process.exit(0);
+if (command === 'status') { try { process.stdout.write(readFileSync(join(root, 'owner.json'), 'utf8')); } catch { process.exit(2); } process.exit(0); }
+if (command === 'start') {
+  const mode = process.env.MGR_FIXTURE_LIVE === '1' ? 'live' : 'dead';
+  const service = fileURLToPath(new URL('./fixture-service.mjs', import.meta.url));
+  const child = spawn(process.execPath, [service, root, mode], { detached: true, stdio: 'ignore' });
+  child.unref();
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try { readFileSync(join(root, 'owner.json')); process.exit(0); } catch { /* not yet */ }
+    if (Date.now() > deadline) process.exit(1);
+  }
+}
+process.exit(2);
+CLI
+chmod +x "$mgr_repo/integrations/agent-manager/dist/src/cli.js"
+git -C "$mgr_repo" init -q
+git -C "$mgr_repo" -c user.email=fixture@example.invalid -c user.name=fixture add -A
+git -C "$mgr_repo" -c user.email=fixture@example.invalid -c user.name=fixture commit -q -m fixture
+
+# (a) start returns 0 but nothing answers -> the step must fail (before the fix: 0)
+if MGR_FIXTURE_LIVE=0 node "$writer" --repo "$mgr_repo" --root "$mgr_root" >"$work/mgr-dead.txt" 2>&1; then
+  fail "manager-release reported success although no service answered"
+else
+  grep -q "did not produce a responding service" "$work/mgr-dead.txt" || fail "manager-release failed without naming the missing service"
+  pass "manager-release fails when start returns 0 but no service answers"
+fi
+rm -f "$mgr_root/owner.json"
+
+# (b) a service that really answers -> the step passes and reports it verified
+if MGR_FIXTURE_LIVE=1 node "$writer" --repo "$mgr_repo" --root "$mgr_root" --json >"$work/mgr-live.txt" 2>&1; then
+  node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));if(r.status!=='activated'||r.started!=='verified')process.exit(1);if(!r.service||r.service.agents!==3)process.exit(2)" "$work/mgr-live.txt" \
+    || fail "manager-release did not report the verified service"
+  pass "manager-release verifies a responding service"
+else
+  cat "$work/mgr-live.txt" >&2
+  fail "manager-release failed against a responding service"
+fi
+fixture_pid=$(node -e "try{process.stdout.write(String(require(process.argv[1]).pid))}catch{}" "$mgr_root/owner.json" 2>/dev/null || true)
+if [ -z "$fixture_pid" ]; then
+  fail "the fixture service did not register a pid"
+fi
+kill_reported_pid "$fixture_pid"
+sleep 1
+if reported_pid_alive "$fixture_pid"; then
+  fail "the fixture service survived the kill (pid $fixture_pid)"
+fi
+fixture_pid=""
+pass "the fixture service is released (no leaked server)"
 
 echo "PASS test-activate-revision"
