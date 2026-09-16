@@ -22,7 +22,25 @@ sh -n "$0" || { echo "FAIL: sh -n $0" >&2; exit 1; }
 node --check "$writer" || { echo "FAIL: node --check $writer" >&2; exit 1; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/test-activate-revision.XXXXXX")
-cleanup() { rm -rf "$work"; }
+fixture_pid=""
+# Kill a process by the PID the process reported. On Git Bash that is a native
+# Windows PID, which MSYS `kill` cannot reach, so use taskkill there.
+kill_reported_pid() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) MSYS_NO_PATHCONV=1 taskkill /PID "$1" /T /F >/dev/null 2>&1 || true ;;
+    *) kill -KILL "$1" 2>/dev/null || true ;;
+  esac
+}
+reported_pid_alive() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $1" 2>/dev/null | grep -q "$1" ;;
+    *) kill -0 "$1" 2>/dev/null ;;
+  esac
+}
+cleanup() {
+  [ -n "$fixture_pid" ] && kill_reported_pid "$fixture_pid"
+  rm -rf "$work"
+}
 trap cleanup 0 HUP INT TERM
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -412,7 +430,16 @@ else
   cat "$work/mgr-live.txt" >&2
   fail "manager-release failed against a responding service"
 fi
-live_pid=$(node -e "try{process.stdout.write(String(require(process.argv[1]).pid))}catch{}" "$mgr_root/owner.json" 2>/dev/null || true)
-[ -n "$live_pid" ] && kill -KILL "$live_pid" 2>/dev/null || true
+fixture_pid=$(node -e "try{process.stdout.write(String(require(process.argv[1]).pid))}catch{}" "$mgr_root/owner.json" 2>/dev/null || true)
+if [ -z "$fixture_pid" ]; then
+  fail "the fixture service did not register a pid"
+fi
+kill_reported_pid "$fixture_pid"
+sleep 1
+if reported_pid_alive "$fixture_pid"; then
+  fail "the fixture service survived the kill (pid $fixture_pid)"
+fi
+fixture_pid=""
+pass "the fixture service is released (no leaked server)"
 
 echo "PASS test-activate-revision"
