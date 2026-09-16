@@ -30,6 +30,7 @@ mod cmd_init;
 mod cmd_intake;
 mod cmd_log;
 mod cmd_merge;
+mod cmd_node;
 mod cmd_note;
 mod cmd_notify;
 mod cmd_pair;
@@ -612,6 +613,11 @@ enum Command {
         /// Port number
         #[arg(long, default_value_t = 7433)]
         port: u16,
+    },
+    /// Cross-machine node transport: `start`, `status`, `peers`
+    Node {
+        #[command(subcommand)]
+        cmd: cmd_node::NodeCmd,
     },
     /// Garbage collect expired blobs and transcripts
     Gc {
@@ -1406,6 +1412,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Notify { cmd } => cmd_notify::run(cmd, &repo_root),
         Command::Pair { cmd } => cmd_pair::execute(cmd, &repo_root),
         Command::Serve { bind, port } => cmd_serve::execute(&repo_root, &bind, port),
+        Command::Node { cmd } => cmd_node::run(cmd, &repo_root),
         Command::Gc {
             dry_run,
             keep_days,

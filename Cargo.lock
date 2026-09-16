@@ -839,6 +839,7 @@ dependencies = [
  "tokio-util",
  "tracing-subscriber",
  "ulid",
+ "ureq",
 ]
 
 [[package]]

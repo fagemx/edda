@@ -6,6 +6,7 @@ pub(crate) mod drafts;
 pub(crate) mod events;
 pub(crate) mod ingestion;
 pub(crate) mod metrics;
+pub(crate) mod node;
 pub(crate) mod policy;
 pub(crate) mod snapshots;
 pub(crate) mod stream;

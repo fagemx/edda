@@ -224,6 +224,156 @@ fn import_decision(
     })
 }
 
+// ── Transported node records (GH-685) ─────────────────────────────────
+
+/// A node-transported decision fact plus its canonical `eventId`. The event id
+/// is the source event id used for the existing import dedupe
+/// (`source_project_id` + `source_event_id`).
+#[derive(Debug, Clone)]
+pub struct DecisionRecord {
+    pub event_id: String,
+    pub fact: crate::node::envelope::DecisionFact,
+}
+
+/// The third decision carrier beside sqlite sources and the committed markdown
+/// mirror: a fact that arrived over the node transport.
+///
+/// `source_project_id` is the declared `originMachine`. Provenance survives:
+/// the imported row keeps the original actor as its `authority` and the origin
+/// machine as its `source_project_id`. The #394 rule is unchanged — a same-key
+/// different-value import is **inactive**, never an overwrite — and an
+/// identical re-import is skipped.
+pub fn sync_from_records(
+    target: &Ledger,
+    records: &[DecisionRecord],
+    target_project_id: &str,
+    dry_run: bool,
+) -> anyhow::Result<SyncResult> {
+    let branch = target.head_branch()?;
+    let mut result = SyncResult::default();
+
+    for record in records {
+        let source_project_id = record.fact.origin_machine.as_str();
+        let source_project_name = record.fact.origin_machine.as_str();
+        // A hash project id never equals an alias; the guard is kept so a future
+        // alias-shaped target cannot import from itself.
+        if source_project_id == target_project_id {
+            continue;
+        }
+        if target
+            .sqlite
+            .is_already_imported(source_project_id, &record.event_id)?
+        {
+            result.skipped += 1;
+            continue;
+        }
+
+        let row = decision_row_from_fact(&branch, record);
+        let current = target.sqlite.find_active_decision(&branch, &row.key)?;
+        let is_conflict = current
+            .as_ref()
+            .map(|active| active.value != row.value)
+            .unwrap_or(false);
+        if is_conflict {
+            result.conflicts.push(ConflictInfo {
+                key: row.key.clone(),
+                local_value: current
+                    .as_ref()
+                    .map(|active| active.value.clone())
+                    .unwrap_or_default(),
+                remote_value: row.value.clone(),
+                source_project: source_project_name.to_string(),
+            });
+        }
+
+        if dry_run {
+            result.imported.push(ImportedDecision {
+                key: row.key.clone(),
+                value: row.value.clone(),
+                source_project: source_project_name.to_string(),
+                source_event_id: row.event_id.clone(),
+            });
+            continue;
+        }
+
+        let imported = import_decision(
+            target,
+            &branch,
+            source_project_id,
+            source_project_name,
+            &row,
+            !is_conflict,
+            ImportExtras::default(),
+        )?;
+
+        // Preserve the transported ratification as an append-only fact binding
+        // the just-imported row. A conflict imports inactive and never carries
+        // ratification. The actor is preserved verbatim: unlike a committed
+        // markdown mirror, a node fact arrives inside the shared-token +
+        // tailnet trust boundary of the frozen contract §3.
+        if !is_conflict && record.fact.ratified {
+            append_node_ratification(
+                target,
+                &branch,
+                &row.key,
+                &record.fact.actor,
+                source_project_id,
+            )?;
+        }
+
+        result.imported.push(imported);
+    }
+
+    Ok(result)
+}
+
+fn decision_row_from_fact(branch: &str, record: &DecisionRecord) -> DecisionRow {
+    let fact = &record.fact;
+    DecisionRow {
+        event_id: record.event_id.clone(),
+        key: fact.key.clone(),
+        value: fact.value.clone(),
+        reason: format!("transported from {}", fact.origin_machine),
+        domain: extract_domain(&fact.key),
+        branch: branch.to_string(),
+        supersedes_id: None,
+        is_active: true,
+        ts: Some(fact.ts.clone()),
+        scope: fact.scope.clone(),
+        source_project_id: Some(fact.origin_machine.clone()),
+        source_event_id: Some(record.event_id.clone()),
+        status: "active".to_string(),
+        authority: fact.actor.clone(),
+        affected_paths: "[]".to_string(),
+        tags: "[]".to_string(),
+        review_after: None,
+        reversibility: "medium".to_string(),
+        village_id: None,
+    }
+}
+
+fn append_node_ratification(
+    target: &Ledger,
+    branch: &str,
+    key: &str,
+    ratified_by: &str,
+    source_project_id: &str,
+) -> anyhow::Result<()> {
+    let parent_hash = target.last_event_hash()?;
+    let note = format!(
+        "ratified by {ratified_by} on {source_project_id}; transported over the node transport"
+    );
+    let event = edda_core::event::new_decision_ratify_event(
+        branch,
+        parent_hash.as_deref(),
+        key,
+        ratified_by,
+        Some(&note),
+    )?;
+    target.append_event(&event)?;
+    Ok(())
+}
+
 // ── Committed markdown mirror (GH-671) ────────────────────────────────
 
 /// Default staleness threshold, in hours, for a committed mirror's INDEX

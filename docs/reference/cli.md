@@ -550,6 +550,60 @@ Output (empty workspace):
 No active sessions.
 ```
 
+### `edda node`
+
+Per-machine node transport over Tailscale (GH-685). One node per machine moves
+allowlisted coordination events to peers; it is not a scheduler, a second task
+system, or a remote executor. The listener binds **only** this machine's
+Tailscale `100.x` IPv4 address and accepts `POST /api/sync` and
+`GET /api/node/status` with a shared bearer token.
+
+```bash
+edda node start [--config <path>] [--insecure-bind]
+edda node status [--config <path>] [--insecure-bind] [--json]
+edda node peers [--config <path>] [--insecure-bind] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config <path>` | Node config path (default: `<store root>/node.json`). |
+| `--insecure-bind` | Test-only: allow a non-tailnet bind / peer host and print a stderr warning. Never used for the real two-machine proof. |
+| `--json` | Machine-readable output for `status` / `peers`. |
+
+`node.json` is machine-local and never committed:
+
+```json
+{
+  "version": 1,
+  "node": { "alias": "4090", "bind": "100.105.187.119", "port": 6850 },
+  "peers": [
+    { "alias": "docs", "host": "100.116.144.116", "port": 6850, "tokenEnv": "EDDA_NODE_TOKEN" }
+  ]
+}
+```
+
+- `alias` is a machine label (`^[a-z0-9._-]{1,64}$`); a session id, run id or
+  path is never an address.
+- `tokenEnv` names an environment variable holding the shared token. The
+  **value** is read at request time and never stored, printed, or replicated;
+  an unset token is a 401, not an open door. `edda node start` reads its own
+  accepted token from `EDDA_NODE_TOKEN`.
+- Unknown keys anywhere in `node.json` fail closed and name the offending key.
+
+`POST /api/sync` carries `{version, kind, originMachine, events[]}` where every
+envelope is `deny_unknown_fields`. Unknown fields — and secret-shaped foreign
+fields such as `sessionId`, `path`, `ownerRoot` or `token` — are refused by
+name, never ignored, and never partially applied. Import dedupes on
+`(originMachine, eventId)`, so a reconnect flush loses nothing and applies
+nothing twice. The outbound queue (`<store root>/node/queue/<peer>.jsonl`) is on
+disk and survives a restart: `sent → delivered → acked`.
+
+`edda node status` is a **local observation**: the machine, bind, revision
+(from `EDDA_PI_RELEASE_ID` or git HEAD, else `null`), per-peer queue counts and
+last-success time, and a bounded reachability probe. An unreachable peer is
+reported `reachable: false` with a reason, never as a silent zero. `edda node
+peers` lists the configured peers with their last-seen facts.
+
 ### `edda watch`
 
 Launch the real-time TUI showing active sessions, events, and coordination state.
