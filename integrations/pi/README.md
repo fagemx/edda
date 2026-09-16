@@ -61,6 +61,10 @@ node integrations/pi/cli.mjs launch --project C:/my-project --provider openroute
 node integrations/pi/cli.mjs run-status RUN_ID
 node integrations/pi/cli.mjs run-stop RUN_ID
 node integrations/pi/cli.mjs run-resume RUN_ID
+node integrations/pi/cli.mjs run-recovery enroll RUN_ID --scope "declared bounded scope" [--max-attempts 3] [--cooldown-ms 60000]
+node integrations/pi/cli.mjs run-recovery status [RUN_ID]
+node integrations/pi/cli.mjs run-recovery revoke RUN_ID [--reason "why"]
+node integrations/pi/cli.mjs run-recover [--run RUN_ID] [--max N]
 ```
 
 The run ID is printed before launch. The result contains a separate Pi session ID,
@@ -105,6 +109,15 @@ session file is missing/mismatched, or a launch/resume lock is ambiguous. Inspec
 that evidence rather than creating another run ID on a timeout. A crash before
 the initial prompt is sent can leave an unknown initial intent; recovery never
 blindly replays it. Newly created empty sessions may not yet have a persisted file.
+
+A bounded, per-run opt-in is the one exception: `run-recovery enroll` records a
+recovery policy for one owner-bound run, and an owner-bound session start resumes
+it, sends exactly one deterministic reconnect message (never the original prompt),
+and respects `--max-attempts` plus `--cooldown-ms`. It never revives a live writer,
+an intentionally `stopped` run, or a paused/revoked run, and it never repairs an
+unreadable record. `run-recovery revoke` stops revival until an explicit re-enroll.
+In-process recovery is opt-in (`EDDA_RECOVERY=off` disables the trigger);
+host-restart and system-autostart recovery are not installed.
 
 This is the process/event entry point for management. The optional supervisor below
 handles bounded event decisions; neither component wakes the Codex desktop conversation.
@@ -465,8 +478,9 @@ acceptance. Only `started` and subsequent states confirm observed ingestion.
 Plain assistant questions are `idle`, not `waiting_user`: no reliable structured
 signal distinguishes a conversational question from a final answer. Waiting on
 a subagent may appear as `executing_tool`; no subagent relationship is guessed.
-The integration never automatically sends "continue", answers approvals, or
-claims task success. No message text, tool arguments or auth token is returned by
+The integration never automatically answers approvals or claims task success; the
+only automatic message is the bounded recovery reconnect for an explicitly
+enrolled run. No message text, tool arguments or auth token is returned by
 status/receipt queries.
 
 ## Bidirectional conversations
@@ -758,6 +772,9 @@ be attributed. Its reported usage is separate from CI and is not a general bench
 ## Remaining usability/product work
 
 - Automatic selection of newly created review/fix tasks and structured acceptance joins.
+- Host-restart and system-autostart recovery for enrolled runs: in-process opt-in
+  recovery ships here; a resident host and OS autostart are separate, explicitly
+  unauthorized stages.
 - Bootstrap/update convenience for already-running old extensions; one idle reload
   is still needed to load a new capability.
 - Full authority resolution and manager/strong-model escalation policy; no natural

@@ -208,7 +208,54 @@ is read back from the channel record rather than the old launch snapshot.
 If a runner is unexpectedly unreachable, inspect its run and persisted evidence. Resume refuses
 when an old process may still be alive, a lock is ambiguous or the session is
 missing/corrupt. Preserve the record. Do not delete locks or reset the registry
-as an onboarding shortcut. Same-session recovery is not automatic crash recovery.
+as an onboarding shortcut. Same-session recovery is manual unless the run is
+explicitly enrolled with `edda-pi run-recovery enroll` (next section).
+
+## Bounded opt-in recovery after an interruption
+
+A managed run never restarts on its own. Recovery is an explicit, per-run opt-in
+an operator sets once; after that, an owner-bound session start may resume the
+enrolled run without deciding again.
+
+```text
+edda-pi run-recovery enroll <runId> --scope "<declared bounded scope>" [--max-attempts 3] [--cooldown-ms 60000]
+edda-pi run-recovery status [<runId>]
+edda-pi run-recovery revoke <runId> [--reason "<why>"]
+edda-pi run-recover [--run <runId>] [--max 1]
+```
+
+`enroll` refuses a run that is not owner-bound and names the fix: adopt it with
+`edda-pi owner adopt --run <runId> --owner <ref>`, or, when the pinned runtime has
+no adoption endpoint, stop it and run `edda-pi run-resume <runId> --runtime
+current` to re-pin first. Re-enrolling updates the scope and limits but keeps the
+recorded attempts (no reset); `revoke` disables revival until an explicit
+re-enroll and keeps the history.
+
+A pass is eligible only when none of these hold. It **never** revives a live
+writer, an intentionally `stopped` run, or a run paused/revoked in the existing
+supervision record; it never acts when the run record is unreadable (that is
+surfaced as `record_unavailable` for a decision, never repaired); and it never
+exceeds `--max-attempts` or the `--cooldown-ms` window between attempts. Each pass
+resumes at most `--max` runs (default 1, clamped to 5).
+
+When a run is resumed, exactly one bounded reconnect message is sent, with a
+deterministic id derived from the run and the attempt number. It states that this
+is a bounded recovery after an interruption, that the original prompt is **not**
+replayed, names the declared `scope`, and asks the session to continue only inside
+its authorized scope and to report a milestone or a concrete stopping reason.
+`status` and the pass result show whether the reconnect was `sent`, `unknown` or
+`unavailable`; a receipt other than `sent` is recorded and never resent.
+
+Recovery is honest about its three tiers:
+
+- **In-process recovery (delivered, opt-in).** One bounded pass runs when an
+owner-bound session starts (turn it off with `EDDA_RECOVERY=off`). It adds no
+timer, interval or retry loop.
+- **Host-restart recovery (not claimed).** Reviving after the whole host restarts
+needs a resident host; the agent-manager is observation-only by contract, so this
+is not claimed here.
+- **System autostart (not installed).** Registering recovery at OS login requires
+separate authorization and is not part of this entry.
 
 ## Continue a session from a saved native capsule
 
@@ -246,7 +293,7 @@ than refused as wrong-repository. `--edda-bin <path>` (or `EDDA_BIN`) selects th
 | Worker finishes or errors | Public conversation, message receipts and Pi inbox retain evidence | Parent notified or result accepted |
 | Controller changes | New controller uses this entry and the same registry; inspects existing work | Old controller authority transferred |
 | Pi intentionally stopped | `run-resume`, inspect, then explicit message | Initial prompt replay or automatic work restart |
-| Controller/Pi crashes | Recorded state visible; explicit same-session recovery where safe | Guaranteed automatic restart or power-loss recovery |
+| Controller/Pi crashes | Recorded state visible; explicit same-session recovery; an enrolled owner-bound run is resumed by the bounded recovery pass above | Guaranteed automatic restart or power-loss recovery |
 | Session file unusable | Preserve it; use `edda-pi adopt --capsule` or native Edda continuity when previously saved | Silent fresh worker or reconstructed private history |
 | Working client upgraded | Existing runs keep their pinned runtime | In-place upgrade of running sessions |
 | Workbench unavailable | These commands continue independently | Workbench is a required gate |
@@ -274,10 +321,12 @@ No scheduler or polling was added; observation still checks on its existing
 polling interval and before delivery. It is not arbitrary child discovery or
 automatic restart. No supervisor is required for launch, read, send or resume.
 
-Managed fork, automatic owner wake, automatic process recovery and automatic
-workbench registration remain unsupported by this entry. They are not steps the
-user is expected to implement with a private shell script. Report a concrete gap
-if your delivery requires them; do not claim them enabled by installing this CLI.
+Managed fork, automatic owner wake and automatic workbench registration remain
+unsupported by this entry. Automatic process recovery is delivered only as the
+bounded, per-run opt-in above; host-restart and system-autostart recovery are not
+installed. They are not steps the user is expected to implement with a private
+shell script. Report a concrete gap if your delivery requires them; do not claim
+them enabled by installing this CLI.
 
 ## Upgrade or remove
 
