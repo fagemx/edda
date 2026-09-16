@@ -74,13 +74,13 @@ async function closedPort() {
 }
 
 // A stub runner/status and message endpoint. Records each POST /messages body.
-async function runnerServer(t, { runId, sessionId, live = true, messageStatus = 'accepted' }) {
+async function runnerServer(t, { runId, sessionId, live = true, messageStatus = 'accepted', owner = 'assistant/x' }) {
   const serviceId = randomUUID();
   const messages = [];
   const server = createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/status') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ runId, serviceId, sessionId, live, status: live ? 'ready' : 'stopped' }));
+      res.end(JSON.stringify({ runId, serviceId, sessionId, owner, live, status: live ? 'ready' : 'stopped' }));
       return;
     }
     if (req.method === 'POST' && req.url === '/messages') {
@@ -141,7 +141,7 @@ test('revoke disables the policy, keeps history and makes it not enrolled', asyn
   const { root } = await fixture(t);
   const run = await managedRun(root, {});
   await enrollRecovery(root, run.runId, { scope: 'do the thing' });
-  const status = { live: false, lastRecordedPhase: 'ready' };
+  const status = { live: false, lastRecordedPhase: 'ready', continuity: 'owner-bound', owner: 'assistant/x' };
   const before = recoveryDecision({ policy: readRecovery(root, run.runId), status });
   assert.equal(before.decision, 'eligible');
   const revoked = revokeRecovery(root, run.runId, { reason: 'operator decision' });
@@ -168,7 +168,7 @@ test('enroll keeps prior attempts when re-scoping an enrolled run', async (t) =>
 
 test('recoveryDecision classifies each boundary with its own reason', () => {
   const now = Date.parse('2026-09-13T12:00:00.000Z');
-  const status = { live: false, lastRecordedPhase: 'ready' };
+  const status = { live: false, lastRecordedPhase: 'ready', continuity: 'owner-bound', owner: 'assistant/x' };
   assert.deepEqual(recoveryDecision({}), { decision: 'skip', reason: 'not_enrolled' });
   assert.deepEqual(recoveryDecision({ policy: basePolicy({ enabled: false }), status, now }),
     { decision: 'skip', reason: 'not_enrolled' });
@@ -176,13 +176,26 @@ test('recoveryDecision classifies each boundary with its own reason', () => {
     { decision: 'skip', reason: 'live_holder' });
   assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { ...status, lastRecordedPhase: 'stopped' }, now }),
     { decision: 'skip', reason: 'intentionally_stopped' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { ...status, lastRecordedPhase: 'stopping' }, now }),
+    { decision: 'attention', reason: 'stopping_unproven' });
   assert.deepEqual(recoveryDecision({ policy: basePolicy(), status, supervision: { enabled: false, action: 'paused' }, now }),
     { decision: 'skip', reason: 'paused' });
   assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { live: false, status: 'record_unavailable', lastRecordedPhase: null }, now }),
     { decision: 'attention', reason: 'record_unavailable' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { ...status, continuity: 'session-addressed', owner: null }, now }),
+    { decision: 'attention', reason: 'owner_missing' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy(), status: { ...status, owner: null }, now }),
+    { decision: 'attention', reason: 'owner_missing' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy({ maxAttempts: 'many' }), status, now }),
+    { decision: 'attention', reason: 'policy_invalid' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy({ cooldownMs: 1.5 }), status, now }),
+    { decision: 'attention', reason: 'policy_invalid' });
+  assert.deepEqual(recoveryDecision({ policy: basePolicy({ attempts: [{ outcome: 'refused' }] }), status, now }),
+    { decision: 'attention', reason: 'policy_invalid' });
   assert.deepEqual(recoveryDecision({ policy: basePolicy({ attempts: [{ at: '2026-09-13T11:59:30.000Z' }] }), status, now }),
     { decision: 'skip', reason: 'cooldown' });
-  assert.deepEqual(recoveryDecision({ policy: basePolicy({ attempts: [{}, {}, {}] }), status, now }),
+  assert.deepEqual(recoveryDecision({ policy: basePolicy({ attempts: [
+    { at: '2026-09-13T11:00:00.000Z' }, { at: '2026-09-13T11:01:00.000Z' }, { at: '2026-09-13T11:02:00.000Z' }] }), status, now }),
     { decision: 'skip', reason: 'attempts_exhausted' });
   assert.deepEqual(recoveryDecision({ policy: basePolicy(), status, now }),
     { decision: 'eligible', reason: 'eligible' });
@@ -236,6 +249,95 @@ test('a pass never resumes a live holder, a stop, a pause, a corrupt record or a
   assert.equal(results[corrupt.runId].decision, 'attention');
   assert.equal(results[corrupt.runId].reason, 'record_unavailable');
   assert.equal(results[exhausted.runId].reason, 'attempts_exhausted');
+});
+
+test('an unreadable or identity-mismatched supervision record is attention, never resumed', async (t) => {
+  const { root } = await fixture(t);
+  const resumeCalls = [];
+  const resume = async (_root, id) => { resumeCalls.push(id); return { live: true }; };
+
+  // unreadable: NUL bytes where a pause marker would be
+  const corrupt = await managedRun(root, {});
+  await enrollRecovery(root, corrupt.runId, { scope: 'x' });
+  await mkdir(join(root, 'supervision'), { recursive: true });
+  await writeFile(join(root, 'supervision', `${digest(corrupt.sessionId)}.json`), Buffer.alloc(200, 0));
+
+  // identity mismatch: a readable record that names another session
+  const mismatch = await managedRun(root, {});
+  await enrollRecovery(root, mismatch.runId, { scope: 'x' });
+  await writeSupervision(root, mismatch.sessionId, { sessionId: 'other-session', enabled: true, action: 'observed' });
+
+  // control: a readable pause is a skip, not attention
+  const paused = await managedRun(root, {});
+  await enrollRecovery(root, paused.runId, { scope: 'x' });
+  await writeSupervision(root, paused.sessionId, { enabled: false, action: 'paused' });
+
+  const pass = await recoveryPass(root, { max: 5, resume, ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  const results = Object.fromEntries(pass.results.map((entry) => [entry.runId, entry]));
+  assert.equal(results[corrupt.runId].decision, 'attention');
+  assert.equal(results[corrupt.runId].reason, 'supervision_unavailable');
+  assert.equal(results[mismatch.runId].decision, 'attention');
+  assert.equal(results[mismatch.runId].reason, 'supervision_unavailable');
+  assert.equal(results[paused.runId].decision, 'skip');
+  assert.equal(results[paused.runId].reason, 'paused');
+  assert.equal(resumeCalls.length, 0);
+  assert.equal(pass.resumed, 0);
+});
+
+test('an enrolled run whose owner identity is gone is attention, never resumed', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, {});
+  await enrollRecovery(root, run.runId, { scope: 'x' });
+  await writeFile(join(run.dir, 'config.json'), JSON.stringify({ version: 1, runId: run.runId, root: resolve(root),
+    project: resolve(root), release: { id: 'a'.repeat(64) } }));
+  await writeFile(join(run.dir, 'state.json'), JSON.stringify({ runId: run.runId, sessionId: run.sessionId, phase: 'ready' }));
+  let called = false;
+  const pass = await recoveryPass(root, { resume: async () => { called = true; return { live: true }; },
+    ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  const entry = pass.results.find((r) => r.runId === run.runId);
+  assert.equal(entry.decision, 'attention');
+  assert.equal(entry.reason, 'owner_missing');
+  assert.equal(called, false);
+});
+
+test('a malformed policy surfaces as policy_invalid and is never resumed', async (t) => {
+  const { root } = await fixture(t);
+  const resumeCalls = [];
+  const resume = async (_root, id) => { resumeCalls.push(id); return { live: true }; };
+
+  const badLimit = await managedRun(root, {});
+  await enrollRecovery(root, badLimit.runId, { scope: 'x' });
+  await writeFile(join(badLimit.dir, 'recovery.json'), JSON.stringify({ ...readRecovery(root, badLimit.runId), maxAttempts: 'many' }));
+
+  const badCooldown = await managedRun(root, {});
+  await enrollRecovery(root, badCooldown.runId, { scope: 'x' });
+  await writeFile(join(badCooldown.dir, 'recovery.json'), JSON.stringify({ ...readRecovery(root, badCooldown.runId), cooldownMs: 1.5 }));
+
+  const badAttempt = await managedRun(root, {});
+  await enrollRecovery(root, badAttempt.runId, { scope: 'x' });
+  await writeFile(join(badAttempt.dir, 'recovery.json'), JSON.stringify({ ...readRecovery(root, badAttempt.runId),
+    attempts: [{ outcome: 'refused', reason: 'x', reconnect: 'none' }] }));
+
+  const pass = await recoveryPass(root, { max: 5, resume, ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  assert.equal(resumeCalls.length, 0);
+  for (const run of [badLimit, badCooldown, badAttempt]) {
+    const entry = pass.results.find((r) => r.runId === run.runId);
+    assert.equal(entry.decision, 'attention');
+    assert.equal(entry.reason, 'policy_invalid');
+  }
+});
+
+test('a stopping run is not proven dead and is never resumed', async (t) => {
+  const { root } = await fixture(t);
+  const run = await managedRun(root, { phase: 'stopping' });
+  await enrollRecovery(root, run.runId, { scope: 'x' });
+  let called = false;
+  const pass = await recoveryPass(root, { resume: async () => { called = true; return { live: true }; },
+    ownerReturns: async () => ({ status: 'ok', pending: 0 }) });
+  const entry = pass.results.find((r) => r.runId === run.runId);
+  assert.equal(entry.decision, 'attention');
+  assert.equal(entry.reason, 'stopping_unproven');
+  assert.equal(called, false);
 });
 
 test('an eligible run resumes once, sends one deterministic reconnect, then cools down', async (t) => {

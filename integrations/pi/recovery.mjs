@@ -135,18 +135,38 @@ export function revokeRecovery(root, runId, { reason } = {}) {
   return next;
 }
 
+// A durable policy must carry integer limits and parseable attempt times. A
+// malformed shape must surface as attention, never silently disable the attempt
+// cap or the cooldown.
+function policyShapeValid(policy) {
+  if (!Number.isInteger(policy.maxAttempts) || policy.maxAttempts < 1) return false;
+  if (!Number.isInteger(policy.cooldownMs) || policy.cooldownMs < 0) return false;
+  if (policy.attempts !== undefined && !Array.isArray(policy.attempts)) return false;
+  for (const entry of Array.isArray(policy.attempts) ? policy.attempts : []) {
+    if (!entry || !Number.isFinite(Date.parse(entry.at))) return false;
+  }
+  return true;
+}
+
 // Pure eligibility. No I/O, no clock read: `now` is passed in.
 export function recoveryDecision({ policy, status, supervision, now = Date.now() } = {}) {
   if (!policy || policy.enabled === false) return { decision: 'skip', reason: 'not_enrolled' };
   if (status?.live === true) return { decision: 'skip', reason: 'live_holder' };
   if (status?.lastRecordedPhase === 'stopped') return { decision: 'skip', reason: 'intentionally_stopped' };
+  // A stop that was killed mid-way is not a proven dead run: never resume it.
+  if (status?.lastRecordedPhase === 'stopping') return { decision: 'attention', reason: 'stopping_unproven' };
   if (supervision && (supervision.enabled === false || supervision.action === 'paused')) return { decision: 'skip', reason: 'paused' };
   if (status?.status === 'record_unavailable') return { decision: 'attention', reason: 'record_unavailable' };
+  // The durable enrollment pre-authorizes one owner; without that identity the
+  // continuation has no authority, so surface it instead of resuming.
+  if (status?.continuity !== 'owner-bound' || typeof status?.owner !== 'string' || !status.owner) {
+    return { decision: 'attention', reason: 'owner_missing' };
+  }
+  if (!policyShapeValid(policy)) return { decision: 'attention', reason: 'policy_invalid' };
   const attempts = Array.isArray(policy.attempts) ? policy.attempts : [];
-  if (Number.isInteger(policy.maxAttempts) && attempts.length >= policy.maxAttempts) return { decision: 'skip', reason: 'attempts_exhausted' };
+  if (attempts.length >= policy.maxAttempts) return { decision: 'skip', reason: 'attempts_exhausted' };
   const last = attempts.at(-1);
-  const at = last ? Date.parse(last.at) : NaN;
-  if (Number.isFinite(at) && Number.isFinite(policy.cooldownMs) && now - at < policy.cooldownMs) return { decision: 'skip', reason: 'cooldown' };
+  if (last && now - Date.parse(last.at) < policy.cooldownMs) return { decision: 'skip', reason: 'cooldown' };
   return { decision: 'eligible', reason: 'eligible' };
 }
 
@@ -224,9 +244,15 @@ export async function recoveryPass(root, { runId, max = 1, resume = resumeManage
       results.push({ runId: run, decision: 'attention', reason: 'status_unavailable', outcome: null, reconnect: 'none', receipt: null, error: error.message });
       continue;
     }
-    let supervision = null;
+    // An absent supervision record is `null` (not paused); an unreadable or
+    // identity-mismatched one can never be read as "not paused", so it is
+    // surfaced as attention and the run is not resumed.
+    let supervision;
     try { supervision = readEnrollment(root, policy.sessionId ?? status.sessionId); }
-    catch { supervision = null; }
+    catch (error) {
+      results.push({ runId: run, decision: 'attention', reason: 'supervision_unavailable', outcome: null, reconnect: 'none', receipt: null, error: error.message });
+      continue;
+    }
     const verdict = recoveryDecision({ policy, status, supervision, now });
     if (verdict.decision !== 'eligible') {
       results.push({ runId: run, decision: verdict.decision, reason: verdict.reason, outcome: null, reconnect: 'none', receipt: null });
