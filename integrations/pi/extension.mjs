@@ -1,5 +1,8 @@
 import { startChannel } from './channel.mjs';
-import { defaultRoot, digest, readJson } from './store.mjs';
+import { defaultRoot, digest, readJson, readRecord, recover, sessionDir } from './store.mjs';
+import { preserveDamagedState } from './channel-recovery.mjs';
+import { requestSession } from './client.mjs';
+import { randomUUID } from 'node:crypto';
 import { managedDir } from './managed-store.mjs';
 import { pageConversation, projectEntry } from './conversation.mjs';
 import { reportSchema } from './handoff-schema.mjs';
@@ -39,6 +42,7 @@ export default function eddaSessionChannel(pi) {
   let channel;
   let failed = false;
   let injectedRevision;
+  let failureReason = null;
   pi.registerFlag('edda-session-label', { description: 'Display label for the local Edda session channel', type: 'string', default: '' });
 
   async function shutdown() {
@@ -56,11 +60,16 @@ export default function eddaSessionChannel(pi) {
       void shutdown().catch(() => {});
     }
   }
-  pi.on('session_start', async (_event, ctx) => {
+  async function connect(ctx, allowDamagedState = false) {
     await shutdown();
     failed = false;
+    failureReason = null;
     injectedRevision = undefined;
     try {
+      const sessionId = ctx.sessionManager.getSessionId();
+      if (!allowDamagedState && readRecord(join(sessionDir(defaultRoot(), sessionId), 'state.json')).error) {
+        throw new Error('State record unreadable; use /edda-session-recover to preserve it before reconnecting');
+      }
       channel = await startChannel({
         root: defaultRoot(), sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
         label: pi.getFlag('edda-session-label') || '',
@@ -74,9 +83,11 @@ export default function eddaSessionChannel(pi) {
       ctx.ui?.setStatus?.('edda-session', `Edda: ${channel.sessionId.slice(0, 8)}`);
     } catch (error) {
       failed = true;
+      failureReason = error.message;
       ctx.ui?.notify?.(`Edda session channel unavailable: ${error.message}`, 'error');
     }
-  });
+  }
+  pi.on('session_start', (_event, ctx) => connect(ctx));
   pi.on('session_shutdown', shutdown);
   pi.on('before_agent_start', (_event, ctx) => {
     let result;
@@ -141,7 +152,36 @@ export default function eddaSessionChannel(pi) {
   pi.registerCommand('edda-session', {
     description: 'Show this Pi session channel identity and state',
     handler: async (_args, ctx) => {
-      ctx.ui.notify(channel ? JSON.stringify(channel.snapshot(), null, 2) : 'Edda session channel is unavailable', channel ? 'info' : 'error');
+      ctx.ui.notify(channel ? JSON.stringify(channel.snapshot(), null, 2) :
+        `Edda session channel unavailable: ${failureReason || 'not connected'}. Run /edda-session-recover if the prior owner is dead.`, channel ? 'info' : 'error');
+    },
+  });
+  pi.registerCommand('edda-session-recover', {
+    description: 'Explicitly reconnect this original Pi session after proving its previous owner is dead',
+    handler: async (_args, ctx) => {
+      if (channel && !failed) { ctx.ui.notify('Edda channel is already live; nothing was changed.', 'info'); return; }
+      const root = defaultRoot(), sessionId = ctx.sessionManager.getSessionId();
+      try {
+        const owner = readJson(join(sessionDir(root, sessionId), 'owner.json'));
+        if (owner) {
+          if (owner.sessionId !== sessionId) throw new Error('Owner session identity mismatch; recovery refused');
+          // A reachable endpoint is proof of another live owner, even if its PID
+          // was reused. For an unreachable but live/uncertain PID, recover() fails
+          // closed; the explicit CLI path handles separately proven PID reuse.
+          let live = false;
+          try { await requestSession(root, sessionId, '/status'); live = true; } catch { /* recover still verifies the PID */ }
+          if (live) throw new Error('Owner channel is still live; recovery refused');
+          preserveDamagedState(root, sessionId, owner.instanceId);
+          recover(root, sessionId, owner.instanceId);
+        } else {
+          preserveDamagedState(root, sessionId, randomUUID());
+        }
+        await connect(ctx, true);
+        if (failed) throw new Error(failureReason);
+        ctx.ui.notify(`Edda channel reconnected for original session ${sessionId}; no prompt or message was replayed.`, 'info');
+      } catch (error) {
+        ctx.ui.notify(`Edda recovery refused: ${error.message}. Keep the original records; inspect edda-pi doctor ${sessionId} and edda-pi runtime-info.`, 'error');
+      }
     },
   });
 }

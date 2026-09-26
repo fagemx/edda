@@ -1,9 +1,10 @@
-import { join, basename } from 'node:path';
+import { join, basename, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { requestSession, listSessions } from './client.mjs';
 import { enroll, readEnrollment } from './supervision.mjs';
 import { readJson, registry, writeJson, sessionDir } from './store.mjs';
 import { dependencyConfiguration, findOwnerSubscription } from './dependency-observer.mjs';
+import { runtimeInfo } from './activation.mjs';
 
 export async function followDependencies(root, id, { project, taskIds, notify = false, maxNotifications = 10, scope }) {
   let state;
@@ -92,13 +93,20 @@ export async function doctor(root, selectedId) {
     return { status: 'not_registered', sessionId: selectedId, unreadable,
       nextAction: 'Load the Pi extension and use list to obtain its exact session ID.' };
   }
+  const installed = runtimeInfo(root);
+  const pathKey = (path) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
+  const knownChannels = [installed.channel.path, ...installed.releases.filter((v) => v.verified).map((v) => v.channel)].map(pathKey);
   const sessions = await Promise.all(chosen.map(async (r) => {
     const base = { sessionId: r.sessionId, name: r.label || basename(r.cwd || '') || r.sessionId,
       cwd: r.cwd, live: r.live, runtimeState: r.state };
     if (r.error?.code === 'record_unavailable') return { ...base, readiness: 'record_unavailable',
       error: { ...r.error },
-      nextAction: 'The record is unreadable and was not repaired; use the identity shown and the registry list to inspect around it.' };
+      nextAction: 'The record was preserved. Resume the original Pi conversation with the installed extension; use /edda-session-recover there to preserve damaged state and reconnect only after the old owner is dead. For older loaded extensions use edda-pi recover SESSION_ID --instance OLD_INSTANCE_UUID, then reopen the same Pi session with the installed extension.' };
     if (!r.live) return { ...base, readiness: 'offline', nextAction: 'Inspect the original Pi process; no automatic restart.' };
+    if (typeof r.integration?.modulePath !== 'string' || !knownChannels.includes(pathKey(r.integration.modulePath))) {
+      return { ...base, readiness: 'stale_extension', loadedModule: r.integration?.modulePath || null,
+        nextAction: 'This live session loaded an unverified/stale channel. Preserve its work; reopen the SAME Pi session with the installed extension from edda-pi runtime-info, without restarting other sessions.' };
+    }
     if (!r.capabilities?.includes('dependencies')) return { ...base, readiness: 'needs_reload', nextAction: 'Run /reload when idle to load dependency observation.' };
     const observer = await requestSession(root, r.sessionId, '/dependencies');
     const handoff = r.capabilities.includes('handoff') ? await requestSession(root, r.sessionId, '/handoff?budget=16384') : null;

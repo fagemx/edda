@@ -174,9 +174,11 @@ returns for it. To use the owner mailbox or dependency observation there:
 `edda-pi runtime-info` also reports the installed `channel` module and the digest-verified installed
 `releases` (`id`, `version`, `channel`, `extension`, `verified`). A live session reports its loaded channel
 as `integration.modulePath` in `edda-pi list`; if it matches neither `runtime-info.channel.path` nor a
-verified `runtime-info.releases[].channel`, the session loaded a stale or foreign copy and its owner-mailbox
-pickup fails silently. Re-open it with the installed extension path, or reinstall so a single installed copy
-is loaded.
+verified `runtime-info.releases[].channel`, the session loaded a stale or foreign copy; `edda-pi doctor <sessionId>`
+reports `stale_extension` for a reachable session. An already loaded module is not upgraded in place. At idle,
+exit only that Pi process and reopen its **original** session file with
+`pi --no-extensions -e <runtime-info.extension.path> --session <original-session-file>`;
+explicitly re-enable any other needed extensions. Do not change global Pi settings or start a new session.
 
 ## 6. Stop and resume without replay
 
@@ -208,7 +210,15 @@ is read back from the channel record rather than the old launch snapshot.
 If a runner is unexpectedly unreachable, inspect its run and persisted evidence. Resume refuses
 when an old process may still be alive, a lock is ambiguous or the session is
 missing/corrupt. Preserve the record. Do not delete locks or reset the registry
-as an onboarding shortcut. Same-session recovery is not automatic crash recovery.
+as an onboarding shortcut. For a hand-opened Pi conversation whose Edda channel could not register after a restart, check `/session`
+for the original Pi identity, then use `/edda-session-recover` in that same conversation with the installed
+extension. It refuses a reachable or unproven-live owner; a corrupt state is copied to a `.damaged` evidence
+file before the reconnect replaces it. The old receipts survive; prompts and unknown deliveries are not
+replayed. On a previously loaded extension without this command, inspect `edda-pi doctor <sessionId>` and
+`edda-pi list`, run `edda-pi recover <sessionId> --instance <oldInstanceId>` explicitly when the old
+owner is no longer live, then reopen the same session file with the installed extension. If the owner or
+lock cannot be proved safe, stop; never delete files or use `run-resume` on a hand-opened conversation.
+Same-session recovery is not automatic crash recovery.
 
 ## Continue a session from a saved native capsule
 

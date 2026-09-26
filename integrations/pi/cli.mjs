@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { defaultRoot, recover, validateId } from './store.mjs';
+import { preserveDamagedState } from './channel-recovery.mjs';
 import { listSessions, requestSession, getReceipt, inspectSession, prepareHandoff } from './client.mjs';
 import { enroll, watch, checkpoint, reply, managementBrief } from './supervision.mjs';
 import { composeHandoff } from './compose.mjs';
@@ -218,6 +219,7 @@ async function main(args) {
     // unreachable one means a live PID is a reused number, not the owner.
     let livePidIsOwned = false;
     try { await requestSession(root, sessionId, '/status'); livePidIsOwned = true; } catch { livePidIsOwned = false; }
+    preserveDamagedState(root, sessionId, options['--instance']);
     result = recover(root, sessionId, options['--instance'], { livePidIsOwned });
   }
   if (command === 'conversation') { try { result = await inspectSession(root, sessionId, { after: options['--after'], limit: options['--limit'] }); } catch (error) { throw registryContext(error, sessionId, root); } }

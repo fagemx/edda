@@ -696,13 +696,15 @@ this host; phone connectivity itself is outside this package.
 
 An exclusive owner record prevents two channel instances for one Pi session.
 Normal session switch/reload/shutdown closes the endpoint and releases ownership.
-After a crash inspect the session and, only when its PID is dead, run:
+After a restart, resume the **original** Pi conversation (check `/session` for its original ID) with the installed extension. If its channel fails to register, run `/edda-session-recover` in that conversation. It refuses a reachable owner or a PID that cannot be proved dead, keeps an unreadable `state.json` as `state.json.<old-instance>.damaged` before replacement, and reconnects the same session without replaying prompts or messages. Check `edda-pi doctor SESSION_ID` for `record_unavailable` or `stale_extension`; compare the loaded channel with `edda-pi runtime-info`. A stale loaded extension cannot be upgraded inside its running process. At idle, exit only that Pi process and reopen its **same session file** using `pi --no-extensions -e <runtime-info.extension.path> --session <original-session-file>` (re-enable any other required extensions explicitly). This does not change global Pi settings or upgrade other sessions.
+
+For a previously loaded extension without `/edda-session-recover`, first inspect the exact old instance with `edda-pi list`/`doctor`, then explicitly run:
 
 ```powershell
-node integrations/pi/cli.mjs recover SESSION_ID --instance OLD_INSTANCE_UUID
+edda-pi recover SESSION_ID --instance OLD_INSTANCE_UUID
 ```
 
-Recovery validates the stored instance and dead PID and preserves receipts.
+Only after the old owner is verified dead, reopen the original Pi session with the installed extension as above; do not create a new conversation. CLI recovery preserves an unreadable state before reclaiming ownership. Recovery validates the stored instance and dead PID and preserves receipts.
 PID reuse fails closed. Recovery does not launch Pi, replay messages or restore
 its in-memory queue. Resume the session normally; old message IDs still dedupe.
 On reopening, previous-instance nonterminal receipts become durable `unknown`
@@ -711,8 +713,7 @@ If the process crashes during the very short lifecycle lock operation, a
 `lifecycle.lock` may need manual inspection/removal after proving no owner lives.
 Receipts are bounded to 1,000 per session; retain/archive evidence before resetting
 a session's registry. No automatic deletion or unbounded offline queue is provided.
-Atomic file replacement protects against partial process writes; power-loss
-durability and filesystem corruption recovery are not guaranteed.
+The observed NUL corruption trigger is unknown; sessions that loaded an old 0.7.0 source extension do not establish a regression in the repaired 0.8.0 writer. Unreadable non-file state cannot safely be copied and blocks recovery. Atomic replacement and flushing protect future writes; power-loss and filesystem corruption recovery are not guaranteed.
 
 ## Verify
 
